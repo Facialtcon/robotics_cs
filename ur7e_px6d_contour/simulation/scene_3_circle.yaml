@@ -1,0 +1,11 @@
+base_config: simulation_config.yaml
+scene_name: circle
+target_shape: circle
+target_center: [0.0, 0.0]
+target_radius: 0.055
+calibration_point_0: [-0.14, 0.0]
+calibration_point_1: [-0.10, 0.0]
+start_point: [-0.14, 0.0]
+policy:
+  tangent_step: 0.006
+  boundary_recovery_enabled: true

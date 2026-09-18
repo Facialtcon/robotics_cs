@@ -1,0 +1,10 @@
+base_config: simulation_config.yaml
+scene_name: rotated_rectangle_30_deg
+target_shape: rotated_rectangle
+target_center: [0.0, 0.0]
+target_width: 0.12
+target_height: 0.075
+target_rotation_deg: 30.0
+calibration_point_0: [-0.15, -0.015]
+calibration_point_1: [-0.10, -0.015]
+start_point: [-0.15, -0.015]

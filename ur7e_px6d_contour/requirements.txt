@@ -1,0 +1,7 @@
+numpy>=1.24
+matplotlib>=3.7
+Pillow>=9.0
+PyYAML>=6.0
+pyserial>=3.5
+ur-rtde>=1.5
+pytest>=8.0

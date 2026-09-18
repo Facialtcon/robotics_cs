@@ -1,0 +1,157 @@
+# Mock + dry-run remains the default. Execute mode has no boolean confirmation gate.
+robot:
+  robot_ip: 192.168.1.10
+  max_tcp_speed: 0.030          # m/s; covers the 0.030 m/s safe-return horizontal speed
+  speed_acceleration: 0.050     # m/s^2; MUST CONFIRM on site
+  stop_deceleration: 0.200      # m/s^2; MUST CONFIRM on site
+  fixed_z: null                 # null = latch actual start Z; verify before execute
+  fixed_z_tolerance: 0.001      # m; MUST CONFIRM from measured RTDE noise
+  orientation_tolerance_rad: 0.01745  # ~1 degree; MUST CONFIRM
+
+sensor:
+  serial_port: /dev/serial/by-id/usb-GigaDevice_GD32-CDC_ACM_1B556A774A92-if00
+  baudrate: 921600
+  serial_format: 8N1
+  crc8_polynomial: 0x07
+  poll_rate_hz: 100.0
+  timeout_sec: 0.050
+  startup_delay_sec: 2.0       # PX6D v1.0.1 USB CDC settle time after open
+
+preprocessing:
+  # EMA convention: filtered = alpha * previous + (1-alpha) * current.
+  filter_alpha: 0.80
+  baseline:
+    capture_on_start: true
+    sample_count: 100
+    condition: unloaded_stationary_air  # Do not capture this while touching target.
+  gravity_wrench_sensor: [0, 0, 0, 0, 0, 0]  # MUST CALIBRATE at fixed orientation
+  coordinate_transform:
+    # Placeholder identity. MUST replace/confirm PX6D sensor -> UR base rotation.
+    rotation_sensor_to_base:
+      - [1, 0, 0]
+      - [0, 1, 0]
+      - [0, 0, 1]
+    # Vector from output-frame origin to sensor origin, expressed in output frame.
+    sensor_origin_in_base_m: [0, 0, 0]
+  # No-target response at the chosen granular insertion depth, in output frame.
+  granular_baseline_output: [0, 0, 0, 0, 0, 0]  # MUST MEASURE
+
+policy:
+  control_rate_hz: 100.0
+  search_direction_xy: [1, 0]  # mock/dry-run only; real execute uses scan_calibration.yaml
+  # Derived from run_20260907_105547_627870: free-search Fxy stayed below
+  # about 0.45 N, while 1.0 N detects contact about 4 mm earlier than 2.0 N.
+  contact_threshold: 1.0              # N
+  contact_hold_time: 0.050            # s, MUST CONFIRM
+  safety_force_threshold: 12.0        # N vector norm, MUST CONFIRM
+  safety_torque_threshold: 1.0        # Nm vector norm, MUST CONFIRM
+  absolute_raw_force_threshold: 60.0  # N, independent backstop; MUST CONFIRM
+  absolute_raw_torque_threshold: 5.0  # Nm, independent backstop; MUST CONFIRM
+  # Formal scan speeds doubled from 0.009/0.003/0.006/0.006 m/s.
+  # All remain below robot.max_tcp_speed=0.030 m/s.
+  search_speed: 0.018
+  probe_speed: 0.006
+  tangent_speed: 0.012
+  retract_speed: 0.012
+  retract_distance: 0.003
+  tangent_step: 0.003
+  max_probe_distance: 0.010
+  # Maximum initial SEARCH travel from P0: 1.50 m (150 cm).
+  max_search_distance: 1.500
+  position_tolerance: 0.0002
+  follow_hand: COUNTERCLOCKWISE
+  # Historical diagnostic only; new contact-geometry policy does not use force sign for motion.
+  probe_direction_sign: -1
+  minimum_boundary_point_spacing: 0.001
+  # No-contact triggers local recovery only AFTER returning to the probe anchor.
+  boundary_recovery_enabled: true
+  # Contact-geometry policy: validate these conservative local sampling distances on site.
+  initialization_clearance: 0.009
+  initialization_lateral_offset: 0.0015
+  initialization_probe_distance: 0.020
+  # First repeat the center window, then try each side; all use probe_speed.
+  initialization_max_retries: 3  # at most 4 rounds / 12 local probes
+  initialization_timeout_sec: 120.0  # includes anchor transfers and returns
+  local_fit_window: 3
+  local_fit_max_residual: 0.0006
+  recovery_sector_extents_deg: [20, 50, 90, 130, 170]
+  recovery_angular_resolution_deg: 10
+  confirmation_contact_count: 3
+  recovery_ray_length: 0.012
+  recovery_probe_speed: 0.006  # m/s; doubled with the other scan motion speeds
+  # Corner RECOVERY/CONFIRMATION rays keep their nominal speed while unloaded.
+  # Once this fraction of contact force is observed, cap the rest of that ray
+  # at 2 mm/s. Existing contact, force-rate, and absolute safety limits still apply.
+  corner_approach_force_ratio: 0.5
+  corner_approach_speed: 0.002  # m/s; cap only, never raises a lower nominal speed
+  confirm_step: 0.003
+  # Run 20260907_124418 measured 11.536 N/s during an ordinary low-force
+  # contact onset (Fxy only 1.083 N). Keep this guard for abnormal impacts,
+  # but leave margin above the observed contact ramp.
+  force_rate_limit: 30.0
+  # Optional completion is for simulation/debug only; real scans still stop with Q.
+  loop_closure_enabled: false
+  loop_closure_distance: 0.010
+  loop_closure_tangent_tolerance_deg: 40.0
+  loop_closure_min_boundary_points: 30
+  loop_closure_min_path_length: 0.20
+  # null disables planned point/time completion: contour following continues until Q.
+  max_boundary_points: null
+  max_runtime_sec: null
+
+workspace:
+  # Site has been checked; software workspace limiting is disabled.
+  enabled: false
+  # Limits are ignored while enabled is false.
+  limits:
+    x_min: 0.0
+    x_max: 0.0
+    y_min: 0.0
+    y_max: 0.0
+    z_min: 0.0
+    z_max: 0.0
+
+tcp:
+  # Replace with the active probe-tip TCP [x,y,z,rx,ry,rz] relative to flange.
+  offset: [0.03214800018674602, 0.0001893598221758136, 0.26767310625506824, 0.0, 0.0, 0.0]
+  offset_tolerance: 0.0001
+  allow_unverified_active_tcp: false
+
+logging:
+  output_root: data
+  show_contour_result_after_scan: true
+
+calibration:
+  file: scan_calibration.yaml
+  min_direction_calibration_distance: 0.02
+  max_direction_calibration_z_difference: 0.005
+
+reset:
+  # A reset pose is saved separately and bound to the active TCP used at capture time.
+  file: reset_pose.yaml
+
+safe_return:
+  # +Z clearance used to choose a transit height safe for both stop and target Z.
+  return_lift_distance: 0.030
+  startup_bias_sample_count: 100
+  # Horizontal and vertical return speeds doubled; acceleration is unchanged.
+  return_speed: 0.030
+  return_vertical_speed: 0.018
+  return_acceleration: 0.030
+  return_force_limit: 8.0
+  return_torque_limit: 0.7
+  return_position_tolerance: 0.0005
+  return_orientation_tolerance: 0.0087
+  return_segment_timeout_sec: 60.0
+  auto_return_after_normal_stop: true
+
+dry_run:
+  start_pose: [0.40, -0.20, 0.30, 0, 3.141592653589793, 0]
+  mock_contact_force: 4.0
+  print_interval_sec: 0.25
+  probe_direction_sign: 1
+  max_boundary_points: 8
+  max_runtime_sec: 120.0
+
+execution:
+  default_sensor: mock

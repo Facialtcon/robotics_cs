@@ -1,0 +1,38 @@
+# Default experiment: ideal 100 mm square; all motion comes from shared policy.
+base_config: simulation_config.yaml
+scene_name: full_loop_square
+target_shape: rectangle
+target_center: [0.0, 0.0]
+target_width: 0.10
+target_height: 0.10
+target_rotation_deg: 0.0
+calibration_point_0: [-0.10, -0.02]
+calibration_point_1: [-0.07, -0.02]
+start_point: [-0.10, -0.02]
+container:
+  x_min: -0.12
+  x_max: 0.12
+  y_min: -0.09
+  y_max: 0.09
+force_model:
+  granular_drag_force: 0.0
+  friction_coefficient: 0.0
+  noise_std: 0.0
+preprocessing:
+  filter_alpha: 0.0
+policy:
+  position_tolerance: 0.000001  # ideal kinematics: 1 um return/anchor tolerance; NOT a hardware claim
+  # Evaluate completion in simulation only; do not change robot policy logic.
+  loop_closure_enabled: false
+simulation:
+  square_full_loop: true
+  interactive_loop_closure_enabled: true
+  max_time_sec: 120.0
+  max_steps_headless: 6000
+  closure_distance: 0.012
+  min_boundary_path: 0.36
+  min_winding_turns: 0.95
+  tangent_tolerance_deg: 30.0
+  boundary_contact_tolerance: 0.001
+visualization:
+  debug_plots: false

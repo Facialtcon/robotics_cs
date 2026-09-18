@@ -1,0 +1,17 @@
+# 默认忽略 robotics_cs 根目录下所有东西
+/*
+
+# 但是保留 .gitignore 自己
+!/.gitignore
+
+# 允许 Git 管理 ur7e_px6d_contour
+!/ur7e_px6d_contour/
+!/ur7e_px6d_contour/**
+
+# contour 里面常见的自动生成文件不要管
+build/
+install/
+log/
+__pycache__/
+*.pyc
+/ur7e_px6d_contour/old/*.tar.gz

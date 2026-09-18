@@ -1,0 +1,10 @@
+base_config: simulation_config.yaml
+scene_name: axis_aligned_rectangle
+target_shape: rectangle
+target_center: [0.0, 0.0]
+target_width: 0.12
+target_height: 0.08
+target_rotation_deg: 0.0
+calibration_point_0: [-0.14, -0.02]
+calibration_point_1: [-0.10, -0.02]
+start_point: [-0.14, -0.02]
