@@ -2,6 +2,69 @@
 
 新用户先看：[【分支 experiment/continuous-tracking】连续贴边：傻瓜式操作指南](BRANCH_continuous-tracking_傻瓜式操作指南.md)。
 
+
+## 当前修订：403e9e9 fix2 之后的方向重确认
+
+本轮开始于 `experiment/continuous-tracking`、HEAD `403e9e9`，工作区干净。原三角形 run 为 `simulation_outputs/continuous_preview/run_20260920_235436_498310/`；读取 config_snapshot、samples 和事件后，用同一场景/seed 精确复现了 102.02 s 的停止位置。
+
+停止帧相邻有效测量差 **2.8357°**，相对估计滞后 **46.3442°**；原先 `max(jump,residual)` 将二者合并。原记录中心穿透为 0，最大接触压缩 **0.961335 mm**（模型包络半径 1 mm），没有证据把这次失败归为进入内部后的法向切换。独立复现诊断保存在 `simulation_outputs/direction_revision/validation_20260921_001149_904331/baseline_report.json`，原数据未改动。
+
+当前共享流程：SEARCH → 首次接触停稳确认 → CONTINUOUS_TRACKING；方向变化率/估计滞后增加时平滑减切向 → DIRECTION_RECONFIRM 零运动等待 → 新连续方向窗口、实测停稳均合格 → 确认当帧仍停 → 低速验证前进与载荷 → 正常跟踪。原低力确认、CONTACT_LOST 和默认关闭的弧恢复保留。任何已终止 STOP 不自动恢复。
+
+新参数均在 `continuous_tracking` 下，仿真和真机共用定义，现场仍须验证：
+
+| 参数 | 默认值 | 作用 |
+|---|---|---|
+| direction_slow_rate_deg_s / direction_slow_residual_deg | 45 °/s / 10° | 提前平滑降低切向，不改变法向力误差公式 |
+| direction_reconfirm_residual_deg / direction_reconfirm_rate_deg_s | 30° / 360 °/s | 大滞后或较快测量变化暂停重确认 |
+| direction_jump_deg / direction_reversal_deg | 45° / 150° | 前者暂停，后者是近反向不可解释疑点的终止保护；不是把 45° 放宽成 180° |
+| direction_confirm_hold_sec / direction_confirm_spread_deg | 0.15 s / 8° | 独立收集新方向，不每帧被旧方向差挡住；不覆盖旧可靠方向直至确认 |
+| confirmation_timeout_sec / direction_reconfirm_max_attempts | 原 1 s / 3 次 | 固定总确认期限；无 2 mm 净进展时最多三次尝试，不能每帧重置 |
+| direction_min_progress | 2 mm | 重复确认计数的局部进展要求 |
+| direction_resume_scale / direction_resume_sec / direction_resume_distance | 0.25 / 2 s / 0.25 mm | 新方向下低速验证、按新切向投影检查进展；反向或不足前进退出 |
+
+力/力矩、速度、workspace、采样新鲜度、watchdog 硬保护未放宽，力符号及手性不自动翻转，不采用新旧切向点积必须为正的规则。120° 新可信方向的隔离回归测试可通过；近反向尖峰终止。停止代码新增 STOP_DIRECTION_UNCONFIRMED / STOP_DIRECTION_REVERSAL / STOP_DIRECTION_NO_PROGRESS / STOP_STALE_DATA，具体文字和首次终止原因保留。
+
+日志记录 measurement_jump_deg、estimate_residual_deg、实际 cycle_dt、测量变化率及平滑率、滤波幅值/coherence、方向阶段、减速比例、重确认次数/时长和恢复运动的进展。仿真另记 sim_signed_distance_m、sim_penetration_m、sim_compression_m、sim_segment_penetration，以及 RAW 模型目标作用/摩擦/背景/噪声 XY 分量；四分量之和与 raw wrench 一致。processed 的零偏与滤波另算。真实合力没有这些可分离分量，明确 unavailable，几何诊断不进入策略。
+
+三条入口复用同一 ContinuousTrackingPolicy。真机入口在 DIRECTION_RECONFIRM 仍收集新鲜反馈、发停止并按原规则维护 watchdog，不把它当实验结束；主循环只记录数值。设备替身回归用一段真正由合成闭环生成的原始力/TCP 流逐条比较预演、无窗口与真机适配的状态和命令，替身在调用入口前完全替换设备类，不连接硬件。
+
+首次转折闭环验证仅把离线测试时长延至 180 s，其余控制/物理参数不因几何种类修改：
+
+| 场景 | 转折后净前进 | processed 跟踪力范围 | 暂停 / 确认 / 验证前进次数 | 中心/线段穿透 | 终止 |
+|---|---:|---:|---:|---|---|
+| 圆（法向累计 90° 后） | 49.48 mm | 1.302–1.734 N | 0 / 0 / 0 | 0 / 0 | STOP_TIME_LIMIT |
+| 方形 | 90.26 mm | 1.303–1.737 N | 1 / 1 / 1 | 0 / 0 | STOP_TIME_LIMIT |
+| 原三角形 | 65.83 mm | 1.293–1.737 N | 1 / 1 / 1 | 0 / 0 | STOP_TIME_LIMIT |
+| 方形旋转 30°、平移 [10,15] mm | 90.35 mm | 1.303–1.737 N | 1 / 1 / 1 | 0 / 0 | STOP_TIME_LIMIT |
+| 目标不在搜索线上 | 不适用 | 无接触 | 0 / 0 / 0 | 0 / 0 | STOP_SEARCH_LIMIT |
+
+这组最大压缩约 0.962 mm，未超过 1 mm 包络；评分器将中心穿透 >1e-9 m、连续运动段进入内部或压缩超过包络判为失败，未吸附 TCP 或裁剪已记录轨迹。达到时间预算不等于过角；通过列的依据是转折后至少 5 mm 的净前进与独立几何审计，**不是整圈完成**。完整报告与各轮日志：[direction_reports.json](simulation_outputs/direction_revision/directions_20260921_002243_013837/direction_reports.json)。中间不足前进的失败调试轮也保留在同一 direction_revision 目录中。
+
+预演左/右约 70/30，默认目标局部取景，支持 Global/Target/Probe、Follow、滚轮/工具栏缩放平移和 Components。共享显示辅助 `simulation/continuous_view.py` 只处理等比例取景与标尺。测得力 8 mm/N，命令和实测速度 12 mm/(mm/s)，N 与 mm/s 分面板；有效方向辅助才是单位箭头。真机回放未知目标按轨迹/TCP 取景，不造目标。GUI 仍默认 10 fps、固定控制 dt、有界点数，不自动生成视频。
+
+本轮问题—修改—测试对应：
+
+| 问题 | 修改 | 实际验证范围 |
+|---|---|---|
+| 估计滞后被当作测量突跳终止 | 分别记录跳变/残差/变化率，提前减速并暂停重确认 | 修改前新增 8 项复现全部失败；修复后覆盖 120° 稳定新方向、180° 尖峰、停稳不足、方向波动和超时边界 |
+| 反复停走或确认后无进展 | 固定总期限、有限重试、新切向低速进展与载荷检查 | 隔离测试两次确认、无进展退出、超载退出、低力/丢边衔接及首次停止原因保留；两次确认测试含注入位姿，不作为几何闭环证据 |
+| 只修预演可能与执行入口不一致 | 共用策略、状态和数值日志 | 同一闭环观测流逐条比较预演、无窗口和完全替换硬件的执行入口，状态/命令/诊断一致；不证明设备时延或物理行为 |
+| 目标太小、力/速度及分量含义不清 | 局部取景、独立单位和固定标尺、raw 分量及不可用标记 | 自动按钮/坐标回调、同步游标、分量求和、未知真机目标测试；离屏图及 16×9、12×8、20×8 英寸窗口缩放均检查 XY 等比例 |
+| 仅停止得安全不能说明已过转折 | 独立几何评分，不向策略提供真值 | 上述五场景从 SEARCH 开始闭环运行；报告转折后距离、载荷、穿透、压缩和实际终止代码 |
+
+最终实现另以默认 **120 s** 预算重跑原三角形并生成[预演图](simulation_outputs/direction_revision/final_preview/run_20260921_004100_164546/continuous_preview.png)及[静态回放](simulation_outputs/direction_revision/final_preview/run_20260921_004100_164546/continuous_summary_target.png)，已离屏查看；同目录保留完整采样、配置和 `offline_resize_checks.json`。只生成静态 PNG，没有编码新视频。
+
+最终全量回归：**730 passed in 171.40s**，包含原离散测试。执行命令（项目目录）：
+
+```bash
+MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q
+```
+
+确认超时边界、原始力坐标标注收尾后的定向回归先得到 **138 passed, 5 deselected in 12.09s**；其中暂未选择的五个几何用例随后已包含在上述全量通过结果内。
+
+以下各节中的早期验证表/数字是前轮历史证据；当前方向状态、视图及验收以上述修订和分支操作指南为准。本轮没有真实 UR7e/PX6D 连接，没有执行真机命令，也未手动点验桌面 GUI。
+
 前一轮控制修复基准是 `98742befff46bc7c9c9e887e904c505d40f58bb3`，该轮开始时位于 `experiment/continuous-tracking` 且工作区干净。本次预演追加在同分支保留已有未提交修复后进行。本次没有连接 UR7e/PX6D，没有 commit、push、reset、切分支或删除实验数据。以下是软件与合成仿真证据，不是实机可用声明。
 
 仍是：初始 SEARCH → 接触后停稳确认 → 直接连续贴边 → 丢边停止/有限恢复。没有三点初始化、PCA、目标分类、凹凸角分类、机器学习、颗粒补偿或完整 M-B-K 模型。Fxy 始终称为**平面交互力幅值**。
@@ -47,7 +110,7 @@ READY → TARGET_SEARCH
 
 ## 方向与控制律
 
-现有 wrench EMA 保留；原有 continuous 方向 EMA 保留为唯一的第二级滤波，不再叠加其他滤波器。其旧值权重按实际间隔变为 `alpha ** (dt / nominal_dt)`。低力期间冻结局部方向并标记无效；重捕获确认后仅重建局部方向状态，不能消除上游滤波延迟或摩擦影响。
+现有 wrench EMA 保留；原有 continuous 方向 EMA 保留为唯一的第二级滤波，不叠加其他方向向量滤波器。方向变化率另用同一 alpha 做标量平滑，只用于减速判断。其旧值权重按实际间隔变为 `alpha ** (dt / nominal_dt)`。低力期间冻结局部方向并标记无效；重捕获确认后仅重建局部方向状态，不能消除上游滤波延迟或摩擦影响。
 
 记录三个不同量：processed 测量方向 `measurement_direction/force_direction`、经过 sign 和可信度/限速处理的 `contact_direction`、最终 `command_vx/vy`。未分离纯物体法向力。
 
@@ -64,7 +127,7 @@ v_n = clip(Kf * e_dead, -normal_speed_limit, +normal_speed_limit)
 v_xy = v_t * t + v_n * n
 ```
 
-`n/t` 始终单位化、正交。方向突变或近抵消时停止，不偷偷翻转新方向以维持行进。可信方向用最短有符号角更新，按实际 dt 限转速。`v_t` 随低载荷、高载荷、可信度/方向限速降低；正常条件恢复时由最终速度变化率限制渐进增加。低于 lost threshold 的第一帧即请求零速，消抖窗口内不会满切向推进并最大向内修正。高于目标但未触发硬保护时优先减轻载荷；最大向外修正持续不改善则停止。最终速度与变化率限制不能延迟硬停止请求。
+`n/t` 始终单位化、正交。方向突变或近抵消时先零速重确认；近 180° 符号疑点、确认超时等进入终止 STOP，不偷偷翻转新方向以维持行进。可信方向用最短有符号角更新，按实际 dt 限转速。`v_t` 随低载荷、高载荷、可信度/方向限速降低；正常条件恢复时由最终速度变化率限制渐进增加。低于 lost threshold 的第一帧即请求零速，消抖窗口内不会满切向推进并最大向内修正。高于目标但未触发硬保护时优先减轻载荷；最大向外修正持续不改善则停止。最终速度与变化率限制不能延迟硬停止请求。
 
 ## 单次局部弧形恢复
 
@@ -95,7 +158,7 @@ O 来自实测停稳位置；历史可信接触记录包括位置、时间、nor
 | direction_min_force | 0.5 N | 测量方向幅值门槛，≤ lost threshold |
 | direction_min_filtered_force | 0.3 N | 滤波向量模长门槛，≤测量门槛 |
 | direction_min_coherence | 0.8 | 平均合向量/平均幅值，范围 (0,1] |
-| direction_jump_deg | 45° | 单次/测量相对估计突变检查，范围 (0,90) |
+| direction_jump_deg | 45° | 相邻有效测量突跳触发暂停重确认；与估计滞后分开记录 |
 | direction_rate_deg_s | 90°/s | 可信估计最大转速，正值 |
 | command_acceleration | 0.01 m/s² | 正值且不超过原机器人加速度；硬停绕过 |
 | overload_tangent_zero_force | 2.25 N | 切向降为零，须高于参考+死区、低于硬保护 |
@@ -164,7 +227,7 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 
 本次不执行任何实机命令。未来实机入口仍是 `--execute`，但须先完成上述现场条件；Q/ESC/Ctrl+C、异常、退出都先请求停止，再采集停止后状态和写最终日志，不自动回位。
 
-回放严格 XY 等比例；仿真画真实目标轮廓，真机不造目标。可信接触 TCP 片段和 SEARCH/LOST/REACQUIRE 分开，均不是重建物体边界。恢复参考与位移圆单独显示；箭头注明估计方向/命令速度方向，固定显示长度不代表 N 或 m/s；TCP 点注明扩大标记。局部视窗只裁剪，不改变比例。MP4 最多 1200 帧，GIF 最多 240 帧；达到预算降低 fps 保持时长，无中间 PNG 序列，编码失败保留静态总结。本环境缺 ffmpeg，实际验证的是 GIF 和 PNG。
+回放严格 XY 等比例；仿真画真实目标轮廓，真机不造目标。可信接触 TCP 片段和 SEARCH/LOST/REACQUIRE 分开，均不是重建物体边界。恢复参考与位移圆单独显示；测得力按 8 mm/N、命令及实测速度按 12 mm/(mm/s) 显示；估计方向仅作 8 mm 单位方向辅助；TCP 点注明扩大标记。局部视窗只裁剪，不改变比例。MP4 最多 1200 帧，GIF 最多 240 帧；达到预算降低 fps 保持时长，无中间 PNG 序列，编码失败保留静态总结。本环境缺 ffmpeg，实际验证的是 GIF 和 PNG。
 
 ## 日志与证据分层
 
@@ -222,12 +285,12 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 - `simulation/continuous_session.py` 抽取原离线装配、零偏捕获及单步：SimulatedRobot → SimulatedForceSensor → WrenchPreprocessor → ContinuousTrackingPolicy → SimulatedRobot。无窗口与预演调用同一个 step；目标几何不传入策略。模拟延迟 2 步、加速度 0.005 m/s² 保持不变。
 - `simulation/continuous_preview.py` 提供待开始场景、三种形状、拖动、15° 旋转、暂停/继续、1/5/10 倍播放、停止/重置、独立 YAML 保存/加载及显式 PNG。固定控制 dt，默认 10 fps，回调最多 100 步并设计算时间预算；性能不足只降低实际播放速度。
 - 场景校验整目标在容器内、起点在接触包络外、P0/P1 与尺寸有效。有效编辑先结束旧轮次并记录 SCENE_CHANGED，重新装配零状态；暂停继续不重置。独立场景只允许创建新 YAML，不覆盖现存配置/标定/数据。
-- 双视图只使用已观测数据；力显示最近 30 秒，整轮轨迹最多 4096 点并保守合并跨状态段，XY 等比例、力极值保留，明确区分搜索/可信接触/不确定/恢复运动。方向箭头均标为单位方向。CSV 保存所有步，预演停止后的制动尾段也采样记录；原无窗口入口仍保留原有独立最终停止快照。
+- 双视图只使用已观测数据；力显示最近 30 秒，整轮轨迹最多 4096 点并保守合并跨状态段，XY 等比例、力极值保留，明确区分搜索/可信接触/不确定/恢复运动。力与速度使用分开的固定幅值标尺，仅方向辅助箭头是单位方向。CSV 保存所有步，预演停止后的制动尾段也采样记录；原无窗口入口仍保留原有独立最终停止快照。
 - `tests/test_continuous_preview.py` 覆盖真实无窗口日志与预演日志的逐步一致性、显示 fps/倍速独立、暂停确认时钟、编辑记忆清空、布局拒绝、保存保护、实际按钮/拖动回调、极值降采样、GUI 懒加载、无桌面回放和硬件构造前互斥拒绝。
 
 操作、输出路径及核验范围见上方分支指南。关闭或停止窗口只表示本轮结束，不表示通过轮廓验收；本次不提供真机物理验证或运行许可。
 
-追加完成后的全量回归：**692 passed in 128.03s**，其中本次新增预演测试 24 项；原有 668 项（含离散回归与前轮控制修复测试）保持通过。自动测试调用按钮、拖动与计时回调，未阻塞于 `plt.show()`；这不等于手动点验真实桌面窗口。
+第一轮预演追加完成时全量回归：**692 passed in 128.03s**，其中本次新增预演测试 24 项；原有 668 项（含离散回归与前轮控制修复测试）保持通过。自动测试调用按钮、拖动与计时回调，未阻塞于 `plt.show()`；这不等于手动点验真实桌面窗口。
 
 | 问题 / 核验层级 | 修改与实际证据 |
 |---|---|

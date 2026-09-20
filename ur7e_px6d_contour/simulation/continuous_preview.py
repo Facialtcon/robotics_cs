@@ -15,8 +15,9 @@ import yaml
 from experiment_logging.data_logger import ExperimentLogger
 from experiment_logging.termination import TerminationReason, classify_stop_reason
 from policy.continuous_tracking import EXTRA_SAMPLE_FIELDS, State
-from simulation.continuous_session import SimulationSession, validate_scene
+from simulation.continuous_session import SimulationSession, validate_scene, SIMULATION_SAMPLE_FIELDS
 from simulation.simulator import load_simulation_config
+from simulation.continuous_view import XYViewport, VectorDisplay
 
 
 class PreviewRun:
@@ -48,7 +49,7 @@ class PreviewRun:
         if self.status == 'READY':
             validate_scene(self.scene)
             self.logger = ExperimentLogger(self.output, self.session.config,
-                                          extra_sample_fields=EXTRA_SAMPLE_FIELDS, workspace_logging=False)
+                                          extra_sample_fields=EXTRA_SAMPLE_FIELDS + SIMULATION_SAMPLE_FIELDS, workspace_logging=False)
             self.logger.termination.observe(policy=self.session.policy, processed_force_frame='Base')
             self.run_dir = self.logger.run_dir
             self.last_run_dir = self.run_dir
@@ -89,7 +90,8 @@ class PreviewRun:
         self.logger.termination.observe(policy=self.session.policy, timestamp=sample.time,
                                         phase='SIMULATION_STOP' if sample.command.state == 'STOP' else 'SIMULATION_STEP')
         self.logger.log_sample(sample.time, sample.raw, sample.processed, sample.robot,
-                               sample.command, sample.inward, sample.tangent, extra=sample.telemetry)
+                               sample.command, sample.inward, sample.tangent,
+                               extra={**sample.telemetry, **sample.simulation_telemetry})
         for event in sample.events:
             self.logger.log_waypoint(event)
         self.session.policy.events.clear()
@@ -258,8 +260,13 @@ class ContinuousPreview:
             raise ValueError('preview fps must be between 1 and 60')
         self.model, self.fps = model, fps
         self._drag = None
-        self.figure, (self.xy, self.force) = plt.subplots(1, 2, figsize=(14, 8))
-        self.figure.subplots_adjust(left=.065, right=.97, bottom=.37, top=.84, wspace=.25)
+        self.figure = plt.figure(figsize=(16, 9))
+        grid = self.figure.add_gridspec(2, 2, width_ratios=[7, 3], hspace=.4, wspace=.18)
+        self.xy = self.figure.add_subplot(grid[:, 0])
+        self.force = self.figure.add_subplot(grid[0, 1])
+        self.velocity = self.figure.add_subplot(grid[1, 1])
+        self.figure.subplots_adjust(left=.045, right=.98, bottom=.32, top=.84)
+        self.show_components = False
         self.figure.suptitle('SIMULATION / SYNTHETIC FORCE — continuous tracking', fontsize=14)
         self.figure.canvas.manager.set_window_title('SIMULATION / SYNTHETIC FORCE')
         self.xy.set(xlabel='X [mm]', ylabel='Y [mm]')
@@ -284,20 +291,25 @@ class ContinuousPreview:
         self.xy.add_patch(self.probe)
         self.tcp, = self.xy.plot([], [], 'r+', ms=9, label='TCP center (+ enlarged marker)')
         self.event_points, = self.xy.plot([], [], 'kx', ms=5, label='Policy events')
-        self.arrows = {}
-        for key, color in [('command', 'black'), ('tangent', '#008855'), ('measured', '#1762d2'), ('inward', '#b51d3c')]:
-            self.arrows[key] = self.xy.annotate('', xy=(0, 0), xytext=(0, 0),
-                arrowprops=dict(arrowstyle='->', color=color, lw=1.5))
-        self.figure.text(.065, .875, 'Unit direction arrows, length 12 mm: black command / green tangent / blue measured F / red signed inward estimate', fontsize=9)
-        self.geometry_text = self.figure.text(.065, .265, '', fontsize=9)
-        self.status_text = self.figure.text(.065, .94, '', fontsize=10)
-        self.event_text = self.figure.text(.53, .265, '', fontsize=8)
-        self.message_text = self.figure.text(.065, .235, '', fontsize=9, color='#8b3510')
+        self.vectors = VectorDisplay(self.xy)
+        self.arrows = self.vectors.arrows
+        self.figure.text(.045, .915, 'Blue: processed force (8 mm/N); black: command / purple: actual velocity (12 mm per mm/s). Green/red: valid tangent/inward directions only.', fontsize=8)
+        self.geometry_text = self.figure.text(.045, .245, '', fontsize=8)
+        self.status_text = self.figure.text(.045, .94, '', fontsize=9)
+        self.event_text = self.figure.text(.53, .245, '', fontsize=8)
+        self.message_text = self.figure.text(.045, .225, '', fontsize=8, color='#8b3510')
         self.force_lines = [self.force.plot([], [], color=color, label=label)[0] for label, color in
-                            [('Fx', '#be433a'), ('Fy', '#2271b2'), ('Fxy', '#008855'), ('F_ref', '#555555')]]
-        self.force_lines[-1].set_linestyle('--')
+                            [('Fx', '#be433a'), ('Fy', '#2271b2'), ('Fxy', '#008855'), ('F_ref', '#555555'), ('F_error', '#995599')]]
+        self.force_lines[3].set_linestyle('--')
         self.cursor = self.force.axvline(0, color='k', lw=.8)
-        self.xy.legend(loc='lower left', fontsize=6)
+        self.xy.legend(loc='lower left', bbox_to_anchor=(0, 1.03), ncol=4, fontsize=6)
+        self.velocity_lines = [self.velocity.plot([], [], color=color, label=label)[0] for label, color in
+                               [('Command', 'black'), ('Actual', '#9933aa'), ('v_t', '#008855'), ('v_n', '#b51d3c')]]
+        self.velocity_cursor = self.velocity.axvline(0, color='k', lw=.8)
+        self.velocity.set(xlabel='Simulation time [s]', ylabel='Velocity [mm/s]')
+        self.velocity.legend(fontsize=6, loc='upper right', ncol=2)
+        self.velocity.grid(alpha=.2)
+        self.viewport = XYViewport(self.xy, [[-180,-130],[180,130]])
         self.force.legend(loc='upper right', fontsize=8)
         self.buttons = []
         actions = [('Start', self.start), ('Pause/Continue', self.pause), ('Reset', lambda: model.reset()),
@@ -305,24 +317,29 @@ class ContinuousPreview:
                    ('2 Circle', lambda: model.choose_shape('circle')), ('3 Triangle', lambda: model.choose_shape('triangle')),
                    ('[ -15 deg', lambda: model.rotate(-15)), ('] +15 deg', lambda: model.rotate(15))]
         for index, (label, action) in enumerate(actions):
-            button = Button(self.figure.add_axes([.035+index*.105, .17, .10, .04]), label)
+            button = Button(self.figure.add_axes([.025+index*.105, .115, .10, .035]), label)
             button.label.set_fontsize(8)
             button.on_clicked(lambda event, action=action: self.invoke(action))
             self.buttons.append(button)
         for index, speed in enumerate((1, 5, 10)):
-            button = Button(self.figure.add_axes([.035+index*.075, .11, .07, .04]), f'{speed}x')
+            button = Button(self.figure.add_axes([.025+index*.065, .067, .06, .033]), f'{speed}x')
             button.on_clicked(lambda event, speed=speed: self.invoke(lambda: model.set_speed(speed)))
             self.buttons.append(button)
         for index, (label, action) in enumerate([('Save scene', self.save_scene), ('Load scene', self.load_scene), ('Save PNG', self.save_png)]):
-            button = Button(self.figure.add_axes([.285+index*.13, .11, .12, .04]), label)
+            button = Button(self.figure.add_axes([.235+index*.13, .067, .12, .033]), label)
+            button.on_clicked(lambda event, action=action: self.invoke(action))
+            self.buttons.append(button)
+        for index, label in enumerate(('Global', 'Target', 'Probe', 'Follow', 'Components')):
+            action = (lambda label=label: self.select_view(label)) if label in ('Global','Target','Probe') else (self.toggle_follow if label=='Follow' else self.toggle_components)
+            button = Button(self.figure.add_axes([.025+index*.13, .165, .12, .035]), label)
             button.on_clicked(lambda event, action=action: self.invoke(action))
             self.buttons.append(button)
         default_path = Path('simulation_scenes')/f'continuous_{datetime.now():%Y%m%d_%H%M%S_%f}.yaml'
-        self.path_box = TextBox(self.figure.add_axes([.12, .04, .84, .04]), 'Scene YAML: ', initial=str(default_path))
+        self.path_box = TextBox(self.figure.add_axes([.11, .015, .865, .033]), 'Scene YAML: ', initial=str(default_path))
         self.timer = self.figure.canvas.new_timer(interval=round(1000/fps))
         self.timer.add_callback(self.on_timer)
         for event, callback in [('key_press_event', self.on_key), ('button_press_event', self.on_press),
-                                ('motion_notify_event', self.on_motion), ('button_release_event', self.on_release), ('close_event', self.on_close)]:
+                                ('scroll_event', self.viewport.scroll), ('motion_notify_event', self.on_motion), ('button_release_event', self.on_release), ('close_event', self.on_close)]:
             self.figure.canvas.mpl_connect(event, callback)
         self.refresh_scene()
         self.draw()
@@ -372,8 +389,9 @@ class ContinuousPreview:
         b = scene['container']
         x0, x1, y0, y1 = (b[k]*1000 for k in ('x_min', 'x_max', 'y_min', 'y_max'))
         self.container.set_data([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0])
-        self.xy.set_xlim(x0, x1)
-        self.xy.set_ylim(y0, y1)
+        self.viewport.bounds = [[x0,y0],[x1,y1]]
+        self.viewport.target = target.boundary_points()*1000
+        self.viewport.select(self.viewport.mode, self.model.session.robot.pose[:2]*1000)
         points = np.asarray([scene['calibration_point_0'], scene['calibration_point_1']])*1000
         start = np.asarray(scene['start_point'])*1000
         end = start+np.asarray(scene['scan_direction_xy'])*self.model.session.policy.c['search_max_distance']*1000
@@ -391,61 +409,75 @@ class ContinuousPreview:
         self.geometry_text.set_text(f'{shape}: center ({center[0]:.1f}, {center[1]:.1f}) mm; {size}\n'
                                     f"rotation {scene.get('target_rotation_deg', 0):g} deg; synthetic probe radius {self.probe.radius:g} mm")
 
+    def select_view(self, mode):
+        self.viewport.select(mode, self.model.session.robot.pose[:2]*1000)
+
+    def toggle_follow(self):
+        self.viewport.follow = not self.viewport.follow
+        if self.viewport.follow:
+            self.viewport.select('Probe', self.model.session.robot.pose[:2]*1000)
+
+    def toggle_components(self):
+        self.show_components = not self.show_components
+
     def draw(self):
         model = self.model
         history = list(model.history)
+        components = None
+        valid = False
         if history:
             last = history[-1]
             self.display_time = last.time
             xy = last.robot.pose[:2]*1000
-            values = np.array([[s.processed.fx, s.processed.fy, np.hypot(s.processed.fx, s.processed.fy)] for s in history])
-            indices = extrema_indices(values)
+            force = last.processed.force[:2]
+            command = last.command.direction_xy*last.command.speed*1000
+            actual = last.robot.tcp_speed[:2]*1000
+            tangent, inward = last.tangent, last.inward
+            valid = bool(last.telemetry['direction_valid']) and not last.telemetry['stop_requested'] and last.command.state == 'CONTINUOUS_TRACKING'
+            values = np.array([[s.processed.fx, s.processed.fy, np.hypot(s.processed.fx,s.processed.fy),
+                                s.telemetry['force_reference'], s.telemetry['force_reference']-np.hypot(s.processed.fx,s.processed.fy)] for s in history])
+            velocities = np.array([[s.command.speed, np.linalg.norm(s.robot.tcp_speed[:3]), s.telemetry['v_t'], s.telemetry['v_n']] for s in history])*1000
             times = np.array([s.time for s in history])
-            for i, line in enumerate(self.force_lines[:3]):
-                line.set_data(times[indices], values[indices, i])
-            self.force_lines[3].set_data(times[[0, -1]], [model.session.policy.c['force_reference']]*2)
-            self.force.set_xlim(max(0, last.time-30), max(.1, last.time))
-            limits = np.r_[values.min(), values.max(), model.session.policy.c['force_reference'], 0.]
-            pad = max(.1, np.ptp(limits)*.1)
-            self.force.set_ylim(limits.min()-pad, limits.max()+pad)
+            for axis, lines, rows in [(self.force,self.force_lines,values),(self.velocity,self.velocity_lines,velocities)]:
+                indices = extrema_indices(rows, buckets=60)
+                for i,line in enumerate(lines): line.set_data(times[indices],rows[indices,i])
+                axis.set_xlim(max(0,last.time-30),max(.1,last.time))
+                lo,hi=min(0,rows.min()),max(0,rows.max());pad=max(.1,(hi-lo)*.1)
+                axis.set_ylim(lo-pad,hi+pad)
             segments = {kind: [] for kind in self.paths}
-            for a, b in zip(model.path_history, model.path_history[1:]):
-                segments[b[3]].append(np.asarray([a[1:3], b[1:3]])*1000)
-            for kind, artist in self.paths.items():
-                artist.set_segments(segments[kind])
-            vectors = dict(command=last.command.direction_xy if last.command.move else np.zeros(2),
-                           tangent=last.tangent, measured=values[-1, :2], inward=last.inward)
-            current = f'Fx={values[-1,0]:.3f} Fy={values[-1,1]:.3f} Fxy={values[-1,2]:.3f} N'
-            policy_state = last.command.state
+            for a,b in zip(model.path_history,model.path_history[1:]):
+                segments[b[3]].append(np.asarray([a[1:3],b[1:3]])*1000)
+            for kind,artist in self.paths.items():artist.set_segments(segments[kind])
+            if self.show_components:
+                components={key:last.diagnostics[key+'_force'] for key in ('object','friction','background','noise')}
+            current = f'Fx {values[-1,0]:.2f}, Fy {values[-1,1]:.2f}, Fxy {values[-1,2]:.2f} N\nF_ref {values[-1,3]:.2f}, error {values[-1,4]:+.2f} N'
+            motion = f'cmd {velocities[-1,0]:.3f}, actual {velocities[-1,1]:.3f} mm/s\nv_t {velocities[-1,2]:+.3f}, v_n {velocities[-1,3]:+.3f} mm/s'
+            policy_state = last.command.state+' / '+last.telemetry['direction_phase']
         else:
-            self.display_time = 0.
-            xy = model.session.robot.pose[:2]*1000
-            for line in self.force_lines:
-                line.set_data([], [])
-            for artist in self.paths.values():
-                artist.set_segments([])
-            vectors = dict.fromkeys(self.arrows, np.zeros(2))
-            current, policy_state = 'No force samples yet', 'READY'
-            self.force.set_xlim(0, 1)
-            self.force.set_ylim(-.2, 2)
-        self.tcp.set_data([xy[0]], [xy[1]])
-        self.probe.center = xy
-        for name, arrow in self.arrows.items():
-            vector = vectors[name]
-            norm = np.linalg.norm(vector)
-            arrow.set_visible(norm > 1e-9)
-            if norm > 1e-9:
-                arrow.set_position(xy)
-                arrow.xy = xy+12*vector/norm
-        self.cursor.set_xdata([self.display_time, self.display_time])
-        event_xy = np.array([e.pose[:2]*1000 for e in model.events]).reshape(-1, 2)
-        self.event_points.set_data(event_xy[:, 0], event_xy[:, 1])
+            self.display_time=0.
+            xy=model.session.robot.pose[:2]*1000
+            force=command=actual=tangent=inward=np.zeros(2)
+            for line in self.force_lines+self.velocity_lines:line.set_data([],[])
+            for artist in self.paths.values():artist.set_segments([])
+            current,motion,policy_state='No force samples yet','No velocity samples yet','READY'
+            for axis in (self.force,self.velocity):axis.set_xlim(0,1);axis.set_ylim(-.2,2)
+        self.tcp.set_data([xy[0]],[xy[1]])
+        self.probe.center=xy
+        self.viewport.update(xy,running=model.status=='RUNNING')
+        self.vectors.draw(xy,force,command,actual,tangent,inward,valid=valid,components=components)
+        for cursor in (self.cursor,self.velocity_cursor):cursor.set_xdata([self.display_time]*2)
+        event_xy=np.array([e.pose[:2]*1000 for e in model.events]).reshape(-1,2)
+        self.event_points.set_data(event_xy[:,0],event_xy[:,1])
         self.event_text.set_text('\n'.join(f'{e.timestamp:.2f}s {e.event_type}' for e in list(model.events)[-2:]))
-        self.xy.set_title(f'Observed TCP at t={self.display_time:.2f} s (sampled executed path)', fontsize=9)
-        self.force.set_title(f't={self.display_time:.2f} s | {current}', fontsize=9)
-        self.status_text.set_text(f'{model.status} | {policy_state} | dt={model.session.dt:g} s | '
-                                  f'{model.speed}x requested, {model.effective_speed:.2f}x effective | {self.fps:g} fps')
-        self.message_text.set_text(model.message)
+        self.xy.set_title(f't={self.display_time:.2f}s | {self.viewport.mode} | follow={self.viewport.follow} | scroll zoom; toolbar pan',fontsize=9)
+        self.force.set_title(current,fontsize=8)
+        self.velocity.set_title(motion,fontsize=8)
+        self.status_text.set_text(f'{model.status} | {policy_state} | dt={model.session.dt:g}s | {model.speed}x requested, {model.effective_speed:.2f}x effective | {self.fps:g} fps')
+        diagnostic = ''
+        if self.show_components and history:
+            d=history[-1].diagnostics
+            diagnostic=f" | RAW components: orange model target action (inward convention) / brown friction / gray background / pink noise; d={d['signed_distance']*1000:.3f}mm, compression={d['tip_compression']*1000:.3f}mm"
+        self.message_text.set_text(model.message+diagnostic)
 
     def on_timer(self):
         self.invoke(self.model.tick)
@@ -463,6 +495,9 @@ class ContinuousPreview:
             self.invoke(actions[key])
 
     def on_press(self, event):
+        toolbar = getattr(self.figure.canvas.manager, 'toolbar', None)
+        if toolbar is not None and toolbar.mode:
+            return
         if event.inaxes is self.xy and event.button == 1 and event.xdata is not None:
             point = np.array([event.xdata, event.ydata])/1000
             if self.model.session.target.signed_distance_and_outward_normal(point)[0] <= 0:

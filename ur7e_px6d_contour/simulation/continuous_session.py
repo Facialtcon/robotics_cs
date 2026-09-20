@@ -12,6 +12,10 @@ from simulation.geometry import CircleTarget, create_target
 from simulation.simulated_robot import SimulatedRobot
 from simulation.simulated_force_sensor import SimulatedForceSensor
 
+SIMULATION_SAMPLE_FIELDS = ('sim_components_available', 'sim_signed_distance_m', 'sim_penetration_m',
+                           'sim_compression_m', 'sim_segment_penetration',
+                           'sim_object_fx', 'sim_object_fy', 'sim_friction_fx', 'sim_friction_fy',
+                           'sim_background_fx', 'sim_background_fy', 'sim_noise_fx', 'sim_noise_fy')
 
 def validate_scene(scene):
     """Validate an independent copy; never move the target or calibration points."""
@@ -69,6 +73,8 @@ class SimulationSample:
     tangent: np.ndarray
     inward: np.ndarray
     events: tuple
+    diagnostics: dict
+    simulation_telemetry: dict
 
 
 class SimulationSession:
@@ -94,6 +100,7 @@ class SimulationSession:
         self.target = create_target(self.scene)
         self.sensor = SimulatedForceSensor(self.target, self.scene['force_model'])
         self.preprocessor = WrenchPreprocessor.from_config(self.config['preprocessing'])
+        self._previous_xy = self.robot.pose[:2].copy()
 
     def capture_bias(self, poll=lambda: None, observe=lambda **kw: None):
         baseline = self.config['preprocessing'].get('baseline', {'capture_on_start': True, 'sample_count': 100})
@@ -116,7 +123,7 @@ class SimulationSession:
     def step(self):
         robot = self.robot.read_state()
         now = self.robot.time
-        raw = self.sensor.read_wrench(robot.pose[:2], robot.tcp_speed[:2])[0]
+        raw, diagnostics = self.sensor.read_wrench(robot.pose[:2], robot.tcp_speed[:2])
         processed = self.preprocessor.process(raw)
         command = self.policy.update(now, raw, processed, robot)
         predicted = robot.pose[:2] + command.direction_xy * command.speed * self.dt
@@ -126,5 +133,13 @@ class SimulationSession:
             self.policy.request_stop(now, robot.pose, 'simulated TCP left container/workspace')
             command = self.policy._command(robot.pose)
         self.robot.apply_command(command.direction_xy, command.speed, command.move)
+        # Independent audit only. Geometry/component truth never enters policy.
+        from simulation.physical_validation import segment_enters_interior
+        crossed = segment_enters_interior(self._previous_xy, robot.pose[:2], self.target)
+        self._previous_xy = robot.pose[:2].copy()
+        simulation_telemetry = dict(zip(SIMULATION_SAMPLE_FIELDS, (
+            1, diagnostics['signed_distance'], diagnostics['penetration'], diagnostics['tip_compression'], int(crossed),
+            *diagnostics['object_force'], *diagnostics['friction_force'], *diagnostics['background_force'], *diagnostics['noise_force'])))
         return SimulationSample(now, robot, raw, processed, command, self.policy.telemetry(command),
-                                self.policy.tangent.copy(), self.policy.contact_direction.copy(), tuple(self.policy.events))
+                                self.policy.tangent.copy(), self.policy.contact_direction.copy(), tuple(self.policy.events),
+                                diagnostics, simulation_telemetry)

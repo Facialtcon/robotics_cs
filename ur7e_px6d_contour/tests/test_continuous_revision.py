@@ -341,7 +341,7 @@ def test_low_force_reconfirmation_rejects_stale_feedback_and_direction_jump():
     assert p.state == State.STOP and 'stale sample' in p.reason
     p = low_force_pause()
     assert not sample(p, 1.02, (-.6, 0)).move
-    assert p.state == State.STOP and 'direction jump' in p.reason
+    assert p.state == State.STOP and 'direction reversal' in p.reason
 
 
 def test_low_force_pending_manual_stop_never_restarts():

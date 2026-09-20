@@ -48,9 +48,12 @@ def test_recovery_geometry_rotates_and_mirrors_consistently(rotation,mirror,hand
     assert np.allclose(transformed,path@matrix.T,atol=1e-9)
 
 
-def test_extreme_actuation_lag_reports_failure_without_new_search_strategy():
+def test_extreme_actuation_lag_reconfirms_with_independent_geometric_audit():
     report,_,_=run_case('track_endpoint',delay_steps=30)
-    assert report['final_state']=='STOP'
-    assert 'direction' in report['stop_reason']
+    assert report['final_state']=='CONTINUOUS_TRACKING'
+    assert 'DIRECTION_CONFIRMED' in report['events']
+    assert 'DIRECTION_RESUME_VERIFIED' in report['events']
+    assert report['actual_path_length_m'] > .005
+    assert report['max_penetration_m'] < 1e-9
     assert 'REACQUIRED' not in report['events']
     assert report['max_force_N'] < 2.25

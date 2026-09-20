@@ -275,3 +275,112 @@ def test_animation_frame_budget_applies_to_all_encoders():
     indices=frame_indices(np.linspace(0,10000,100000),10,max_frames=240)
     assert len(indices)<=240
     assert indices[-1]==99999
+
+
+def test_identical_geometric_observation_stream_across_three_entry_adapters(tmp_path,monkeypatch):
+    """Replay one actual closed-loop stream through offline, preview and FAKE RTDE.
+
+    This is adapter equivalence, not a hardware/physics authorization test.
+    Every device class is replaced before invoking the execution adapter.
+    """
+    from copy import deepcopy
+    import yaml
+    import simulation.continuous_session as session_module
+    import simulation.continuous_preview as preview_module
+    from simulation.simulator import load_simulation_config
+    from policy.continuous_tracking import State
+    original=session_module.SimulationSession
+    cfg=load_config(ROOT/'config.yaml');cfg['continuous_tracking']['max_runtime_sec']=12
+    scene=load_simulation_config(ROOT/'simulation/scene_continuous.yaml')
+    scene.update(target_shape='rectangle',target_width=.004,target_height=.004,target_center=[0.,0.],
+                 start_point=[-.004,0.],calibration_point_0=[-.004,0.],calibration_point_1=[0.,0.])
+    scene['preprocessing']['baseline']={'capture_on_start':False}
+    cfg['preprocessing']=deepcopy(scene['preprocessing']);cfg['preprocessing']['filter_alpha']=.8
+    cfg['policy']['search_direction_xy']=[1.,0.]
+    master=original(cfg,scene);master.capture_bias();stream=[]
+    for _ in range(1500):
+        sample=master.step();stream.append(sample);master.policy.events.clear()
+        if master.policy.state==State.STOP:break
+    assert any(s.command.state=='DIRECTION_RECONFIRM' for s in stream)
+    scene_path=tmp_path/'stream_scene.yaml';scene_path.write_text(yaml.safe_dump(scene))
+    def at(t):return stream[min(round(t/master.dt),len(stream)-1)]
+    def session_factory(config,scene):
+        session=original(config,scene)
+        session.robot.read_state=lambda:at(session.robot.time).robot
+        session.sensor.read_wrench=lambda xy,v:(at(session.robot.time).raw,at(session.robot.time).diagnostics)
+        return session
+    monkeypatch.setattr(session_module,'SimulationSession',session_factory)
+    monkeypatch.setattr(preview_module,'SimulationSession',session_factory)
+    monkeypatch.setattr(runner,'load_config',lambda path:deepcopy(cfg))
+    arguments=args(tmp_path/'headless');arguments.scene=scene_path;arguments.duration=12
+    runner.run(arguments)
+    model=preview_module.PreviewRun(cfg,scene,tmp_path/'preview');model.start(0);wall=0
+    while model.status=='RUNNING':wall+=.1;model.tick(wall,work_budget_sec=10)
+    class Clock:
+        t=0.
+        def monotonic(self):return self.t
+        def sleep(self,dt):self.t+=dt
+    clock=Clock();device_calls=[]
+    class FakeRobot:
+        observation_timing={};motion_fault=''
+        def __init__(self,cfg):device_calls.append('fake_robot')
+        def connect(self):pass
+        def safe_stop_motion(self,**kwargs):pass
+        def read_state(self):
+            s=at(clock.t).robot
+            return RobotState(clock.t,s.pose.copy(),s.tcp_speed.copy())
+        def read_diagnostic_state(self):return RobotState(clock.t,at(clock.t).robot.pose.copy(),np.zeros(6))
+        def command_planar_velocity(self,*args):device_calls.append('move')
+        def stop(self):device_calls.append('stop')
+        def enable_watchdog(self,*args):pass
+        def kick_watchdog(self):pass
+        def close(self):pass
+    class FakeSensor:
+        def __init__(self,*args):device_calls.append('fake_sensor')
+        def connect(self):pass
+        def read_wrench(self):return at(clock.t).raw
+        def close(self):pass
+    # Use a module-local clock object; do not alter time used by logger/GUI.
+    monkeypatch.setattr(runner,'time',clock)
+    monkeypatch.setattr(runner,'URRTDEController',FakeRobot)
+    monkeypatch.setattr(runner,'PX6DReader',FakeSensor)
+    monkeypatch.setattr(runner,'prepare_real',lambda *a:(cfg['robot'],stream[0].robot.pose.copy()))
+    monkeypatch.setattr('builtins.input',lambda *a:'START')
+    arguments=args(tmp_path/'fake_execution',True);arguments.duration=12
+    runner.run(arguments)
+    def read(path):
+        with (path/'samples.csv').open() as f:return list(csv.DictReader(f))
+    offline=read(next((tmp_path/'headless').glob('run_*')))
+    preview=read(model.run_dir)
+    executed=read(next((tmp_path/'fake_execution').glob('run_*')))
+    assert len(offline)==len(executed)==len(stream)
+    keys=['tcp_x','tcp_y','tcp_vx','tcp_vy','dfx','dfy','command_speed','command_vx','command_vy',
+          'measurement_jump_deg','estimate_residual_deg','direction_speed_scale']
+    for index,(a,b,c) in enumerate(zip(offline,preview,executed)):
+        assert a['current_state']==b['current_state']==c['current_state'],index
+        np.testing.assert_allclose([float(a[k]) for k in keys],[float(b[k]) for k in keys],atol=1e-10)
+        np.testing.assert_allclose([float(a[k]) for k in keys],[float(c[k]) for k in keys],atol=1e-10)
+        assert c['sim_components_available']=='0' and c['sim_object_fx']==''
+        if a['current_state']=='DIRECTION_RECONFIRM':assert float(c['command_speed'])==0
+    assert 'move' in device_calls and 'stop' in device_calls
+
+
+def test_replay_unknown_hardware_components_and_target_are_not_invented(offline_run):
+    from copy import deepcopy
+    data,config,events=read_run(offline_run)
+    # Simulate the information contract of a real log: no object geometry or
+    # independently measurable component forces. Raw/processed totals remain.
+    config=deepcopy(config);config.pop('continuous_simulation')
+    data['sim_components_available'][:]=0
+    for key in list(data):
+        if key.startswith(('sim_object_','sim_friction_','sim_background_','sim_noise_')):data[key][:]=np.nan
+    fig,update=make_figure(data,config,events,view='probe',components=True)
+    update(len(data['time'])-1)
+    assert fig.axes[0].get_aspect()==1
+    assert fig.axes[2].get_ylabel()=='Velocity [mm/s]'
+    assert 'simulation target truth' not in [line.get_label() for line in fig.axes[0].lines]
+    assert not fig.continuous_vectors.arrows['object'].get_visible()
+    assert any('unavailable (trajectory/TCP framing only)' in text.get_text() for text in fig.texts)
+    assert fig.axes[1].lines[-1].get_xdata()[0]==fig.axes[2].lines[-1].get_xdata()[0]
+    import matplotlib.pyplot as plt
+    plt.close(fig)

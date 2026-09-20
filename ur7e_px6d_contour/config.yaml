@@ -189,8 +189,20 @@ continuous_tracking:
   direction_min_force: 0.5         # N; processed XY direction signal floor
   direction_min_filtered_force: 0.3 # N; reject near-cancelled EMA vectors
   direction_min_coherence: 0.8     # dimensionless mean resultant / mean magnitude
-  direction_jump_deg: 45.0         # degrees; abrupt change means stop, never flip sign
+  direction_jump_deg: 45.0         # degrees; pause and reconfirm, never flip sign
   direction_rate_deg_s: 90.0       # degrees/s; estimate slew limit using actual dt
+  direction_slow_rate_deg_s: 45.0 # smooth tangent derating starts before slew saturation
+  direction_slow_residual_deg: 10.0
+  direction_reconfirm_residual_deg: 30.0
+  direction_reconfirm_rate_deg_s: 360.0
+  direction_reversal_deg: 150.0   # ambiguous near-opposite measurement: terminal stop
+  direction_confirm_hold_sec: 0.15
+  direction_confirm_spread_deg: 8.0
+  direction_reconfirm_max_attempts: 3 # bounded retries without 2 mm net progress
+  direction_min_progress: 0.002
+  direction_resume_scale: 0.25
+  direction_resume_sec: 2.0
+  direction_resume_distance: 0.00025 # projected advance along newly confirmed tangent
   command_acceleration: 0.01      # m/s^2; XY velocity slew, hard stops bypass
   overload_tangent_zero_force: 2.25 # N; cut tangent before hard force limit
   overload_stall_sec: 0.5          # s; saturated outward correction without improvement

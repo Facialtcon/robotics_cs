@@ -26,6 +26,13 @@ def read_run(run_dir):
     for key in ('direction_valid', 'command_vx', 'command_vy', 'reacquire_origin_x', 'reacquire_origin_y',
                 'reacquire_reference_x', 'reacquire_reference_y'):
         data[key] = np.array([float(row.get(key) or ('0' if key=='direction_valid' else 'nan')) for row in rows])
+    for key in ('tcp_vx','tcp_vy','tcp_vz','v_t','v_n','stop_requested','raw_fx','raw_fy',
+                'sim_components_available','sim_object_fx','sim_object_fy','sim_friction_fx','sim_friction_fy',
+                'sim_background_fx','sim_background_fy','sim_noise_fx','sim_noise_fy',
+                'measurement_jump_deg','estimate_residual_deg'):
+        data[key] = np.array([float(row.get(key) or 'nan') for row in rows])
+    data['reason'] = [row.get('reason','') for row in rows]
+    data['direction_phase'] = [row.get('direction_phase','unavailable') for row in rows]
     data["time"] = data["monotonic_sec"] - data["monotonic_sec"][0]
     data["state"] = [row["current_state"] for row in rows]
     with (run_dir / "config_snapshot.yaml").open(encoding="utf-8") as handle:
@@ -49,106 +56,114 @@ def frame_indices(times, fps, max_frames=1200):
     return np.r_[indices, len(times)-1].astype(int)
 
 
-def make_figure(data, config, events, *, local_xy=False):
+def make_figure(data, config, events, *, local_xy=False, view=None, components=False):
     import matplotlib.pyplot as plt
     from matplotlib.patches import Polygon, Rectangle, Circle
+    from simulation.continuous_view import XYViewport, VectorDisplay
+    from simulation.continuous_preview import extrema_indices
 
-    fig, (xy, force) = plt.subplots(1, 2, figsize=(10, 4.6), layout="constrained")
-    xy.set_aspect("equal", adjustable="box")
-    xy.set(xlabel="Base X (m)", ylabel="Base Y (m)", title="TCP trajectory")
-    scene = config.get("continuous_simulation")
+    fig=plt.figure(figsize=(14,8))
+    grid=fig.add_gridspec(2,2,width_ratios=[7,3],hspace=.5,wspace=.18)
+    xy=fig.add_subplot(grid[:,0]);force=fig.add_subplot(grid[0,1]);velocity=fig.add_subplot(grid[1,1])
+    fig.subplots_adjust(left=.055,right=.97,bottom=.15,top=.79)
+    xy.set_aspect('equal',adjustable='box')
+    xy.set(xlabel='Base X [mm]',ylabel='Base Y [mm]')
+    scene=config.get('continuous_simulation');outline=None
+    points=np.column_stack((data['tcp_x'],data['tcp_y']))*1000
+    bounds=np.array([points.min(axis=0)-20,points.max(axis=0)+20])
     if scene:
-        if 'target_boundary_xy' in scene:
-            outline = np.array(scene['target_boundary_xy'])
+        if 'target_boundary_xy' in scene:outline=np.array(scene['target_boundary_xy'])*1000
         else:
             from simulation.geometry import create_target
-            outline = create_target(scene).boundary_points()
-        xy.plot(outline[:,0], outline[:,1], color='gray', lw=1, label='simulation target truth')
-        b = scene["container"]
-        xy.add_patch(Rectangle((b["x_min"], b["y_min"]), b["x_max"]-b["x_min"],
-                               b["y_max"]-b["y_min"], fill=False, color="gray", label="container"))
+            outline=create_target(scene).boundary_points()*1000
+        xy.plot(outline[:,0],outline[:,1],color='gray',lw=1,label='simulation target truth')
+        b=scene['container'];bounds=np.array([[b['x_min'],b['y_min']],[b['x_max'],b['y_max']]])*1000
     else:
-        points = config.get("continuous_workspace_calibration", {}).get("rectified_points", {})
-        if points:
-            xy.add_patch(Polygon([points[key][:2] for key in ("R0", "R1", "R2", "R3")],
-                                 fill=False, color="gray", label="calibrated container"))
-        elif config["workspace"].get("enabled", True):
-            b = config["workspace"]["limits"]
-            xy.add_patch(Rectangle((b["x_min"], b["y_min"]), b["x_max"]-b["x_min"],
-                                   b["y_max"]-b["y_min"], fill=False, color="gray", label="workspace"))
-    xy.plot(data["tcp_x"], data["tcp_y"], alpha=0)  # fixed bounds over full replay
-    xy.margins(0.08)
-    trajectory, = xy.plot([], [], color="tab:blue", lw=1, label="reliable contact TCP path")
-    other_path, = xy.plot([], [], color='tab:orange', lw=1, label='search / lost / recovery TCP path')
-    reference_path, = xy.plot([], [], '--', color='purple', lw=1, label='recovery position reference')
-    recovery_range = Circle((0,0), float(config['continuous_tracking'].get('reacquire_max_distance', .004)),
-                            fill=False, ls=':', color='purple', label='recovery displacement limit')
-    xy.add_patch(recovery_range)
-    recovery_range.set_visible(False)
-    probe, = xy.plot([], [], "ko", ms=4, label="TCP (enlarged marker)")
-    contact_mask = ((np.array(data['state']) == 'CONTINUOUS_TRACKING') &
-                    (data['direction_valid'] > .5) &
-                    (data['fxy'] >= float(config['continuous_tracking']['contact_lost_threshold'])))
-    if local_xy:
-        points = np.column_stack((data['tcp_x'], data['tcp_y']))
-        radius = float(config['continuous_tracking']['reacquire_max_distance'])
-        xy.set_xlim(np.nanmin(points[:,0])-radius, np.nanmax(points[:,0])+radius)
-        xy.set_ylim(np.nanmin(points[:,1])-radius, np.nanmax(points[:,1])+radius)
-        xy.set_title('Local TCP view (equal XY scale)')
-    arrow_length = 0.002 if local_xy else 0.008  # display length in meters, not force or velocity scale
-    tangent = xy.quiver([data["tcp_x"][0]], [data["tcp_y"][0]], [0], [0],
-                        angles="xy", scale_units="xy", scale=1, color="tab:green", label="command velocity direction (fixed length)")
-    contact = xy.quiver([data["tcp_x"][0]], [data["tcp_y"][0]], [0], [0],
-                        angles="xy", scale_units="xy", scale=1, color="tab:red", label="force direction estimate (fixed length)")
-    markers = []
-    for name, marker, color in (("FIRST_CONTACT", "*", "green"), ("CONTACT_LOST", "x", "red"),
-                                 ("LOCAL_REACQUIRE", "+", "orange"), ("REACQUIRED", "s", "purple")):
-        selected = [e for e in events if e["event_type"] == name]
-        if selected:
-            artist = xy.scatter([], [], marker=marker, color=color, s=40, label=name)
-            markers.append((artist, selected))
-    xy.legend(fontsize=6, loc="best")
-    for key, label in (("dfx", "Fx"), ("dfy", "Fy"), ("fxy", "Fxy"), ("force_reference", "F_ref")):
-        force.plot(data["time"], data[key], label=label, lw=1)
-    cursor = force.axvline(0, color="black", ls="--", lw=1)
-    force.set(xlabel="Elapsed time (s)", ylabel="Force (N)", title="Processed Base-frame force")
-    force.legend(fontsize=8)
-    force.grid(alpha=0.2)
-    title = fig.suptitle("")
+        calibrated=config.get('continuous_workspace_calibration',{}).get('rectified_points',{})
+        if calibrated:
+            xy.add_patch(Polygon([np.asarray(calibrated[k][:2])*1000 for k in ('R0','R1','R2','R3')],fill=False,color='gray',label='calibrated container'))
+        elif config['workspace'].get('enabled',True):
+            b=config['workspace']['limits'];bounds=np.array([[b['x_min'],b['y_min']],[b['x_max'],b['y_max']]])*1000
+    xy.add_patch(Rectangle(bounds[0],*(bounds[1]-bounds[0]),fill=False,color='gray',label='container / view envelope'))
+    trajectory,=xy.plot([],[],color='tab:blue',lw=1,label='reliable contact TCP path')
+    other_path,=xy.plot([],[],color='tab:orange',lw=1,label='search / lost / recovery TCP path')
+    reference_path,=xy.plot([],[],'--',color='purple',lw=1,label='recovery position reference')
+    recovery_range=Circle((0,0),float(config['continuous_tracking'].get('reacquire_max_distance',.004))*1000,
+                           fill=False,ls=':',color='purple',label='recovery displacement limit')
+    xy.add_patch(recovery_range);recovery_range.set_visible(False)
+    probe,=xy.plot([],[],'ko',ms=4,label='TCP (enlarged marker)')
+    viewport=XYViewport(xy,bounds,None if local_xy else outline)
+    mode=(view or 'Target').title()
+    viewport.select(mode,points[0],path=points)
+    viewport.follow=mode=='Probe'
+    fig.canvas.mpl_connect('scroll_event',viewport.scroll)
+    vectors=VectorDisplay(xy)
+    contact_mask=((np.array(data['state'])=='CONTINUOUS_TRACKING') & (data['direction_valid']>.5) &
+                  (np.nan_to_num(data['stop_requested'])<.5) &
+                  (data['fxy']>=float(config['continuous_tracking']['contact_lost_threshold'])))
+    markers=[]
+    for name,marker,color in [('FIRST_CONTACT','*','green'),('CONTACT_LOST','x','red'),('DIRECTION_STOP_REQUEST','x','orange'),
+                              ('DIRECTION_CONFIRMED','s','purple'),('DIRECTION_RESUME_VERIFIED','+','green')]:
+        selected=[e for e in events if e['event_type']==name]
+        if selected:markers.append((xy.scatter([],[],marker=marker,color=color,s=30,label=name),selected))
+    xy.legend(fontsize=6,loc='lower left',bbox_to_anchor=(0,1.035),ncol=3)
+    force_values=np.column_stack((data['dfx'],data['dfy'],data['fxy'],data['force_reference'],
+                                  data['force_reference']-data['fxy'],np.hypot(data['raw_fx'],data['raw_fy'])))
+    speeds=np.column_stack((np.hypot(data['command_vx'],data['command_vy']),
+                            np.sqrt(data['tcp_vx']**2+data['tcp_vy']**2+data['tcp_vz']**2),data['v_t'],data['v_n']))*1000
+    indices=extrema_indices(np.nan_to_num(force_values),buckets=100)
+    for col,label in enumerate(('Fx','Fy','Fxy','F_ref','F_error','Raw Base Fxy' if scene else 'Raw sensor Fxy')):
+        force.plot(data['time'][indices],force_values[indices,col],label=label,lw=.9)
+    cursor=force.axvline(0,color='k',ls='--',lw=.8)
+    indices=extrema_indices(np.nan_to_num(speeds),buckets=100)
+    for col,label in enumerate(('Command','Actual','v_t','v_n')):
+        velocity.plot(data['time'][indices],speeds[indices,col],label=label,lw=.9)
+    velocity_cursor=velocity.axvline(0,color='k',ls='--',lw=.8)
+    force.set(xlabel='Elapsed time [s]',ylabel='Processed Base / raw force [N]')
+    velocity.set(xlabel='Elapsed time [s]',ylabel='Velocity [mm/s]')
+    for axis in (force,velocity):axis.legend(fontsize=6,ncol=3,loc='upper right');axis.grid(alpha=.2)
+    title=fig.suptitle('')
+    note=fig.text(.055,.033,'',fontsize=8)
+    fig.text(.055,.072,'Blue force: 8 mm/N. Black command / purple actual speed: 12 mm per mm/s. Green/red: valid tangent/inward unit directions only.',fontsize=8)
+    # Exposed only for offline tests/interactive notebook inspection.
+    fig.continuous_viewport=viewport;fig.continuous_vectors=vectors
 
     def update(index):
-        x, y = data["tcp_x"][index], data["tcp_y"][index]
-        mask = contact_mask[:index+1]
-        for line, selected in ((trajectory, mask), (other_path, ~mask)):
-            line.set_data(np.where(selected, data['tcp_x'][:index+1], np.nan),
-                          np.where(selected, data['tcp_y'][:index+1], np.nan))
-        reference_path.set_data(data['reacquire_reference_x'][:index+1], data['reacquire_reference_y'][:index+1])
-        origin = [data['reacquire_origin_x'][index], data['reacquire_origin_y'][index]]
-        recovery_range.set_visible(bool(np.all(np.isfinite(origin))))
-        if np.all(np.isfinite(origin)):
-            recovery_range.center = origin
-        probe.set_data([x], [y])
-        velocity = np.array([data['command_vx'][index], data['command_vy'][index]])
-        speed = np.linalg.norm(velocity)
-        direction = velocity/speed if np.isfinite(speed) and speed > 0 else np.zeros(2)
-        tangent.set_offsets([[x,y]])
-        tangent.set_UVC([direction[0]*arrow_length], [direction[1]*arrow_length])
-        contact.set_offsets([[x,y]])
-        valid = data['direction_valid'][index] > .5
-        contact.set_UVC([data['contact_direction_x'][index]*arrow_length if valid else 0],
-                        [data['contact_direction_y'][index]*arrow_length if valid else 0])
-        for artist, selected in markers:
-            visible = [[float(e["x"]), float(e["y"])] for e in selected
-                       if float(e["timestamp"]) <= data["monotonic_sec"][index] + 1e-8]
-            artist.set_offsets(np.asarray(visible).reshape(-1, 2))
-        cursor.set_xdata([data["time"][index]] * 2)
-        title.set_text(f"{data['time'][index]:.2f} s | {data['state'][index]} | direction arrows: {arrow_length*1000:g} mm display length")
-        return trajectory, other_path, reference_path, probe, tangent, contact, cursor, title
+        point=points[index];mask=contact_mask[:index+1]
+        # Bounded path display, preserve endpoints and keep gaps between modes.
+        keep=np.unique(np.r_[np.arange(0,index+1,max(1,(index+1)//4000)),index])
+        for line,selected in ((trajectory,mask),(other_path,~mask)):
+            line.set_data(np.where(selected[keep],points[keep,0],np.nan),np.where(selected[keep],points[keep,1],np.nan))
+        reference_path.set_data(data['reacquire_reference_x'][keep]*1000,data['reacquire_reference_y'][keep]*1000)
+        origin=np.array([data['reacquire_origin_x'][index],data['reacquire_origin_y'][index]])*1000
+        recovery_range.set_visible(bool(np.isfinite(origin).all()))
+        if np.isfinite(origin).all():recovery_range.center=origin
+        probe.set_data([point[0]],[point[1]])
+        viewport.update(point,running=True)
+        available=bool(scene) and data['sim_components_available'][index]==1
+        comp=({key:np.array([data['sim_'+key+'_fx'][index],data['sim_'+key+'_fy'][index]])
+               for key in ('object','friction','background','noise')} if components and available else None)
+        vectors.draw(point,np.array([data['dfx'][index],data['dfy'][index]]),
+                     np.array([data['command_vx'][index],data['command_vy'][index]])*1000,
+                     np.array([data['tcp_vx'][index],data['tcp_vy'][index]])*1000,
+                     np.array([data['tangent_x'][index],data['tangent_y'][index]]),
+                     np.array([data['contact_direction_x'][index],data['contact_direction_y'][index]]),
+                     valid=bool(contact_mask[index]),components=comp)
+        for artist,selected in markers:
+            visible=[[float(e['x'])*1000,float(e['y'])*1000] for e in selected if float(e['timestamp'])<=data['monotonic_sec'][index]+1e-8]
+            artist.set_offsets(np.asarray(visible).reshape(-1,2))
+        for cur in (cursor,velocity_cursor):cur.set_xdata([data['time'][index]]*2)
+        f=force_values[index];v=speeds[index]
+        force.set_title(f'Fx {f[0]:.2f}, Fy {f[1]:.2f}, Fxy {f[2]:.2f} N\nF_ref {f[3]:.2f}, error {f[4]:+.2f} N',fontsize=8)
+        velocity.set_title(f'cmd {v[0]:.3f}, actual {v[1]:.3f} mm/s\nv_t {v[2]:+.3f}, v_n {v[3]:+.3f} mm/s',fontsize=8)
+        title.set_text(f"{data['time'][index]:.2f}s | {data['state'][index]} / {data['direction_phase'][index]} | {data['reason'][index]}")
+        note.set_text('Raw model components (simulation convention): '+('available; orange model target action (inward convention) / brown friction / gray background / pink noise; sum = RAW, not processed' if available else 'unavailable')+
+                      f"\nRaw {'synthetic Base' if scene else 'sensor-frame'} Fx {data['raw_fx'][index]:.3f}, Fy {data['raw_fy'][index]:.3f} N; target geometry: "+('known simulation' if scene else 'unavailable (trajectory/TCP framing only)'))
+        return trajectory,other_path,reference_path,probe,cursor,velocity_cursor,title
+    return fig,update
 
-    return fig, update
 
-
-def render(run_dir, *, fps=None, output_format="auto", local_xy=False):
+def render(run_dir, *, fps=None, output_format="auto", local_xy=False, view=None, components=False):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -163,9 +178,9 @@ def render(run_dir, *, fps=None, output_format="auto", local_xy=False):
     if data['time'][-1]*fps+1 > max_frames:
         fps = (len(indices)-1)/max(data['time'][-1], 1/fps)
         print(f'Bounded replay: {len(indices)} frames, {fps:.2f} fps')
-    fig, update = make_figure(data, config, events, local_xy=local_xy)
+    fig, update = make_figure(data, config, events, local_xy=local_xy, view=view, components=components)
     output = Path(run_dir)
-    suffix = "_local" if local_xy else ""
+    suffix = "_local" if local_xy else ("_"+view if view else "")
     summary = output / f"continuous_summary{suffix}.png"
     update(len(data["time"])-1)
     fig.savefig(summary, dpi=140)
@@ -204,8 +219,10 @@ def main():
     parser.add_argument("--fps", type=float)
     parser.add_argument("--local-xy", action="store_true", help="crop XY around actual path, preserving equal scale")
     parser.add_argument("--format", choices=("auto", "mp4", "gif", "none"), default="auto")
+    parser.add_argument("--view", choices=("global", "target", "probe"), help="equal XY framing; unknown targets use trajectory")
+    parser.add_argument("--components", action="store_true", help="show recorded RAW simulation components if available")
     args = parser.parse_args()
-    for path in render(args.run_dir, fps=args.fps, output_format=args.format, local_xy=args.local_xy):
+    for path in render(args.run_dir, fps=args.fps, output_format=args.format, local_xy=args.local_xy, view=args.view, components=args.components):
         print(path)
 
 

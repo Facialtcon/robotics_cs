@@ -141,10 +141,93 @@ def run_case(name, *, output_root=None, rotation_deg=0., mirror=False, hand='COU
     return report, np.asarray(trajectory), np.asarray(references)
 
 
+def run_direction_case(name, *, output_root, duration=180., rotation_deg=0., translation=(0.,0.)):
+    """Full search->motion->sensor loop; only the OFFLINE duration is extended.
+
+    Truth below is an independent scorer; never supplied to the policy.
+    Passing a first-turn metric is not a full-contour or hardware claim.
+    """
+    import csv
+    from simulation.simulator import load_simulation_config
+    from simulation.continuous_preview import PreviewRun
+    from policy.continuous_tracking import angle_between
+    from policy.boundary_estimation import handed_tangent
+    from run_continuous_tracking import git_provenance
+    cfg=load_config(ROOT/'config.yaml')
+    cfg['continuous_tracking']['max_runtime_sec']=float(duration)
+    cfg['continuous_provenance']=git_provenance()
+    path=ROOT/'simulation'/('scene_direction_triangle.yaml' if name=='triangle' else 'scene_continuous.yaml')
+    scene=load_simulation_config(path)
+    if name=='square':scene.update(target_shape='rectangle',target_width=.12,target_height=.12,target_rotation_deg=0.)
+    elif name=='empty':scene.update(target_shape='circle',target_center=[0,.08],target_radius=.02)
+    elif name not in ('circle','triangle'):raise ValueError(name)
+    theta=np.deg2rad(rotation_deg);matrix=np.array([[np.cos(theta),-np.sin(theta)],[np.sin(theta),np.cos(theta)]])
+    for key in ('target_center','start_point','calibration_point_0','calibration_point_1'):
+        scene[key]=(matrix@np.asarray(scene[key])+translation).tolist()
+    scene['target_rotation_deg']=scene.get('target_rotation_deg',0.)+rotation_deg
+    cfg['continuous_direction_validation']=dict(case=name,offline_duration_sec=duration,
+        rotation_deg=rotation_deg,translation=list(translation),only_duration_extended=True)
+    model=PreviewRun(cfg,scene,output_root)
+    model.start(0);model.set_speed(10,0);wall=0.
+    try:
+        while model.status=='RUNNING':
+            wall+=.1;model.tick(wall,work_budget_sec=10)
+    finally:model.stop('validation interrupted')
+    with (model.run_dir/'samples.csv').open() as f:rows=list(csv.DictReader(f))
+    xy=np.array([[float(r['tcp_x']),float(r['tcp_y'])] for r in rows])
+    force=np.array([float(r['fxy']) for r in rows])
+    track=np.array([r['current_state']=='CONTINUOUS_TRACKING' for r in rows])
+    target=model.session.target
+    normals=np.array([target.signed_distance_and_outward_normal(p)[1] for p in xy])
+    indices=np.flatnonzero(track)
+    turn=None;progress=path_after=0.
+    threshold=115 if name=='triangle' else 85 if name=='square' else 90
+    if len(indices):
+        first=indices[0]
+        angles=np.unwrap(np.arctan2(normals[first:,1],normals[first:,0]))
+        reached=np.flatnonzero(np.abs(angles-angles[0])>=np.deg2rad(threshold))
+        if len(reached):
+            turn=first+int(reached[0])
+            tangent=handed_tangent(-normals[turn],cfg['policy']['follow_hand'])
+            progress=float(np.dot(xy[-1]-xy[turn],tangent))
+            path_after=float(np.linalg.norm(np.diff(xy[turn:],axis=0),axis=1).sum())
+    penetration=max(float(r['sim_penetration_m']) for r in rows)
+    crossings=sum(int(r['sim_segment_penetration']) for r in rows)
+    compression=max(float(r['sim_compression_m']) for r in rows)
+    abnormal=compression>float(scene['force_model']['probe_tip_radius'])+1e-9
+    events=[e.event_type for e in model.events]
+    report=dict(case=name,run_dir=str(model.run_dir),offline_duration_sec=duration,
+        first_turn_normal_change_deg=threshold,first_turn_time=None if turn is None else float(rows[turn]['monotonic_sec']),
+        post_turn_net_progress_m=progress,post_turn_path_m=path_after,
+        first_turn_validated=bool(progress>=.005 and penetration<=1e-9 and crossings==0 and not abnormal),
+        contour_complete=False,termination_reason=model.session.policy.stop_reason.value,stop_detail=model.session.policy.reason,
+        direction_pause_count=events.count('DIRECTION_STOP_REQUEST'),direction_confirmed_count=events.count('DIRECTION_CONFIRMED'),
+        resume_verified_count=events.count('DIRECTION_RESUME_VERIFIED'),
+        max_penetration_m=penetration,segment_penetration_count=crossings,max_compression_m=compression,
+        abnormal_compression=bool(abnormal),processed_force_range_N=[float(force.min()),float(force.max())],
+        tracking_force_range_N=None if not len(indices) else [float(force[track].min()),float(force[track].max())],
+        rotation_deg=rotation_deg,translation=list(translation),sample_count=len(rows))
+    (model.run_dir/'direction_geometry_report.json').write_text(json.dumps(report,indent=2))
+    return report
+
+
+def direction_suite(output_root):
+    output=Path(output_root)/datetime.now().strftime('directions_%Y%m%d_%H%M%S_%f')
+    reports=[run_direction_case(name,output_root=output/name) for name in ('circle','square','triangle','empty')]
+    reports.append(run_direction_case('square',output_root=output/'square_transformed',rotation_deg=30.,translation=(.01,.015)))
+    (output/'direction_reports.json').write_text(json.dumps(reports,indent=2))
+    print(json.dumps(reports,indent=2));print(output)
+    return reports
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,default=ROOT/'simulation_outputs'/'continuous_revision')
+    parser.add_argument('--directions',action='store_true',help='extended offline first-turn audit; no speed increase')
     args=parser.parse_args()
+    if args.directions:
+        direction_suite(args.output)
+        return
     output=args.output/datetime.now().strftime('validation_%Y%m%d_%H%M%S_%f')
     output.mkdir(parents=True,exist_ok=False)
     reports=[run_case(name,output_root=output)[0] for name in ('track_straight','track_circle','track_endpoint',

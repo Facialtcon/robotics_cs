@@ -61,4 +61,5 @@ class SimulatedForceSensor:
             "background_force": background,
             "object_force": object_force,
             "friction_force": friction,
+            "noise_force": noise,
         }

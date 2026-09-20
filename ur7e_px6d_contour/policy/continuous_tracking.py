@@ -20,6 +20,7 @@ class State(str, Enum):
     TARGET_SEARCH = "TARGET_SEARCH"
     FIRST_CONTACT = "FIRST_CONTACT"
     CONTINUOUS_TRACKING = "CONTINUOUS_TRACKING"
+    DIRECTION_RECONFIRM = "DIRECTION_RECONFIRM"
     CONTACT_LOST = "CONTACT_LOST"
     LOCAL_REACQUIRE = "LOCAL_REACQUIRE"
     STOP = "STOP"
@@ -50,7 +51,11 @@ def validate_config(config: dict) -> None:
                 "overload_stall_sec", "overload_improvement_force", "memory_max_age_sec",
                 "reacquire_radius", "reacquire_max_path", "reacquire_position_gain",
                 "reacquire_reference_freeze_error", "reacquire_max_tracking_error",
-                "boundary_margin", "reacquire_min_progress", "watchdog_frequency_hz")
+                "boundary_margin", "reacquire_min_progress", "watchdog_frequency_hz",
+                "direction_slow_rate_deg_s", "direction_slow_residual_deg", "direction_reconfirm_residual_deg",
+                "direction_reconfirm_rate_deg_s", "direction_reversal_deg", "direction_confirm_hold_sec",
+                "direction_confirm_spread_deg", "direction_min_progress", "direction_resume_scale",
+                "direction_resume_sec", "direction_resume_distance")
     for key in positive:
         if not np.isfinite(float(c[key])) or float(c[key]) <= 0:
             raise ValueError(f"continuous_tracking.{key} must be finite and positive")
@@ -90,6 +95,18 @@ def validate_config(config: dict) -> None:
         raise ValueError("direction_min_coherence must be in (0, 1]")
     if not 0 < float(c["direction_jump_deg"]) < 90:
         raise ValueError("direction_jump_deg must be in (0, 90)")
+    if not (c['direction_slow_residual_deg'] < c['direction_reconfirm_residual_deg'] <= c['direction_jump_deg']
+            < c['direction_reversal_deg'] < 180):
+        raise ValueError('invalid direction slow/reconfirm/reversal thresholds')
+    if not (c['direction_slow_rate_deg_s'] < c['direction_reconfirm_rate_deg_s']
+            and 0 < c['direction_resume_scale'] <= 1
+            and p['contact_hold_time'] <= c['direction_confirm_hold_sec'] < c['confirmation_timeout_sec']):
+        raise ValueError('invalid direction confirmation/ramp parameters')
+    if type(c['direction_reconfirm_max_attempts']) is not int or c['direction_reconfirm_max_attempts'] < 1:
+        raise ValueError('direction_reconfirm_max_attempts must be a positive integer')
+    if not (c['direction_confirm_spread_deg'] < c['direction_jump_deg']
+            and c['direction_resume_distance'] < c['direction_min_progress']):
+        raise ValueError('invalid direction spread / progress window')
     if not (float(c["direction_min_filtered_force"]) <= float(c["direction_min_force"])
             <= float(c["contact_lost_threshold"])):
         raise ValueError("direction force thresholds must not exceed lost threshold")
@@ -130,6 +147,11 @@ DIAGNOSTIC_FIELDS = (
     "reacquire_normal_x", "reacquire_normal_y", "reacquire_tangent_x", "reacquire_tangent_y",
 )
 EXTRA_SAMPLE_FIELDS += DIAGNOSTIC_FIELDS
+DIRECTION_FIELDS = ('measurement_jump_deg', 'estimate_residual_deg', 'measurement_rate_deg_s',
+                    'direction_rate_filtered_deg_s', 'direction_speed_scale', 'direction_reconfirm_elapsed',
+                    'direction_reconfirm_count', 'direction_reconfirm_attempts', 'direction_resume_active',
+                    'direction_resume_progress_m', 'direction_phase')
+EXTRA_SAMPLE_FIELDS += DIRECTION_FIELDS
 
 
 class ContinuousTrackingPolicy:
@@ -161,6 +183,14 @@ class ContinuousTrackingPolicy:
         self._start_pose = None
         self._confirm_started = self._force_since = self._settle_since = None
         self._low_force_pending = False
+        self._last_valid_measurement = self._last_valid_measurement_time = None
+        self.measurement_jump_deg = self.estimate_residual_deg = self.measurement_rate_deg_s = 0.
+        self.direction_rate_filtered_deg_s = 0.
+        self.direction_speed_scale = 1.
+        self.direction_reconfirm_count = self.direction_reconfirm_attempts = 0
+        self._direction_attempt_pose = None
+        self._direction_resume_started = self._direction_resume_pose = self._direction_resume_tangent = None
+        self.direction_resume_progress_m = 0.
         self._confirmation_vectors = deque()
         self._saturation_since = self._saturation_force = None
         self._last_recovery_origin = None
@@ -240,18 +270,31 @@ class ContinuousTrackingPolicy:
             self._confirmation_vectors.append((now, vector.copy()))
             # Only the most recent continuous stable-force window initializes
             # local direction. Never touch WrenchPreprocessor or sensor bias.
-            window = float(self.p['contact_hold_time'])
+            window = (float(self.c['direction_confirm_hold_sec']) if self.state == State.DIRECTION_RECONFIRM
+                      else float(self.p['contact_hold_time']))
             while len(self._confirmation_vectors) > 1 and self._confirmation_vectors[1][0] < now-window:
                 self._confirmation_vectors.popleft()
         else:
             self._force_since = None
             self._confirmation_vectors.clear()
         self.contact_hold_elapsed = 0. if self._force_since is None else now-self._force_since
-        if self.contact_hold_elapsed + 1e-12 >= float(self.p['contact_hold_time']) and settled:
+        hold = (float(self.c['direction_confirm_hold_sec']) if self.state == State.DIRECTION_RECONFIRM
+                else float(self.p['contact_hold_time']))
+        if self.contact_hold_elapsed + 1e-12 >= hold and settled:
             values = np.array([v for _, v in self._confirmation_vectors])
             mean = np.mean(values, axis=0)
             magnitude = float(np.linalg.norm(mean))
             coherence = magnitude / float(np.mean(np.linalg.norm(values, axis=1)))
+            if self.state == State.DIRECTION_RECONFIRM:
+                spread = max(abs(np.rad2deg(angle_between(mean, v))) for v in values)
+                self.direction_confidence, self.filtered_fxy = coherence, magnitude
+                if spread > float(self.c['direction_confirm_spread_deg']) or coherence < float(self.c['direction_min_coherence']):
+                    self._force_since = now
+                    self._confirmation_vectors.clear()
+                    self.contact_hold_elapsed = 0.
+                    # Keep the original episode deadline; unstable windows are
+                    # not new attempts and can never extend the timeout.
+                    magnitude = 0.
             if magnitude >= float(self.c['direction_min_filtered_force']) and coherence >= float(self.c['direction_min_coherence']):
                 self._filtered, self._filtered_magnitude = mean, float(np.mean(np.linalg.norm(values, axis=1)))
                 self.contact_direction = float(self.c['force_direction_sign']) * mean / magnitude
@@ -262,7 +305,9 @@ class ContinuousTrackingPolicy:
                 self._remember(now, robot.pose)
                 return True
         if now-self._confirm_started >= float(self.c['confirmation_timeout_sec']):
-            self.request_stop(now, robot.pose, 'contact/standstill confirmation timeout')
+            direction = self.state == State.DIRECTION_RECONFIRM
+            self.request_stop(now, robot.pose, 'direction reconfirmation timeout' if direction else 'contact/standstill confirmation timeout',
+                              code=TerminationReason.STOP_DIRECTION_UNCONFIRMED if direction else None)
         return False
 
     def _remember(self, now, pose):
@@ -280,12 +325,11 @@ class ContinuousTrackingPolicy:
             self.direction_confidence = 0.
             return False
         measurement = vector / self.fxy
-        if self._previous_measurement is not None:
-            jump = abs(np.rad2deg(angle_between(self._previous_measurement, measurement)))
-            residual = abs(np.rad2deg(angle_between(self.contact_direction, float(self.c['force_direction_sign'])*measurement)))
-            if max(jump, residual) > float(self.c['direction_jump_deg']):
-                self.request_stop(now, pose, 'unreliable force direction jump; unloading direction unknown')
-                return False
+        if (self.measurement_jump_deg > float(self.c['direction_jump_deg']) or
+                self.estimate_residual_deg > float(self.c['direction_reconfirm_residual_deg']) or
+                self.direction_rate_filtered_deg_s > float(self.c['direction_reconfirm_rate_deg_s'])):
+            self._begin_direction_reconfirm(now, pose, 'measurement change / estimate lag')
+            return False
         alpha = float(self.c['force_direction_filter_alpha']) ** (self.dt / self.nominal_dt)
         self._filtered = vector.copy() if self._filtered is None else alpha*self._filtered+(1-alpha)*vector
         self._filtered_magnitude = alpha*self._filtered_magnitude+(1-alpha)*self.fxy
@@ -293,7 +337,7 @@ class ContinuousTrackingPolicy:
         self.direction_confidence = self.filtered_fxy / max(self._filtered_magnitude, float(self.c['direction_min_force']))
         if (self.filtered_fxy < float(self.c['direction_min_filtered_force'])
                 or self.direction_confidence < float(self.c['direction_min_coherence'])):
-            self.request_stop(now, pose, 'force direction cancellation; unloading direction unknown')
+            self._begin_direction_reconfirm(now, pose, 'low filtered magnitude / direction coherence')
             return False
         candidate = float(self.c['force_direction_sign']) * self._filtered / self.filtered_fxy
         angle = angle_between(self.contact_direction, candidate)
@@ -307,6 +351,103 @@ class ContinuousTrackingPolicy:
         self.tangent = handed_tangent(self.contact_direction, self.follow_hand)
         self._previous_measurement = measurement
         self.direction_valid = True
+        rate_scale = 1 / (1 + (self.direction_rate_filtered_deg_s / float(self.c['direction_slow_rate_deg_s']))**2)
+        residual_scale = np.clip((float(self.c['direction_reconfirm_residual_deg']) - self.estimate_residual_deg) /
+                                (float(self.c['direction_reconfirm_residual_deg']) - float(self.c['direction_slow_residual_deg'])), .15, 1.)
+        target_scale = max(.15, rate_scale) * residual_scale
+        # Rate evidence is filtered; recovery of speed is deliberately slower
+        # than reduction. Neither dt nor the force correction formula changes.
+        self.direction_speed_scale = min(target_scale, self.direction_speed_scale + self.dt/.5)
+        return True
+
+    def _measure_direction(self, now, vector):
+        self.measurement_jump_deg = self.estimate_residual_deg = self.measurement_rate_deg_s = 0.
+        if self.fxy < float(self.c['direction_min_force']):
+            return
+        direction = vector/self.fxy
+        if self._last_valid_measurement is not None:
+            self.measurement_jump_deg = abs(np.rad2deg(angle_between(self._last_valid_measurement, direction)))
+            interval = now-self._last_valid_measurement_time
+            self.measurement_rate_deg_s = self.measurement_jump_deg/max(interval, 1e-12)
+        if np.linalg.norm(self.contact_direction) > 0:
+            self.estimate_residual_deg = abs(np.rad2deg(angle_between(self.contact_direction,
+                                                        float(self.c['force_direction_sign'])*direction)))
+        alpha = float(self.c['force_direction_filter_alpha']) ** (self.dt/self.nominal_dt)
+        self.direction_rate_filtered_deg_s = alpha*self.direction_rate_filtered_deg_s + (1-alpha)*self.measurement_rate_deg_s
+        self._last_valid_measurement, self._last_valid_measurement_time = direction.copy(), now
+        if (self.state in (State.CONTINUOUS_TRACKING, State.DIRECTION_RECONFIRM) and
+                max(self.measurement_jump_deg, self.estimate_residual_deg) >= float(self.c['direction_reversal_deg'])):
+            self.direction_valid = False
+            self.request_stop(now, self.tracking_pose, 'ambiguous near-opposite force direction reversal; sign unknown',
+                              code=TerminationReason.STOP_DIRECTION_REVERSAL)
+
+    def _begin_direction_reconfirm(self, now, pose, cause):
+        if self._direction_attempt_pose is None or np.linalg.norm(pose[:2]-self._direction_attempt_pose) >= float(self.c['direction_min_progress']):
+            self.direction_reconfirm_attempts = 0
+            self._direction_attempt_pose = pose[:2].copy()
+        if self.direction_reconfirm_attempts >= int(self.c['direction_reconfirm_max_attempts']):
+            self.request_stop(now, pose, 'repeated direction reconfirmation without progress',
+                              code=TerminationReason.STOP_DIRECTION_NO_PROGRESS)
+            return
+        self.direction_reconfirm_attempts += 1
+        self.direction_reconfirm_count += 1
+        self.state, self.reason = State.DIRECTION_RECONFIRM, cause
+        self.direction_valid = False
+        self.stop_requested = True
+        self._lost = None
+        self._reset_confirmation(now)
+        self._event(now, pose, 'DIRECTION_STOP_REQUEST')
+
+    def _direction_reconfirm(self, now, robot, vector):
+        self.stop_requested, self.direction_valid = True, False
+        # Deadline precedes acceptance: a window completing just after the
+        # budget cannot be accepted because of floating-point sample times.
+        if now-self._confirm_started+1e-12 >= float(self.c['confirmation_timeout_sec']):
+            self.request_stop(now, robot.pose, 'direction reconfirmation timeout',
+                              code=TerminationReason.STOP_DIRECTION_UNCONFIRMED)
+            return self._command(robot.pose)
+        if self.fxy < float(self.c['contact_lost_threshold']):
+            if self._lost is None:
+                self._lost = now
+            self.lost_timer = now-self._lost
+            if self.lost_timer+1e-12 >= float(self.c['contact_lost_hold_sec']):
+                self.state = State.CONTACT_LOST
+                self.loss_detection_pose = robot.pose.copy()
+                self._low_force_pending = False
+                self._direction_resume_started = None
+                self._confirm_started = now
+                self._event(now, robot.pose, 'CONTACT_LOST')
+                return self._command(robot.pose)
+        else:
+            self._lost, self.lost_timer = None, 0.
+        if self._confirm(now, robot, vector):
+            self.state, self.reason = State.CONTINUOUS_TRACKING, ''
+            self._confirm_started = None
+            self._low_force_pending = False
+            self._direction_resume_started = now
+            self._direction_resume_pose = robot.pose[:2].copy()
+            self._direction_resume_tangent = self.tangent.copy()
+            self.direction_resume_progress_m = 0.
+            self.direction_speed_scale = float(self.c['direction_resume_scale'])
+            self._event(now, robot.pose, 'DIRECTION_CONFIRMED')
+        return self._command(robot.pose)
+
+    def _validate_direction_resume(self, now, pose):
+        if self._direction_resume_started is None:
+            return True
+        self.direction_resume_progress_m = float(np.dot(pose[:2]-self._direction_resume_pose, self._direction_resume_tangent))
+        if self.fxy >= float(self.c['overload_tangent_zero_force']):
+            self.request_stop(now, pose, 'direction restart overload', code=TerminationReason.STOP_FORCE_LIMIT)
+            return False
+        if self.direction_resume_progress_m < -float(self.c['boundary_margin']):
+            self.request_stop(now, pose, 'direction restart backward progress', code=TerminationReason.STOP_DIRECTION_NO_PROGRESS)
+            return False
+        if self.direction_resume_progress_m >= float(self.c['direction_resume_distance']):
+            self._direction_resume_started = None
+            self._event(now, pose, 'DIRECTION_RESUME_VERIFIED')
+        elif now-self._direction_resume_started >= float(self.c['direction_resume_sec']):
+            self.request_stop(now, pose, 'direction restart insufficient progress', code=TerminationReason.STOP_DIRECTION_NO_PROGRESS)
+            return False
         return True
 
     def _begin_recovery(self, now, pose):
@@ -408,7 +549,7 @@ class ContinuousTrackingPolicy:
         if (self.dt <= 0 or self.dt > float(self.c['max_sample_gap_sec'])
                 or age < -1e-6 or age > float(self.c['max_observation_age_sec'])):
             self._reset_confirmation(now)
-            self.request_stop(now, pose, 'stale sample / invalid control interval')
+            self.request_stop(now, pose, 'stale sample / invalid control interval', code=TerminationReason.STOP_STALE_DATA)
             return self._command(pose)
         self._last_time = now
         self.fxy = float(np.hypot(processed.fx, processed.fy))
@@ -420,6 +561,9 @@ class ContinuousTrackingPolicy:
             self.request_stop(now, pose, safety, code=TerminationReason.STOP_FORCE_LIMIT)
             return self._command(pose)
         vector = np.array([processed.fx, processed.fy])
+        self._measure_direction(now, vector)
+        if self.state == State.STOP:
+            return self._command(pose)
         self.contact_flag = self.fxy >= float(self.p['contact_threshold'])
         self.force_direction = vector/self.fxy if self.fxy >= float(self.c['direction_min_force']) else np.zeros(2)
         self.measurement_direction = self.force_direction.copy()
@@ -452,6 +596,8 @@ class ContinuousTrackingPolicy:
                 self._event(now, pose, 'FIRST_CONTACT')
                 self._confirm_started = None
             return self._command(pose)
+        if self.state == State.DIRECTION_RECONFIRM:
+            return self._direction_reconfirm(now, robot, vector)
         if self.state == State.CONTINUOUS_TRACKING:
             self.stop_confirmed = False
             if self.fxy < float(self.c['contact_lost_threshold']):
@@ -472,6 +618,7 @@ class ContinuousTrackingPolicy:
                 if self.lost_timer+1e-12 >= float(self.c['contact_lost_hold_sec']):
                     self.state = State.CONTACT_LOST
                     self._low_force_pending = False
+                    self._direction_resume_started = None
                     self.loss_detection_pose = pose.copy()
                     self._confirm_started = now
                     self._event(now, pose, 'CONTACT_LOST')
@@ -495,6 +642,8 @@ class ContinuousTrackingPolicy:
                 self.stop_requested = True
                 return self._command(pose)
             self._remember(now, pose)  # Includes reliable 0.5--1 N samples.
+            if not self._validate_direction_resume(now, pose):
+                return self._command(pose)
             error = float(self.c['force_reference'])-self.fxy
             dead = np.sign(error)*max(abs(error)-float(self.c['force_deadband']), 0.)
             vn = float(np.clip(float(self.c['force_gain'])*dead,
@@ -505,14 +654,15 @@ class ContinuousTrackingPolicy:
             contact_scale = np.clip((self.fxy-float(self.c['contact_lost_threshold'])) /
                                     (float(self.p['contact_threshold'])-float(self.c['contact_lost_threshold'])), 0, 1)
             vt = float(self.c['tangential_speed'])*load_scale*contact_scale*self.direction_confidence
-            if self.direction_limited:
-                vt *= .5
+            vt *= (min(self.direction_speed_scale, float(self.c['direction_resume_scale']))
+                   if self._direction_resume_started is not None else self.direction_speed_scale)
             saturated = vn <= -float(self.c['normal_speed_limit'])+1e-12
             if saturated:
                 if self._saturation_since is None or self.fxy <= self._saturation_force-float(self.c['overload_improvement_force']):
                     self._saturation_since, self._saturation_force = now, self.fxy
                 elif now-self._saturation_since >= float(self.c['overload_stall_sec']):
-                    self.request_stop(now, pose, 'saturated unloading without force improvement')
+                    self.request_stop(now, pose, 'saturated unloading without force improvement',
+                                      code=TerminationReason.STOP_FORCE_LIMIT)
                     return self._command(pose)
             else:
                 self._saturation_since = None
@@ -539,7 +689,7 @@ class ContinuousTrackingPolicy:
         loss = missing if self.loss_detection_pose is None else self.loss_detection_pose[:2]
         recovery_normal = missing if self._memory_normal is None else self._memory_normal
         recovery_tangent = missing if self._memory_tangent is None else self._memory_tangent
-        return dict(zip(EXTRA_SAMPLE_FIELDS, (
+        result = dict(zip(EXTRA_SAMPLE_FIELDS, (
             self.filtered_fxy, *self.force_direction, *self.contact_direction,
             float(self.c['force_reference']), float(self.c['force_reference'])-self.fxy,
             self.v_t, self.v_n, *velocity, command.speed, self.lost_timer, self.follow_hand,
@@ -551,3 +701,12 @@ class ContinuousTrackingPolicy:
             memory.get('timestamp', float('nan')), memory.get('confidence', 0.), self.reason,
             *memory_pose, *memory_normal, *loss, *recovery_normal, *recovery_tangent,
         )))
+        result.update(zip(DIRECTION_FIELDS, (
+            self.measurement_jump_deg, self.estimate_residual_deg, self.measurement_rate_deg_s,
+            self.direction_rate_filtered_deg_s, self.direction_speed_scale,
+            0. if self.state != State.DIRECTION_RECONFIRM else max(0., self._last_time-self._confirm_started),
+            self.direction_reconfirm_count, self.direction_reconfirm_attempts, int(self._direction_resume_started is not None),
+            self.direction_resume_progress_m, 'RECONFIRM' if self.state == State.DIRECTION_RECONFIRM else
+            (self.state.value if self.state != State.CONTINUOUS_TRACKING else
+             ('VERIFY_RESUME' if self._direction_resume_started is not None else ('LOW_FORCE_CONFIRM' if self._low_force_pending else 'TRACK'))))))
+        return result

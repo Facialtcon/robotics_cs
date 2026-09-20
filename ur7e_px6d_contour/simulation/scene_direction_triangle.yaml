@@ -1,0 +1,124 @@
+# Exact independent scene from run_20260920_235436_498310; policy stays in root config.
+scene_name: direction_triangle_recorded_20260920
+container:
+  x_min: -0.18
+  x_max: 0.18
+  y_min: -0.13
+  y_max: 0.13
+target_shape: triangle
+target_center:
+- 0.013484042553191501
+- 0.012101063829787224
+target_width: 0.12
+target_height: 0.12
+target_rotation_deg: 15.0
+target_radius: 0.055
+calibration_point_0:
+- -0.065
+- 0.0
+calibration_point_1:
+- -0.035
+- 0.0
+start_point:
+- -0.065
+- 0.0
+simulation:
+  dt: 0.01
+  max_steps_headless: 12000
+  output_root: simulation_outputs
+force_model:
+  random_seed: 7
+  granular_drag_force: 0.03
+  noise_std: 0.004
+  contact_stiffness: 1800.0
+  probe_tip_radius: 0.001
+  friction_coefficient: 0.03
+preprocessing:
+  filter_alpha: 0.15
+  gravity_wrench_sensor:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  coordinate_transform:
+    rotation_sensor_to_base:
+    - - 1
+      - 0
+      - 0
+    - - 0
+      - 1
+      - 0
+    - - 0
+      - 0
+      - 1
+    sensor_origin_in_base_m:
+    - 0
+    - 0
+    - 0
+  granular_baseline_output:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+policy:
+  control_rate_hz: 100.0
+  search_direction_xy: &id001
+  - 1.0
+  - 0.0
+  contact_threshold: 0.65
+  contact_hold_time: 0.04
+  safety_force_threshold: 15.0
+  safety_torque_threshold: 2.0
+  absolute_raw_force_threshold: 20.0
+  absolute_raw_torque_threshold: 5.0
+  search_speed: 0.03
+  probe_speed: 0.02
+  tangent_speed: 0.03
+  retract_speed: 0.03
+  retract_distance: 0.004
+  tangent_step: 0.008
+  max_probe_distance: 0.012
+  max_search_distance: 0.2
+  position_tolerance: 0.00035
+  follow_hand: CLOCKWISE
+  minimum_boundary_point_spacing: 0.001
+  boundary_recovery_enabled: true
+  initialization_clearance: 0.012
+  initialization_lateral_offset: 0.003
+  initialization_probe_distance: 0.024
+  initialization_max_retries: 3
+  initialization_timeout_sec: 120.0
+  local_fit_window: 3
+  local_fit_max_residual: 0.0006
+  recovery_sector_extents_deg:
+  - 20
+  - 50
+  - 90
+  - 130
+  - 170
+  recovery_angular_resolution_deg: 10
+  confirmation_contact_count: 3
+  recovery_ray_length: 0.022
+  recovery_probe_speed: 0.02
+  confirm_step: 0.006
+  force_rate_limit: 100.0
+  loop_closure_enabled: true
+  loop_closure_distance: 0.012
+  loop_closure_tangent_tolerance_deg: 45.0
+  loop_closure_min_boundary_points: 24
+  loop_closure_min_path_length: 0.25
+  max_boundary_points: 10000
+  max_runtime_sec: 600.0
+visualization:
+  interval_ms: 20
+  vector_display_length: 0.018
+  force_arrow_scale_m_per_n: 0.01
+  trail_max_points: 50000
+  save_animation: false
+  animation_fps: 30
+  animation_stride: 2
+scan_direction_xy: *id001

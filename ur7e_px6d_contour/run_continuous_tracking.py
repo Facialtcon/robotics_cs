@@ -25,6 +25,7 @@ from robot.tcp_identity import tcp_offsets_match
 from safety.force_guard import force_safety_reason
 from sensor.force_preprocess import WrenchPreprocessor
 from sensor.px6d_reader import PX6DReader
+from simulation.continuous_session import SIMULATION_SAMPLE_FIELDS
 
 ROOT = Path(__file__).resolve().parent
 TIMING_FIELDS = ('serial_read_start', 'serial_read_end', 'tcp_read_start', 'tcp_read_end',
@@ -198,7 +199,7 @@ def run(args):
         output = args.output or resolve_calibration_path(args.config, config["logging"]["output_root"])
         # Existing optional workspace exporter renders on close and assumes
         # real Base coordinates; use only our explicit offline replay here.
-        logger = ExperimentLogger(output, config, extra_sample_fields=EXTRA_SAMPLE_FIELDS + TIMING_FIELDS,
+        logger = ExperimentLogger(output, config, extra_sample_fields=EXTRA_SAMPLE_FIELDS + TIMING_FIELDS + SIMULATION_SAMPLE_FIELDS,
                                   workspace_logging=False)
         logger.termination = termination.bind(logger.run_dir)
         termination.observe(policy=policy, processed_force_frame="Base")
@@ -294,6 +295,8 @@ def run(args):
                     # Health validation immediately before feeding the robot-side
                     # watchdog. Disk or device stalls prevent the next kick.
                     validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start)
+                    # DIRECTION_RECONFIRM is nonterminal: keep the watchdog
+                    # armed while issuing stop and collecting fresh feedback.
                     if policy.state != State.STOP:
                         controller.kick_watchdog()
                     timing['command_send_time'] = time.monotonic()
@@ -308,7 +311,8 @@ def run(args):
                     timing['command_return_time'] = controller.time
                 # Motion/stop precedes disk writes. No rendering in this loop.
                 logger.log_sample(now, raw, processed, robot, command, policy.contact_direction,
-                                  policy.tangent, extra={**policy.telemetry(command), **timing})
+                                  policy.tangent, extra={**policy.telemetry(command), **timing,
+                                      **({'sim_components_available': 0} if args.execute else sample.simulation_telemetry)})
                 for event in policy.events:
                     logger.log_waypoint(event)
                 policy.events.clear()
