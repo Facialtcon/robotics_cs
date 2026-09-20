@@ -1,0 +1,9 @@
+# Synthetic debugging only; reuse existing analytic target and force model.
+base_config: simulation_config.yaml
+scene_name: continuous_circle
+target_shape: circle
+target_center: [0.0, 0.0]
+target_radius: 0.055
+calibration_point_0: [-0.065, 0.0]
+calibration_point_1: [-0.035, 0.0]
+start_point: [-0.065, 0.0]

@@ -155,3 +155,27 @@ dry_run:
 
 execution:
   default_sensor: mock
+
+# Experimental independent entry point: run_continuous_tracking.py.
+# ALL values below: MUST CONFIRM ON SITE. No change to discrete-policy limits.
+continuous_tracking:
+  enabled: true
+  tangential_speed: 0.001          # m/s
+  force_reference: 1.5            # N; interaction magnitude, not pure target force
+  force_gain: 0.0005              # (m/s)/N
+  force_deadband: 0.15            # N
+  normal_speed_limit: 0.0005      # m/s
+  force_direction_sign: 1         # simulation inward convention; MUST CONFIRM ON SITE
+  force_direction_filter_alpha: 0.8  # weight of PREVIOUS filtered XY vector
+  search_speed: 0.001             # m/s; initial P0 -> P1
+  search_max_distance: 0.10       # m
+  search_max_time_sec: 110.0
+  contact_lost_threshold: 0.5     # N, below existing stable contact threshold
+  contact_lost_hold_sec: 0.15
+  reacquire_speed: 0.0005         # m/s
+  reacquire_max_angle_deg: 60.0   # +/- relative to last reliable contact direction
+  reacquire_angular_speed_deg_s: 30.0
+  reacquire_max_time_sec: 8.0
+  reacquire_max_distance: 0.004   # m radius about last reliable contact pose
+  max_runtime_sec: 120.0
+  visualization_fps: 10

@@ -53,7 +53,10 @@ RECOVERY_RAY_FIELDS = [
 
 
 class ExperimentLogger:
-    def __init__(self, root: str | Path, config: dict):
+    def __init__(self, root: str | Path, config: dict, *, extra_sample_fields=(), workspace_logging=True):
+        fields = SAMPLE_FIELDS + list(extra_sample_fields)
+        if len(set(fields)) != len(fields):
+            raise ValueError("sample field names must be unique")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.run_dir = Path(root).expanduser().resolve() / f"run_{stamp}"
         self.run_dir.mkdir(parents=True, exist_ok=False)
@@ -65,8 +68,8 @@ class ExperimentLogger:
         self._boundary_file = (self.run_dir / "boundary_points.csv").open("w", encoding="utf-8", newline="")
         self._waypoint_file = (self.run_dir / "policy_waypoints.csv").open("w", encoding="utf-8", newline="")
         self._recovery_ray_file = (self.run_dir / "boundary_recovery_rays.csv").open("w", encoding="utf-8", newline="")
-        self._samples = csv.DictWriter(self._sample_file, fieldnames=SAMPLE_FIELDS)
-        self._full_log = csv.DictWriter(self._full_log_file, fieldnames=SAMPLE_FIELDS)
+        self._samples = csv.DictWriter(self._sample_file, fieldnames=fields)
+        self._full_log = csv.DictWriter(self._full_log_file, fieldnames=fields)
         self._boundaries = csv.DictWriter(self._boundary_file, fieldnames=BOUNDARY_FIELDS)
         self._waypoints = csv.DictWriter(self._waypoint_file, fieldnames=WAYPOINT_FIELDS)
         self._recovery_rays = csv.DictWriter(self._recovery_ray_file, fieldnames=RECOVERY_RAY_FIELDS)
@@ -79,7 +82,7 @@ class ExperimentLogger:
         self._workspace_logger = None
         try:
             workspace_config = Path(__file__).resolve().parents[1] / "workspace/config/workspace_calibration.yaml"
-            if workspace_config.is_file():
+            if workspace_logging and workspace_config.is_file():
                 from workspace.workspace_logger import create_optional_workspace_logger
                 self._workspace_logger = create_optional_workspace_logger(self.run_dir)
         except Exception as exc:
@@ -97,6 +100,8 @@ class ExperimentLogger:
         command: PolicyCommand,
         target_direction,
         tangent,
+        *,
+        extra: dict | None = None,
     ) -> None:
         if self.termination is not None:
             self.termination.observe(robot=robot, raw=raw, processed=processed,
@@ -150,6 +155,10 @@ class ExperimentLogger:
             "commanded_speed_mps": command.speed,
             "reason": command.reason,
         }
+        if extra:
+            if set(extra) & set(SAMPLE_FIELDS):
+                raise ValueError("extra sample data cannot overwrite standard fields")
+            row.update(extra)
         self._samples.writerow(row)
         self._full_log.writerow(row)
         if self._workspace_logger is not None:
