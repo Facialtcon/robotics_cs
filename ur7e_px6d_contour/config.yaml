@@ -173,9 +173,38 @@ continuous_tracking:
   contact_lost_threshold: 0.5     # N, below existing stable contact threshold
   contact_lost_hold_sec: 0.15
   reacquire_speed: 0.0005         # m/s
-  reacquire_max_angle_deg: 60.0   # +/- relative to last reliable contact direction
+  reacquire_max_angle_deg: 60.0   # arc theta: monotonic 0 -> max, NOT a heading sector
   reacquire_angular_speed_deg_s: 30.0
   reacquire_max_time_sec: 8.0
-  reacquire_max_distance: 0.004   # m radius about last reliable contact pose
+  reacquire_max_distance: 0.004   # m displacement bound about actual stopped recovery origin
   max_runtime_sec: 120.0
   visualization_fps: 10
+  # Revision: all new physical values MUST CONFIRM ON SITE.
+  max_sample_gap_sec: 0.03          # s; larger gaps fail closed, never confirm contact
+  max_observation_age_sec: 0.02     # s; host observation age (not device sample age)
+  cycle_timeout_sec: 0.03          # s; includes serial, RTDE, command, logging
+  settle_speed_mps: 0.0001         # m/s; norm of actual XYZ velocity
+  settle_hold_sec: 0.08            # s; fresh continuous low-speed observations
+  confirmation_timeout_sec: 1.0   # s; bounded wait after threshold/stop request
+  direction_min_force: 0.5         # N; processed XY direction signal floor
+  direction_min_filtered_force: 0.3 # N; reject near-cancelled EMA vectors
+  direction_min_coherence: 0.8     # dimensionless mean resultant / mean magnitude
+  direction_jump_deg: 45.0         # degrees; abrupt change means stop, never flip sign
+  direction_rate_deg_s: 90.0       # degrees/s; estimate slew limit using actual dt
+  command_acceleration: 0.01      # m/s^2; XY velocity slew, hard stops bypass
+  overload_tangent_zero_force: 2.25 # N; cut tangent before hard force limit
+  overload_stall_sec: 0.5          # s; saturated outward correction without improvement
+  overload_improvement_force: 0.1 # N; improvement to restart bounded overload window
+  memory_max_age_sec: 0.5          # s; maximum age of recovery direction at stop
+  reacquire_enabled: false        # real DEFAULT: stop on loss; opt in only offline
+  reacquire_radius: 0.002         # m; independent arc reference radius, no target truth
+  reacquire_max_path: 0.004        # m; accumulated ACTUAL TCP path during one search
+  reacquire_position_gain: 5.0     # 1/s; actual TCP to position reference feedback
+  reacquire_reference_freeze_error: 0.0001 # m; freeze reference progression above this
+  reacquire_max_tracking_error: 0.0005     # m; stop above this
+  boundary_margin: 0.0005         # m; reserve for stopping/communication, MUST VALIDATE
+  reacquire_min_progress: 0.002   # m; reject repeated loss without spatial progress
+  watchdog_frequency_hz: 20.0    # Hz; robot-side timeout 50 ms; SDK 1.6.5 only verified
+  # No default real envelope or sign/frame attestation. Missing => reject before connect.
+  real_test_xy_limits: null       # {x_min, x_max, y_min, y_max}, Base m, finite site bounds
+  site_verification: null        # see CONTINUOUS_TRACKING.md; bound to tool/frame/sign/config

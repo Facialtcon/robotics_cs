@@ -1,158 +1,240 @@
-# 连续轻接触跟踪实验（第一版）
+# 连续贴边跟踪：审查修复版
 
-独立入口 `run_continuous_tracking.py`，默认完全离线。原 `run_project.py` / `policy/rule_policy.py` 保持原功能。这个实验验证实时 F/T 速度反馈，不输出完整轮廓重建，也不声称解决颗粒摩擦。
+新用户先看：[【分支 experiment/continuous-tracking】连续贴边：傻瓜式操作指南](BRANCH_continuous-tracking_傻瓜式操作指南.md)。
 
-## 文件与复用关系
+前一轮控制修复基准是 `98742befff46bc7c9c9e887e904c505d40f58bb3`，该轮开始时位于 `experiment/continuous-tracking` 且工作区干净。本次预演追加在同分支保留已有未提交修复后进行。本次没有连接 UR7e/PX6D，没有 commit、push、reset、切分支或删除实验数据。以下是软件与合成仿真证据，不是实机可用声明。
 
-- `policy/continuous_tracking.py`：纯状态机、方向 EMA、速度反馈、接触持续时间与局部重捕获；使用 `core.models.PolicyCommand/PolicyWaypoint`、原 `force_guard`、原 `handed_tangent` 约定。
-- `run_continuous_tracking.py`：连接已有 `URRTDEController/PX6DReader/WrenchPreprocessor`；复用配置加载、扫描标定、TCP 绑定、键盘、`ExperimentLogger/TerminationRecorder`。不包含另一套设备驱动。
-- `experiment_logging/data_logger.py`：增加可选扩展列和可选 workspace exporter 开关，原调用默认行为不变。连续入口关闭旧 workspace exporter，其真实标定投影不适用于合成坐标，并避免结束时自动绘图。
-- `tools/visualize_continuous_run.py`：只读取已有日志和配置快照的离线同步双视图。
-- `simulation/scene_continuous.yaml`：复用已有 circle geometry、`SimulatedRobot/SimulatedForceSensor` 的近距离调试场景，不创建新模拟器。
-- `config.yaml`：仅追加 `continuous_tracking` 配置，原机器人、离散 policy、安全阈值均未提高。
-- `tests/test_continuous_tracking.py`、`tests/test_continuous_run.py`：状态机、闭环、故障停止、日志和回放测试。
+仍是：初始 SEARCH → 接触后停稳确认 → 直接连续贴边 → 丢边停止/有限恢复。没有三点初始化、PCA、目标分类、凹凸角分类、机器学习、颗粒补偿或完整 M-B-K 模型。Fxy 始终称为**平面交互力幅值**。
 
-## 状态与首次接触
+## 问题—修改—测试对应
 
-`READY → TARGET_SEARCH → FIRST_CONTACT → CONTINUOUS_TRACKING`
+在修改实现前，先补并运行复现测试：第一批 12 项失败（其中一项验证缺少延迟执行适配），SDK/停止第一批 5 项失败，时序/实机前置条件 2 项失败，回放 2 项失败。原 continuous 测试中跨时间空档的辅助函数改为逐周期提供真实连续样本；未放松原力/力矩/变化率保护。
 
-`CONTINUOUS_TRACKING → CONTACT_LOST → LOCAL_REACQUIRE → CONTINUOUS_TRACKING`
+| 已确认问题 | 修复 | 测试文件/证据 |
+|---|---|---|
+| 两个读数相隔 1 秒即被当成稳定接触；未检查真实停稳 | 首次越阈立即请求停；分别计力保持、实测 XYZ 低速保持；掉力/速度超限分别重置；采样空档终止；总确认超时 | `test_continuous_revision.py`：空档、速度、掉力/速度脉冲、确认超时、重捕获空档 |
+| 恒定幅值的力方向反向、EMA 向量抵消仍可满速推进 | 幅值门槛、平均合向量比、突变检查；不可信则停止；可信估计按实际 dt 限转速，跨 ±π 正确计算 | `test_continuous_revision.py`：反向、抵消、噪声、平滑旋转、手性、速度变化率 |
+| 硬死区造成跳变；低力和超载仍恒定切向速度 | 连续死区；第一帧低力即请求停，持续时间只确认 LOST；高力减切向，饱和且不改善限时停止 | `test_continuous_tracking.py` / `test_continuous_revision.py`：连续死区、低力、超载、饱和 |
+| 0.9 N 移动后恢复仍以旧强接触点为圆心 | 保存弱而可信接触；独立保存历史记忆、当前位置、丢边位置、实际停稳 origin；origin 每次冻结 | `test_continuous_revision.py`：0.9 N 移动超过 4 mm、过旧记忆、独立日志字段 |
+| 三角波仅限制 heading，实际空间覆盖不明确 | 单次弧形位置参考，实际 TCP 闭环；误差大时冻结/停止；同时检查位移/路径/角度/时间/预测点及余量 | `test_continuous_geometry.py`：积分真实执行轨迹、几何接触、空范围失败、旋转/镜像 |
+| 停止 False/异常仍标记 stopped；void/bool 混用 | 按本机 1.6.5 合同检查返回值；请求与实测速度分离；不确定时锁定故障；清理仍执行 | `test_continuous_execution.py`：False、异常、void、待停禁止运动、失败也断开 |
+| TCP 读数早于阻塞串口；日志阻塞后可继续发速度 | 串口后再读 TCP，记录各读区间；SDK 包时间只比较自身进展；超时禁止下一指令/喂狗 | `test_continuous_execution.py` / `test_continuous_run.py`：旧包、串口/日志阻塞、看门狗失败 |
+| 无明确执行边界、sign/frame 核对记录 | 实机前置条件要求有限 XY 范围、绑定配置/标定内容的核对记录、已核实 SDK/看门狗；缺项在设备构造前拒绝 | `test_continuous_execution.py`：缺失记录、绑定变化、全过程位置边界 |
+| 停止快照沿用运动前状态 | 停止后读新鲜状态并观察低速保持；失败明确标注 last_valid_sample、年龄和错误，旧 F/T 单独标记 | `test_continuous_run.py`：新停后 pose / 读取失败降级 |
+| 回放未画目标、轨迹易误当轮廓、MP4 无总帧数限制 | 仿真真值轮廓、可信/其他运动分色、恢复参考与范围、命令/估计方向、扩大标记说明、统一帧预算 | `test_continuous_run.py`：图层、等比例、游标、帧上限、编码降级 |
 
-任意安全故障、输入异常、用户停止或预算耗尽：`STOP`，不可自动恢复。
-
-真机初始搜索方向只来自已验证的 P0→P1 标定。必须先把机器人放到 P0；此入口不自动从其他位置返回 P0。沿 `search_speed` 搜索。`Fxy >= policy.contact_threshold` 连续达到 `policy.contact_hold_time` 才接受接触；从接触候选开始即停止推进，稳定后记录 `initial_contact` 和 `FIRST_CONTACT` 事件。下一周期直接执行连续反馈，无回撤、三点初始化或 PCA。
-
-沿用原接触阈值 1 N、稳定时间 0.05 s、控制频率 100 Hz。阈值候选期间如果力再次降到接触阈值以下，确认计时清零，搜索继续。
-
-## 每周期控制
-
-先进行有限值/时间顺序、processed force/torque、raw absolute force/torque、force-rate 检查，然后才能生成运动。
-
-令处理后的 Base 平面力为 `f = [Fx, Fy]`：
+## 状态与确认含义
 
 ```text
-Fxy = norm(f)
-f_filtered[k] = alpha * f_filtered[k-1] + (1-alpha) * f[k]
-filtered_Fxy = norm(f_filtered)
-n = force_direction_sign * normalize(f_filtered)
+READY → TARGET_SEARCH
+          ↓ 首次越接触阈值，立即 STOP 请求
+       FIRST_CONTACT（确认阶段）
+          ↓ 新鲜力保持 + 实测 XYZ 低速保持 + 方向统计合格
+       CONTINUOUS_TRACKING
+          ↓ 第一帧低力即暂停；低力保持够长
+       CONTACT_LOST（继续请求停，等待实测停稳）
+          ├─ 默认 recovery disabled → STOP
+          └─ 离线显式启用、记忆新鲜且有进展 → LOCAL_REACQUIRE
+                       ↓ 越阈即停，冻结参考，再次相同确认
+                  CONTINUOUS_TRACKING
+
+安全 / 时序 / 不可信方向 / 不确定停止 / 预算耗尽 → STOP
 ```
 
-`alpha` 是旧样本权重，与项目现有 EMA 约定相同；该方向滤波在现有 wrench preprocessing 之后执行。没有足够信号时保留上一次接触方向，滤波幅值仍逐周期更新。
+`FIRST_THRESHOLD_STOP_REQUEST` 保存第一次越阈的位置；`FIRST_CONTACT` 事件和 `initial_contact` 保存实际低速保持确认后的位置，二者不混用。确认阶段不恢复 SEARCH 推进：掉力仅重置力窗口，速度超过阈值仅重置速度窗口；等待超过总确认预算即停。采样间隔过大直接终止，不跨缺帧积累时间。这里的“停稳”是 XYZ 速度连续低于配置门槛，不声称绝对零速。
 
-`n` 只是接触方向估计。正号究竟指向目标必须现场测定，不能由真实 PX6D 型号推断。`force_direction_sign` 可取 `+1/-1`，需使 `n` 指向目标；模拟模型约定 `+1` 指向目标。
+初始方向取稳定接触窗口内 processed XY 向量均值，其模长除以窗口平均幅值须达到 coherence 门槛。重捕获也用这一门槛，不凭单帧接触恢复。只初始化 continuous 自己的方向状态，绝不在接触中重置传感器零偏或 granular baseline。
 
-复用已有沿边手性约定（n 为朝内方向）：
+## 方向与控制律
+
+现有 wrench EMA 保留；原有 continuous 方向 EMA 保留为唯一的第二级滤波，不再叠加其他滤波器。其旧值权重按实际间隔变为 `alpha ** (dt / nominal_dt)`。低力期间冻结局部方向并标记无效；重捕获确认后仅重建局部方向状态，不能消除上游滤波延迟或摩擦影响。
+
+记录三个不同量：processed 测量方向 `measurement_direction/force_direction`、经过 sign 和可信度/限速处理的 `contact_direction`、最终 `command_vx/vy`。未分离纯物体法向力。
 
 ```text
+f = [Fx, Fy]                     # processed Base
+Fxy = norm(f)
+n = 估计朝向目标的单位方向         # sign 只能由现场核对确定
 CLOCKWISE:        t = [-n_y, n_x]
 COUNTERCLOCKWISE: t = [ n_y,-n_x]
-```
 
-例如在物体左侧 `n=[1,0]`，CLOCKWISE 向 +Y，COUNTERCLOCKWISE 向 -Y。方向每周期由滤波力更新，不是一次接触后锁定。
-
-```text
 e = F_ref - Fxy
-v_n = 0                                      if abs(e) <= force_deadband
-v_n = clip(Kf * e, -v_n_max, +v_n_max)        otherwise
+e_dead = sign(e) * max(abs(e) - force_deadband, 0)
+v_n = clip(Kf * e_dead, -normal_speed_limit, +normal_speed_limit)
 v_xy = v_t * t + v_n * n
 ```
 
-力偏小时朝目标靠近，力偏大时离开目标。在最后一步将总速度缩放到 `robot.max_tcp_speed` 内，日志中的 v_t/v_n 也同步缩放。Z 与角速度由原 RTDE 接口强制为零，实际固定 Z/姿态漂移继续由原控制器检测。这里只实现速度比例反馈，没有完整 M-B-K admittance。
+`n/t` 始终单位化、正交。方向突变或近抵消时停止，不偷偷翻转新方向以维持行进。可信方向用最短有符号角更新，按实际 dt 限转速。`v_t` 随低载荷、高载荷、可信度/方向限速降低；正常条件恢复时由最终速度变化率限制渐进增加。低于 lost threshold 的第一帧即请求零速，消抖窗口内不会满切向推进并最大向内修正。高于目标但未触发硬保护时优先减轻载荷；最大向外修正持续不改善则停止。最终速度与变化率限制不能延迟硬停止请求。
 
-## 丢失与局部重捕获
+## 单次局部弧形恢复
 
-只有 `Fxy < contact_lost_threshold` **连续**超过 `contact_lost_hold_sec` 才触发 CONTACT_LOST。单帧下降不会触发；低力确认窗口内仍执行有界跟踪反馈。最后可靠姿态、tangent 和接触方向只在 `Fxy >= policy.contact_threshold` 时更新，因此低信号不会覆盖恢复依据。
+恢复默认关闭，`--enable-reacquire` 仅限离线。参考：
 
-触发时停止，下一周期进入 LOCAL_REACQUIRE 并继续保持零速一个周期。随后以最后接触方向为中心，用最后 tangent 确定先扫的一侧，执行 `0 → +A → -A → +A …` 的三角波 heading 扫描。保持低速、不返回旧接触点、不沿旧 tangent 正常前进，不分析任何拐角类型。
+```text
+p_ref(theta) = O + r * [sin(theta) * n_mem + (cos(theta)-1) * t_mem]
+theta: 0 单调增加至 theta_max
+omega = min(configured_angular_speed, reacquire_speed / r)
+velocity = position_gain * (p_ref - actual_TCP_xy)，再做速度/变化率限制
+```
 
-heading 限制在 `±reacquire_max_angle_deg`，转动速率为 `reacquire_angular_speed_deg_s`。同时受最大时间及以 `last_contact_pose` 为中心的距离半径限制；预测下一步超过半径也停止。力重新超过接触阈值就暂停扫描等待稳定，稳定后记录 `REACQUIRED` 并回到跟踪。当次命令为停止，下一周期恢复反馈。稳定条件未满足即到预算边界时，优先 STOP。
+O 来自实测停稳位置；历史可信接触记录包括位置、时间、normal/tangent 和可信度；冻结 n_mem/t_mem 后才开始搜索。参考误差超过冻结门槛不再推进 theta，超过最大误差即停。越接触阈即停止并冻结参考，确认失败后停止，不跳向新的参考位置。单次搜索达到角度/时间/实际累计路径/位移/预测范围预算即停；相邻恢复 origin 无足够空间进展也停止。不自动回旧接触点/P0，不叠加第二搜索策略。
 
-## 新配置（所有值 MUST CONFIRM ON SITE）
+位移和路径预算扣除 `boundary_margin`，规划参考、预测一步、实测位置都检查。这个余量是必须现场验证的工程预算，不是软件能保证的制动距离。真机前置检查至少要求覆盖配置速度下的看门狗时间与理想减速距离。
 
-| 参数 | 默认值 | 含义 |
-|---|---:|---|
-| enabled | true | 仅供独立入口启用；不改变旧入口 |
-| tangential_speed | 0.001 m/s | 连续切向速度 |
-| force_reference | 1.5 N | 目标平面交互力幅值 |
-| force_gain | 0.0005 (m/s)/N | 法向比例增益 |
-| force_deadband | 0.15 N | 力误差死区 |
-| normal_speed_limit | 0.0005 m/s | 法向速度绝对值上限 |
-| force_direction_sign | +1 | 仿真约定；真机必须确认 |
-| force_direction_filter_alpha | 0.8 | 方向 EMA 旧值权重 |
-| search_speed | 0.001 m/s | 初始搜索速度 |
-| search_max_distance | 0.10 m | 从起点算的搜索距离预算 |
-| search_max_time_sec | 110 s | 初始搜索时间预算 |
-| contact_lost_threshold | 0.5 N | 低力阈值 |
-| contact_lost_hold_sec | 0.15 s | 持续低力窗口 |
-| reacquire_speed | 0.0005 m/s | 局部扫描速度 |
-| reacquire_max_angle_deg | 60° | heading 半角 |
-| reacquire_angular_speed_deg_s | 30°/s | heading 扫描速度 |
-| reacquire_max_time_sec | 8 s | 每次局部搜索预算 |
-| reacquire_max_distance | 0.004 m | 最后可靠接触点周围半径 |
-| max_runtime_sec | 120 s | 本次实验总时限 |
-| visualization_fps | 10 | 离线回放默认帧率 |
+## 新参数
 
-`follow_hand`、稳定接触判定、全部力/力矩/变化率阈值与控制周期仍读取原 `policy` 配置。force-rate 与旧 policy 一致：保护 **正向上升速率**，不把接触释放造成的负向下降当冲击。新配置会拒绝非有限数、无效 sign、不合理的阈值关系、超过原搜索速度/距离及机器人上限的配置。
+以下新增实验数值全部 **MUST CONFIRM ON SITE**。原 F_ref=1.5 N、Kf=0.0005 (m/s)/N、切向 0.001 m/s、法向上限 0.0005 m/s、搜索 0.001 m/s、恢复 0.0005 m/s 及硬安全阈值均未提高。
+
+| 参数 | 默认值/单位 | 作用与约束 |
+|---|---|---|
+| max_sample_gap_sec | 0.03 s | 正时间间隔，至少覆盖名义周期；超过即停 |
+| max_observation_age_sec | 0.02 s | 主机读区间年龄、RTDE 包停滞门槛；不代表硬同步采样年龄 |
+| cycle_timeout_sec | 0.03 s | 包括设备、指令、日志的循环预算；须短于 watchdog 超时 |
+| settle_speed_mps / settle_hold_sec | 0.0001 m/s / 0.08 s | 实测 XYZ 速度连续保持；均正值 |
+| confirmation_timeout_sec | 1 s | 确认总预算，必须大于停稳保持 |
+| direction_min_force | 0.5 N | 测量方向幅值门槛，≤ lost threshold |
+| direction_min_filtered_force | 0.3 N | 滤波向量模长门槛，≤测量门槛 |
+| direction_min_coherence | 0.8 | 平均合向量/平均幅值，范围 (0,1] |
+| direction_jump_deg | 45° | 单次/测量相对估计突变检查，范围 (0,90) |
+| direction_rate_deg_s | 90°/s | 可信估计最大转速，正值 |
+| command_acceleration | 0.01 m/s² | 正值且不超过原机器人加速度；硬停绕过 |
+| overload_tangent_zero_force | 2.25 N | 切向降为零，须高于参考+死区、低于硬保护 |
+| overload_stall_sec / overload_improvement_force | 0.5 s / 0.1 N | 饱和向外修正的限时改善要求 |
+| memory_max_age_sec | 0.5 s | 开始恢复时记忆允许年龄 |
+| reacquire_enabled | false | 默认丢边停止；离线才允许 CLI 开关 |
+| reacquire_radius | 0.002 m | 独立弧半径，与目标真值无关 |
+| reacquire_max_path | 0.004 m | 实际累计路径及规划弧长预算 |
+| reacquire_position_gain | 5 s⁻¹ | TCP 对参考点的比例速度控制 |
+| reacquire_reference_freeze_error | 0.0001 m | 超过则冻结参考进度 |
+| reacquire_max_tracking_error | 0.0005 m | 超过则停，须大于冻结门槛、小于有效范围 |
+| boundary_margin | 0.0005 m | 从位移/路径边界扣除；必须小于两者预算 |
+| reacquire_min_progress | 0.002 m | 相邻恢复 origin 最小空间进展 |
+| watchdog_frequency_hz | 20 Hz | 1.6.5 机器人侧看门狗；名义超时 50 ms |
+| real_test_xy_limits | null | Base 米，有限 x_min/x_max/y_min/y_max；无原 workspace 时必填 |
+| site_verification | null | 本次工具/标定/力方向/变换/看门狗的显式现场记录 |
+
+原 `reacquire_max_angle_deg=60` 现在表示 theta 从 0 到 60°，不再是 ±heading 扫描；`reacquire_max_distance=4 mm` 现在相对实际停稳 O。原 `reacquire_max_time_sec=8 s`、角速度上限 30°/s 保留；本配置路径速度上限会将弧实际角速度限制为约 14.32°/s。方向 EMA alpha 仍为 0.8（0≤alpha<1）；接触阈值 1 N、接触力保持 0.05 s、lost threshold 0.5 N / hold 0.15 s 保留。
+
+## 时序、SDK、执行前置条件
+
+本机只读检查 `ur-rtde 1.6.5` 的 Python docstring，并与 [SDU Robotics 接口声明](https://gitlab.com/sdurobotics/ur_rtde/-/blob/master/include/ur_rtde/rtde_control_interface.h) 核对：`speedL(time)` 是函数返回等待时间，**不保证到时停机**；`speedStop` 返回 bool；`stopL` 正常返回 void/None；`setWatchdog/kickWatchdog` 返回 bool，SDK 文档描述超时关闭控制。没有通过真机验证实际停车行为。代码只认可本次已核对的 1.6.5 合同，其他版本/缺接口拒绝 continuous 真机执行。
+
+STOP 请求失败会锁定 `motion_fault`；即使备用停止成功，也不自动解除故障。实测速度才能给出 stopped，连续低速窗口由 policy/退出确认检查。待停状态禁止发新运动。控制对象只由主线程使用，不在后台线程无条件喂狗。
+
+零偏采样和 START 等待均无运动且不启用看门狗。START 后重新核对 P0，然后启用看门狗；只有完成当前健康检查、尚未 STOP 的周期才 kick。串口/RTDE/指令/日志阻塞会使后续 kick 中断；主机解除阻塞后也不再发送新运动。主机不能在同线程阻塞期间立即运行 stop，所以机器人侧看门狗和现场验证必需，不能代替急停与机器人安全设置。
+
+串口完成后读取 TCP，记录主机各读区间；`RobotState.timestamp` 是主机观测时间。RTDE `getTimestamp()` 是机器人启动后的设备时间，只比较其自身单调进展，再用主机时钟测停滞，不与主机绝对时刻相减。首次运动要求已观察到包进展。PX6D 接口没有设备采样时间，日志明确标记主机近似区间；不能证明硬同步或绝对设备数据年龄。
+
+真机默认配置现在会在设备构造前拒绝：缺少有限执行范围和现场核对记录。现有 `workspace.enabled: false` 不被改写；本模式需要单独 `real_test_xy_limits`，不能把箱体图形当运动边界。范围覆盖连接、零偏、START 后、每次状态读取及每个预测指令；还限制本实验实际速度。TCP 身份、固定 Z/姿态、raw/processed F/T、force-rate、保护停/急停继续复用。
+
+现场记录示意（不能直接把示意当作已确认）：
+
+```yaml
+site_verification:
+  operator: 实际核对人
+  checked_at: 实际核对时间
+  configuration_sha256: 离线命令输出的摘要
+  force_sign_checked: true
+  base_transform_checked: true
+  watchdog_stop_verified: true
+  recovery_verified: false
+```
+
+摘要绑定 TCP、preprocessing、sign/continuous 参数、机器人/安全 policy、workspace 和标定文件内容。改变工具、变换、阈值或标定必须重新核对；`--duration` 只允许缩短已审查时限。实机开启恢复还要求独立 recovery 验证记录；本次不提供实机恢复启用证据，不自动启用。
 
 ## 离线运行与回放
 
-在项目目录执行（也可换为已有依赖的 `python3`）：
-
 ```bash
 cd /home/user-linux/robotics_cs/ur7e_px6d_contour
+# 默认离线、默认丢边停止
 ../.venv312/bin/python run_continuous_tracking.py --dry-run --duration 30
-# 完整默认 120 秒模拟时间；无实时等待，完全离线：
-../.venv312/bin/python run_continuous_tracking.py --dry-run
-# 可选择已有场景；算法不知道目标几何：
-../.venv312/bin/python run_continuous_tracking.py --dry-run --scene simulation/scene_3_circle.yaml
+# 显式启用离线实验性弧形恢复
+../.venv312/bin/python run_continuous_tracking.py --dry-run --enable-reacquire --duration 30
+# 独立闭环评分：直边、圆弧、凸出端点、空范围和延迟压力场景
+../.venv312/bin/python -m simulation.continuous_validation
+# 全局等比例双视图；默认 10 fps
+../.venv312/bin/python tools/visualize_continuous_run.py <run目录>
+# 恢复范围附近的局部等比例裁剪，不拉伸 XY
+../.venv312/bin/python tools/visualize_continuous_run.py <run目录> --local-xy --format gif
+# 只读取本地配置与标定文件并生成核对摘要，不连接设备
+../.venv312/bin/python run_continuous_tracking.py --site-digest
+# 原有 + 新增全部测试
+MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q
 ```
 
-默认近距离圆形场景约 10 秒开始接触。使用原始远距离场景会有更长的低速初始搜索。模拟采用 continuous 的 100 Hz 周期、真实配置的安全阈值和控制增益；只使用场景的环境、合成力模型和合成 Base-frame 坐标变换，保留主配置 wrench EMA。不会把现场传感器外参/重力再次施加到合成 Base-frame 力上。配置快照保留这些选择。
+本次不执行任何实机命令。未来实机入口仍是 `--execute`，但须先完成上述现场条件；Q/ESC/Ctrl+C、异常、退出都先请求停止，再采集停止后状态和写最终日志，不自动回位。
 
-`--duration` 只能缩短配置中的总时限，不能绕过它。程序输出实际 run 目录；可用 `--output` 指定日志根目录。正常用户停止或实验总时限结束返回 0，安全故障及搜索/重捕获预算失败返回 1。达到时限只代表本次运行结束，不代表完成整圈。
+回放严格 XY 等比例；仿真画真实目标轮廓，真机不造目标。可信接触 TCP 片段和 SEARCH/LOST/REACQUIRE 分开，均不是重建物体边界。恢复参考与位移圆单独显示；箭头注明估计方向/命令速度方向，固定显示长度不代表 N 或 m/s；TCP 点注明扩大标记。局部视窗只裁剪，不改变比例。MP4 最多 1200 帧，GIF 最多 240 帧；达到预算降低 fps 保持时长，无中间 PNG 序列，编码失败保留静态总结。本环境缺 ffmpeg，实际验证的是 GIF 和 PNG。
 
-```bash
-../.venv312/bin/python tools/visualize_continuous_run.py data/run_实际时间戳 --fps 10
-# 只保存最终静态总结：
-../.venv312/bin/python tools/visualize_continuous_run.py data/run_实际时间戳 --format none
-```
+## 日志与证据分层
 
-输出 `continuous_summary.png` 和 `continuous_replay.mp4`（ffmpeg 可用时），否则使用 GIF。GIF 为限制内存最多 240 帧，长记录自动降低有效帧率并保留真实时长；编码失败仍保留 PNG。没有数千张中间 PNG。左图 `set_aspect("equal")`，XY 用米且保持真实比例；方向箭头按同一 8 mm 显示长度绘制，不表示力或速度量纲。显示实际 TCP、轨迹、接触/丢失/重捕获事件，已知容器来自配置快照。右图 Fx/Fy/Fxy/F_ref 与同一时间游标同步。按实际时间抽样，兼容真机控制抖动。
+复用 `ExperimentLogger` 的原 CSV/事件/termination 文件。新增方向有效性/可信度/限速、观测 dt、loop-start 间隔、serial/TCP 主机读区间、RTDE 设备时间与停滞时间、命令调用时间、停止请求/确认、力/速度保持窗口、历史可信接触位置/时间/方向、loss detection、冻结 O/n_mem/t_mem、恢复参考/误差/累计路径、限制原因。
 
-## 日志
+配置快照记录 branch/commit/dirty/status 与有效参数。停止快照包含停止后状态来源、实际确认状态；失败标明最后有效样本及年龄。快照中 F/T 仍是最后一次有效读取，明确标注并保留年龄，不冒充停稳时的新测量。
 
-继续写入项目原有 `samples.csv` / `full_log.csv`、`policy_waypoints.csv`、配置快照、summary、stop snapshot、termination JSON。连续模式不生成离散探测点；`boundary_points.csv` 等兼容文件只有表头。
+证据区分：
 
-已有列保留六维 raw / processed wrench、完整 TCP pose/speed、状态和接触标志。扩展列提供 `filtered_fxy`、未追加方向 EMA 的 processed `force_direction_x/y`、滤波且经 sign 修正的 `contact_direction_x/y`、`force_reference`、`force_error`、`v_t/v_n`、`command_vx/vy/speed`、`contact_lost_timer`、`follow_hand`、`force_direction_sign`、`force_rate` 和 `reacquire_heading_deg`。已有 `tangent_x/y` 记录当前方向；时间为 `monotonic_sec` 和 UTC。
+1. **隔离单元/设备替身**：手动 F/T 输入验证状态、安全与时序。包含按时间输入重新接触的测试，但只证明状态转移，不证明几何重捕获。
+2. **从 SEARCH 开始的闭环合成仿真**：`SimulatedRobot` 积分实际运动，现有 `SimulatedForceSensor` 由独立几何产生力；加入两周期（20 ms）延迟与 0.005 m/s² 加减速度。无 TCP 裁剪/吸附，policy 不读几何。
+3. **闭环恢复子场景**：显式种入已丢边状态和历史局部方向，之后全部力由实测积分位置产生；用于检验弧策略，不能等同完整 SEARCH→自然丢边→恢复证据。
+4. **真机**：本次零连接、零运动；增益、外参、sign、停稳门槛、实际数据年龄、看门狗/停止时延、边界余量、颗粒污染和恢复效果均无真机验证。
 
-事件包括 FIRST_CONTACT、CONTACT_LOST、LOCAL_REACQUIRE、REACQUIRED、SAFETY_STOP、USER_STOP、BUDGET_STOP。summary 保存 initial_contact 和 last_contact_pose。原始与处理后力并存，不把交互力解释为纯物体法向力。
+八个默认评分场景（合成模型有 1 mm 弹性 tip sensing envelope；实际 TCP 穿入和 envelope 压缩分别报告；最大值含停止后的制动尾段）：
 
-## 真机启动与首次实验观察
+| 场景 | 结果 | 最大力 N | 实际 TCP 最大穿入 | 最大 envelope 压缩 | 恢复参考最大误差 |
+|---|---|---:|---:|---:|---:|
+| SEARCH→直边，20 ms 延迟 | 维持接触，接触保持率 100% | 1.350 | 0 mm | 0.750 mm | 不适用 |
+| SEARCH→圆弧，20 ms 延迟 | 维持接触，接触保持率 100% | 1.340 | 0 mm | 0.744 mm | 不适用 |
+| SEARCH→凸出端点，20 ms 延迟 | 维持接触，没有自然触发 LOST | 1.350 | 0 mm | 0.750 mm | 不适用 |
+| 直边恢复子场景 | 稳定接触+停稳后 REACQUIRED | 1.083 | 0 mm | 0.601 mm | 0.095 mm |
+| 圆弧恢复子场景 | 稳定接触+停稳后 REACQUIRED | 1.085 | 0 mm | 0.603 mm | 0.095 mm |
+| 端点丢边恢复子场景 | 稳定接触+停稳后 REACQUIRED | 1.066 | 0 mm | 0.592 mm | 0.095 mm |
+| 搜索范围内无目标 | theta 达上限，明确失败 STOP | 0 | 0 mm | 0 mm | 0.095 mm |
+| SEARCH→凸出端点，300 ms 执行延迟压力 | 方向不可信，失败 STOP，无备用策略 | 1.800 | 约 7e-15 mm 数值量级 | 1.000 mm | 不适用 |
 
-1. 先完成原项目 PX6D 只读检查、RTDE/TCP 检查、P0/P1 标定及空载静止零偏准备。确认 `rotation_sensor_to_base`、TCP offset、固定 Z/姿态与现场一致。当前配置的旋转是占位 identity，必须现场确认。
-2. 用已知安全操作将 probe 放到标定 P0，保持静止且零偏采样时不接触目标。这个入口不执行自动回位或自动离开接触点；所有停止均停在原位。
-3. 核对 sign，使 `n` 朝目标；核对上述保守参数与现有安全阈值。现有配置 `workspace.enabled: false` 会原样保留，软件笛卡尔范围限制仍关闭；离线图里的容器边框不构成安全限位。需要软件范围检查时先填入实际有效范围再启用。
-4. 启动：
+前三个跟踪场景力误差 RMS 分别约 0.158、0.165、0.202 N。三个恢复子场景实际路径约 1.167、1.172、0.677 mm；空范围失败实际路径（含制动尾段）约 2.030 mm。真值只用于力模型和评分器；参数未从真值计算，也未提高阈值、速度、增益或参考力来通过测试。300 ms 是故意超大的执行滞后压力条件，不是声称真机正常具有该延迟。
 
-```bash
-../.venv312/bin/python run_continuous_tracking.py --execute --duration 30
-```
+## 文件变化与复用边界
 
-设备连接后仍由原控制器执行 active TCP 身份校验、固定姿态/Z、已启用 workspace、实际速度及 RTDE emergency/protective stop 检查。P0 位置不符直接拒绝运动。确认终端中的 P0、搜索方向、sign、参考力后输入 `START`。Q、ESC、Ctrl+C 都立即请求停止，不自动返回 P0；传感器/控制器/日志异常也停止，停止后才写最终诊断。未执行硬件零点命令。
+- `policy/continuous_tracking.py`：仅连续 policy；仍复用 `core.models`、`handed_tangent`、`force_guard`。
+- `run_continuous_tracking.py`：时序、实机前置检查、单线程看门狗、停止后快照与溯源。
+- `robot/rtde_controller.py`：在同一驱动里修复停止合同、故障锁定；增加 continuous 可选时间戳/边界/看门狗接口，不复制驱动。
+- `config.yaml`：新增参数和默认关闭恢复；原安全阈值未提高。
+- `experiment_logging/data_logger.py`：停止快照增加可选元数据，旧调用默认不变。
+- `simulation/simulated_robot.py`：可选延迟/加减速适配，默认保留原理想积分行为。
+- `simulation/continuous_validation.py`：小型独立评分与场景串接，复用原几何和力模型。
+- `tools/visualize_continuous_run.py`：只读离线回放增强。
+- `tests/test_continuous_tracking.py` / `test_continuous_run.py`：原断言更新为连续新鲜样本并补入口测试；新增 `test_continuous_revision.py`、`test_continuous_execution.py`、`test_continuous_geometry.py`。
 
-首次最应观察：Fx/Fy 与真实方向是否一致；接触后 Fxy 是否在参考力附近；v_n 在力过低/过高时符号是否正确；是否长期饱和；tangent 是否抖动或滞后；是否出现误 CONTACT_LOST 或反复恢复；实际 TCP 速度/Z/姿态；force-rate 是否接近保护上限。利用日志时间差检查实际循环频率，Python、串口、RTDE 和文件写入不能保证硬实时 100 Hz。
+`rule_policy.py`、原离散入口、PX6D 驱动、标定文件未修改。完成本轮要求后不扩展其他控制策略。
 
-当前尚无真机验证：力符号/外参、增益和滤波延迟、真实接触稳定性、颗粒阻力污染、粗糙表面/急变边界、局部扫描能否重新找到目标、真实 RTDE 与急停响应时延。模拟是可解释的合成调试模型，不是颗粒真实物理证明。
+本轮闭环原始结果与有效配置见 [reports.json](simulation_outputs/continuous_revision/validation_20260920_212838_032429/reports.json)。每个 run 独立保留 CSV、配置快照、几何评分和局部等比例静态图；端点恢复另有 GIF。报告中的局部恢复是显式历史记忆假设下的闭环子测试；默认从 SEARCH 开始的端点场景并未自然丢边，不能据此声称完整丢边恢复链已经经过现场验证。
 
-## 测试
+前一轮控制修复完成时全量测试：**668 passed in 119.12s**。其中 543 项为原有其他模块测试，125 项为 continuous 相关测试；较审查基准新增 56 项，既有 continuous 辅助函数按新鲜连续采样要求修正。`git diff --check` 通过。最终 HEAD 仍为 `98742be`，全部修改留在当前分支工作区，未自动提交。
 
-```bash
-MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-  ../.venv312/bin/python -m pytest -q
-```
+端点恢复子场景产物：[局部等比例静态图](simulation_outputs/continuous_revision/validation_20260920_212838_032429/run_20260920_212840_132093/continuous_summary_local.png)、[同步 GIF](simulation_outputs/continuous_revision/validation_20260920_212838_032429/run_20260920_212840_132093/continuous_replay_local.gif)。这些只展示合成几何恢复子测试，不展示真机行为。
 
-新增测试覆盖首次接触直入跟踪、低/高力与死区、速度限制、手性/sign、EMA 连续更新、单帧与持续低力、停止旧方向、稳定重捕获、恢复超时/距离预算、全部活动状态的 force/torque/raw/rate 优先级、配置拒绝、入口硬件替身故障、Q/ESC/Ctrl+C、日志字段、离线采样/比例/游标、GIF 与编码失败降级。原离散测试一并运行。
 
-本次离线验证记录：默认场景运行 120 s，12,001 个控制周期，9.68 s 首次稳定接触；11,031 个连续跟踪周期的 Fxy 为 1.09–1.66 N，平均 1.64 N，最大指令速度 0.001021 m/s。该场景未触发丢失接触；丢失/恢复分支由确定性单元测试覆盖。当前环境缺少 ffmpeg，已实际生成静态 PNG 和 240 帧 GIF（120 s，降级为 2 fps）；MP4 编码路径尚未在当前环境成功验证。
+## 追加：离线交互预演
 
-最终全量测试结果：`612 passed in 107.47s`，包括原有 543 项和新增 69 项；`git diff --check` 通过。所有验证均在离线或设备替身中完成，没有连接 UR7e/PX6D。
+本次追加保留前轮控制修复及所有阈值。`run_continuous_tracking.py --preview` 只在显式请求时加载 Matplotlib，与 `--execute` / `--dry-run` 互斥；默认入口仍为无窗口离线仿真。
+
+- `simulation/continuous_session.py` 抽取原离线装配、零偏捕获及单步：SimulatedRobot → SimulatedForceSensor → WrenchPreprocessor → ContinuousTrackingPolicy → SimulatedRobot。无窗口与预演调用同一个 step；目标几何不传入策略。模拟延迟 2 步、加速度 0.005 m/s² 保持不变。
+- `simulation/continuous_preview.py` 提供待开始场景、三种形状、拖动、15° 旋转、暂停/继续、1/5/10 倍播放、停止/重置、独立 YAML 保存/加载及显式 PNG。固定控制 dt，默认 10 fps，回调最多 100 步并设计算时间预算；性能不足只降低实际播放速度。
+- 场景校验整目标在容器内、起点在接触包络外、P0/P1 与尺寸有效。有效编辑先结束旧轮次并记录 SCENE_CHANGED，重新装配零状态；暂停继续不重置。独立场景只允许创建新 YAML，不覆盖现存配置/标定/数据。
+- 双视图只使用已观测数据；力显示最近 30 秒，整轮轨迹最多 4096 点并保守合并跨状态段，XY 等比例、力极值保留，明确区分搜索/可信接触/不确定/恢复运动。方向箭头均标为单位方向。CSV 保存所有步，预演停止后的制动尾段也采样记录；原无窗口入口仍保留原有独立最终停止快照。
+- `tests/test_continuous_preview.py` 覆盖真实无窗口日志与预演日志的逐步一致性、显示 fps/倍速独立、暂停确认时钟、编辑记忆清空、布局拒绝、保存保护、实际按钮/拖动回调、极值降采样、GUI 懒加载、无桌面回放和硬件构造前互斥拒绝。
+
+操作、输出路径及核验范围见上方分支指南。关闭或停止窗口只表示本轮结束，不表示通过轮廓验收；本次不提供真机物理验证或运行许可。
+
+追加完成后的全量回归：**692 passed in 128.03s**，其中本次新增预演测试 24 项；原有 668 项（含离散回归与前轮控制修复测试）保持通过。自动测试调用按钮、拖动与计时回调，未阻塞于 `plt.show()`；这不等于手动点验真实桌面窗口。
+
+| 问题 / 核验层级 | 修改与实际证据 |
+|---|---|
+| 预演是否换了控制器 / 闭环仿真 | 相同场景/seed、12 秒预算的真实无窗口 CSV 与预演 CSV 逐条比对状态、TCP、原始/处理力和命令；10/20/5 fps 与 1/5/10 倍组合一致 |
+| 编辑沿用记忆、暂停计入墙钟 / 回调及集成测试 | 有效编辑记录 SCENE_CHANGED、保留旧目录并重建会话；暂停保留记忆和仿真时钟；首次接触确认中暂停不满足保持时间 |
+| 场景、设备、显示保护 / 隔离与接口测试 | 三种形状、旋转、P0/P1 独立、非法布局拒绝、YAML 不覆盖、真实设备构造前互斥拒绝、无 GUI 下 headless/回放、XY 等比例/同时间/力极值和有界路径测试通过 |
+| 长运行数据量 / 完整离线闭环 | 默认 120 秒圆形预演记录 12,018 条样本（含制动尾段），显示轨迹 3,826 点、力窗口 3,001 条；按 STOP_TIME_LIMIT 停止，未宣称完成轮廓 |
+| 真机物理行为 / 未验证 | 没有真实 UR7e/PX6D 连接、运动或桌面手动点验；合成接触包络、力方向约定、刚度、噪声、阻力及执行延迟不构成现场物理验证 |
+
+本次完整预演产物：[同步静态 PNG](simulation_outputs/continuous_preview_verification/run_20260920_215819_746145/continuous_preview.png)、[停止摘要](simulation_outputs/continuous_preview_verification/run_20260920_215819_746145/summary.json)、[独立场景](simulation_outputs/continuous_preview_verification/run_20260920_215819_746145/independent_scene.yaml)。12 秒 CLI 和显式静态回放产物位于 `simulation_outputs/continuous_preview_cli_verification/run_20260920_215552_796097/`。未自动编码长视频，未自动提交或推送，未删除旧数据。

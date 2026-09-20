@@ -234,6 +234,8 @@ class ExperimentLogger:
         raw: Wrench | None,
         processed: Wrench | None,
         state: str,
+        *,
+        extra: dict | None = None,
     ) -> None:
         if self.termination is not None:
             self.termination.observe(robot=robot, raw=raw, processed=processed, state=state)
@@ -247,6 +249,7 @@ class ExperimentLogger:
                     "raw_wrench": None if raw is None else raw.array().tolist(),
                     "processed_wrench": None if processed is None else processed.array().tolist(),
                     **self._termination_fields(),
+                    **(extra or {}),
                 },
                 handle,
                 ensure_ascii=False,

@@ -3,36 +3,52 @@
 from __future__ import annotations
 
 import numpy as np
+from collections import deque
 
 from core.models import RobotState
 
 
 class SimulatedRobot:
-    def __init__(self, start_point, dt: float, workspace: dict):
+    def __init__(self, start_point, dt: float, workspace: dict, *, acceleration_limit=None, delay_steps=0):
         self.start_point = np.asarray(start_point, dtype=float)
         if self.start_point.shape != (2,) or dt <= 0.0:
             raise ValueError("start_point must be XY and dt must be positive")
         self.dt = float(dt)
         self.workspace = {key: float(value) for key, value in workspace.items()}
+        if acceleration_limit is not None and (not np.isfinite(acceleration_limit) or acceleration_limit <= 0):
+            raise ValueError("acceleration_limit must be positive m/s^2")
+        if not isinstance(delay_steps, int) or delay_steps < 0:
+            raise ValueError("delay_steps must be a nonnegative integer")
+        self.acceleration_limit = acceleration_limit
+        self.delay_steps = delay_steps
         self.reset()
 
     def reset(self) -> None:
         self.pose = np.asarray((self.start_point[0], self.start_point[1], 0.0, 0.0, 0.0, 0.0))
         self.tcp_speed = np.zeros(6)
         self.time = 0.0
+        self._pending = deque(np.zeros(2) for _ in range(self.delay_steps))
 
     def read_state(self) -> RobotState:
         return RobotState(self.time, self.pose.copy(), self.tcp_speed.copy())
 
     def apply_command(self, direction_xy, speed: float, move: bool) -> None:
-        self.tcp_speed[:] = 0.0
+        desired = np.zeros(2)
         if move:
             direction = np.asarray(direction_xy, dtype=float)
             norm = float(np.linalg.norm(direction))
             if norm <= 0.0 or speed <= 0.0:
                 raise ValueError("moving command requires nonzero direction and speed")
-            self.tcp_speed[:2] = direction / norm * float(speed)
-            self.pose[:2] += self.tcp_speed[:2] * self.dt
+            desired = direction / norm * float(speed)
+        self._pending.append(desired)
+        desired = self._pending.popleft()
+        delta = desired - self.tcp_speed[:2]
+        if self.acceleration_limit is not None:
+            limit = self.acceleration_limit * self.dt
+            if np.linalg.norm(delta) > limit:
+                delta *= limit / np.linalg.norm(delta)
+        self.tcp_speed[:2] += delta
+        self.pose[:2] += self.tcp_speed[:2] * self.dt
         self.time += self.dt
 
     def inside_workspace(self) -> bool:

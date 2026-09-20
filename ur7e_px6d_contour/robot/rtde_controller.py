@@ -161,6 +161,13 @@ class URRTDEController:
         self._stopped = True
         self._motion_mode: str | None = None
         self._return_mode = False
+        self.motion_fault = ''
+        self.stop_request_accepted = False
+        self.watchdog_active = False
+        self._watchdog_last_kick = None
+        self._packet_stamp = self._packet_seen_at = None
+        self._packet_advanced = False
+        self.observation_timing = {}
 
     def connect(self, allow_start_away_from_fixed_pose: bool = False) -> None:
         try:
@@ -191,9 +198,18 @@ class URRTDEController:
                 self.guard.check_workspace(pose)
             else:
                 self.guard.check_pose(pose)
+            if self.config.get('continuous_xy_limits'):
+                bounds = self.config['continuous_xy_limits']
+                margin = float(self.config['continuous_boundary_margin'])
+                if any(not bounds[f'{axis}_min']+margin <= pose[i] <= bounds[f'{axis}_max']-margin
+                       for i, axis in enumerate('xy')):
+                    raise RobotError('continuous XY execution boundary reached')
             self._verify_tcp()
         except Exception as exc:
-            self.close()
+            try:
+                self.close()
+            except Exception:
+                pass
             raise RobotError(f"RTDE initialization failed: {exc}") from exc
 
     def _verify_tcp(self) -> None:
@@ -226,6 +242,8 @@ class URRTDEController:
     def read_state(self) -> RobotState:
         self._check_connected()
         try:
+            observed_start = time.monotonic()
+            self._check_packet_freshness(observed_start)
             pose = _finite_six(self.receive.getActualTCPPose(), "actual TCP pose")
             speed = _finite_six(self.receive.getActualTCPSpeed(), "actual TCP speed")
             assert self.guard is not None
@@ -233,9 +251,21 @@ class URRTDEController:
                 self.guard.check_workspace(pose)
             else:
                 self.guard.check_pose(pose)
+            if self.config.get('continuous_xy_limits'):
+                bounds = self.config['continuous_xy_limits']
+                margin = float(self.config['continuous_boundary_margin'])
+                if any(not bounds[f'{axis}_min']+margin <= pose[i] <= bounds[f'{axis}_max']-margin
+                       for i, axis in enumerate('xy')):
+                    raise RobotError('continuous XY execution boundary reached')
             if np.linalg.norm(speed[:3]) > float(self.config["max_tcp_speed"]) * 1.20:
                 raise RobotError("measured TCP speed exceeds maximum plus tolerance")
-            return RobotState(time.monotonic(), pose, speed)
+            if self.config.get('continuous_speed_limit') and np.linalg.norm(speed[:3]) > 1.2*self.config['continuous_speed_limit']:
+                raise RobotError('continuous measured speed exceeds experimental limit')
+            observed_end = time.monotonic()
+            self.observation_timing.update(tcp_read_start=observed_start, tcp_read_end=observed_end)
+            if getattr(self, 'stop_request_accepted', False):
+                self._stopped = bool(np.linalg.norm(speed[:3]) <= float(self.config.get('continuous_settle_speed_mps', 1e-4)))
+            return RobotState(observed_end, pose, speed)
         except RobotError:
             raise
         except Exception as exc:
@@ -246,23 +276,42 @@ class URRTDEController:
         if self.receive is None:
             raise RobotError("RTDE receive interface is not connected")
         try:
+            observed_start = time.monotonic()
+            self._check_packet_freshness(observed_start)
             pose = _finite_six(self.receive.getActualTCPPose(), "actual TCP pose")
             speed = _finite_six(self.receive.getActualTCPSpeed(), "actual TCP speed")
-            return RobotState(time.monotonic(), pose, speed)
+            observed_end = time.monotonic()
+            self.observation_timing.update(tcp_read_start=observed_start, tcp_read_end=observed_end)
+            if getattr(self, 'stop_request_accepted', False):
+                self._stopped = bool(np.linalg.norm(speed[:3]) <= float(self.config.get('continuous_settle_speed_mps', 1e-4)))
+            return RobotState(observed_end, pose, speed)
         except Exception as exc:
             raise RobotError(f"RTDE diagnostic read failed: {exc}") from exc
 
     def command_planar_velocity(self, direction_xy, speed: float, duration: float) -> None:
+        self._check_motion_authorized()
         self._check_connected()
         state = self.read_state()
+        # A fresh read may revoke a previous standstill observation.
+        self._check_motion_authorized()
         assert self.guard is not None
         direction = self.guard.check_velocity(direction_xy, float(speed))
         self.guard.check_predicted_pose(state.pose, direction, float(speed), float(duration))
+        if self.config.get('continuous_xy_limits'):
+            bounds = self.config['continuous_xy_limits']
+            margin = float(self.config['continuous_boundary_margin'])
+            for point in (state.pose[:2], state.pose[:2]+direction*speed*duration):
+                if any(not bounds[f'{axis}_min']+margin <= point[i] <= bounds[f'{axis}_max']-margin
+                       for i, axis in enumerate('xy')):
+                    raise RobotError('continuous XY execution boundary reached')
+        if self.config.get('continuous_require_watchdog') and not self._packet_advanced:
+            raise RobotError('RTDE packet progress not established')
         velocity = [direction[0] * speed, direction[1] * speed, 0.0, 0.0, 0.0, 0.0]
         try:
             # Set before the call so an ambiguous transport failure still
             # causes stop() to attempt speedStop.
             self._stopped = False
+            self.stop_request_accepted = False
             self._motion_mode = "speed"
             accepted = self.control.speedL(
                 velocity,
@@ -284,6 +333,7 @@ class URRTDEController:
 
     def move_linear_async(self, target_pose, speed: float, acceleration: float) -> None:
         """Start one guarded asynchronous Cartesian segment for safe return."""
+        self._check_motion_authorized()
         self._check_connected()
         target = _finite_six(target_pose, "return target pose")
         assert self.guard is not None
@@ -294,6 +344,7 @@ class URRTDEController:
             raise RobotError("return acceleration must be positive")
         try:
             self._stopped = False
+            self.stop_request_accepted = False
             self._motion_mode = "linear"
             accepted = self.control.moveL(
                 target.tolist(), float(speed), float(acceleration), True
@@ -304,58 +355,139 @@ class URRTDEController:
             self.safe_stop_motion()
             raise RobotError(f"asynchronous return moveL failed: {exc}") from exc
 
+    def _check_packet_freshness(self, now):
+        """Compare device timestamps only with themselves; host clock measures stagnation.
+
+        First-seen host time is a receipt proxy, not synchronized acquisition
+        time. The continuous mode requires progress before its first motion.
+        """
+        if 'continuous_sample_age_sec' not in self.config:
+            return
+        if not hasattr(self.receive, 'getTimestamp'):
+            raise RobotError('RTDE package timestamp unavailable')
+        stamp = float(self.receive.getTimestamp())
+        if not np.isfinite(stamp) or (self._packet_stamp is not None and stamp < self._packet_stamp):
+            raise RobotError('invalid/backwards RTDE package timestamp')
+        if self._packet_stamp is None or stamp > self._packet_stamp:
+            self._packet_advanced = self._packet_stamp is not None
+            self._packet_stamp, self._packet_seen_at = stamp, now
+        age = now-self._packet_seen_at
+        self.observation_timing.update(rtde_device_timestamp=stamp, rtde_packet_stagnation_sec=age)
+        if age > float(self.config['continuous_sample_age_sec']):
+            raise RobotError('stale RTDE package: host reads do not refresh device data')
+
+    @staticmethod
+    def verified_watchdog_contract():
+        # Importing classes/docs is read-only; never instantiate an interface.
+        from importlib.metadata import version
+        import rtde_control
+        import rtde_receive
+        installed = version('ur-rtde')
+        if installed != '1.6.5':
+            raise RobotError(f'continuous watchdog contract unverified for ur-rtde {installed}')
+        cls = rtde_control.RTDEControlInterface
+        for name in ('speedL', 'speedStop', 'setWatchdog', 'kickWatchdog'):
+            if not hasattr(cls, name) or '-> bool' not in (getattr(cls, name).__doc__ or ''):
+                raise RobotError(f'unverified SDK contract: {name}')
+        if not hasattr(rtde_receive.RTDEReceiveInterface, 'getTimestamp'):
+            raise RobotError('RTDE package timestamps unavailable')
+        return dict(version=installed, speedL_time='function return time, NOT motion expiry',
+                    speedStop='bool acceptance; measured speed confirms standstill',
+                    stopL='void/None on normal completion',
+                    watchdog='setWatchdog/kickWatchdog bool; default action shuts down control')
+
+    def _check_motion_authorized(self):
+        if self.motion_fault:
+            raise RobotError(f'motion fault latched: {self.motion_fault}')
+        if self.stop_request_accepted and not self._stopped:
+            raise RobotError('stop request pending measured standstill')
+        if self.config.get('continuous_require_watchdog'):
+            if not self.watchdog_active or self._watchdog_last_kick is None:
+                raise RobotError('continuous motion requires active watchdog and healthy-cycle kick')
+            if time.monotonic()-self._watchdog_last_kick >= 1/self._watchdog_frequency:
+                self.motion_fault = 'watchdog deadline exceeded'
+                raise RobotError(self.motion_fault)
+
+    def enable_watchdog(self, frequency):
+        self._check_connected()
+        if self.motion_fault:
+            raise RobotError(self.motion_fault)
+        try:
+            if self.control.setWatchdog(float(frequency)) is not True:
+                raise RobotError('setWatchdog not accepted')
+            self.watchdog_active = True
+            self._watchdog_frequency = float(frequency)
+        except Exception as exc:
+            self.motion_fault = f'watchdog enable failed: {exc}'
+            raise RobotError(self.motion_fault) from exc
+
+    def kick_watchdog(self):
+        if not self.watchdog_active or self.motion_fault:
+            raise RobotError('watchdog inactive or faulted')
+        try:
+            if self.control.kickWatchdog() is not True:
+                raise RobotError('kickWatchdog not accepted')
+            self._watchdog_last_kick = time.monotonic()
+        except Exception as exc:
+            self.motion_fault = f'watchdog kick failed: {exc}'
+            raise RobotError(self.motion_fault) from exc
+
     def safe_stop_motion(self, force: bool = False) -> None:
-        """Stop current motion without disconnecting or preventing later return."""
+        """Request stop; never equate command acceptance with measured standstill.
+
+        1.6.5 speedStop is bool, stopL is void. Any failed primary request
+        latches a fault even if a fallback subsequently succeeds. Reads and
+        repeated stop/cleanup remain possible; subsequent motion is refused.
+        """
         if self.control is None or (self._stopped and not force):
             return
-        if force and self._motion_mode is None:
-            # A newly connected manual-recovery process does not know the
-            # primitive that may have been active before it started.  At least
-            # one synchronous stop primitive must be accepted.
-            accepted_stop = False
-            for method_name in ("stopL", "speedStop"):
-                try:
-                    result = getattr(self.control, method_name)(
-                        float(self.config["stop_deceleration"])
-                    )
-                    accepted_stop = accepted_stop or result is not False
-                except Exception:
-                    pass
-            self._stopped = True
-            self._motion_mode = None
-            if not accepted_stop:
-                raise RobotError("unable to confirm forced RTDE motion stop")
+        if self.stop_request_accepted and not force:
+            state = self.read_diagnostic_state()
+            self._stopped = bool(np.linalg.norm(state.tcp_speed[:3]) <= float(self.config.get('continuous_settle_speed_mps', 1e-4)))
             return
+        methods = ('stopL', 'speedStop') if self._motion_mode == 'linear' else ('speedStop', 'stopL')
+        accepted, errors = False, []
+        self._stopped = False
+        for method in methods:
+            try:
+                value = getattr(self.control, method)(float(self.config['stop_deceleration']))
+                valid = value is True or (method == 'stopL' and value is None)
+                if not valid:
+                    raise RobotError(f'{method} returned {value!r}')
+                accepted = True
+                break
+            except Exception as exc:
+                errors.append(f'{method}: {exc}')
+        self.stop_request_accepted = accepted
+        if errors or not accepted:
+            self.motion_fault = '; '.join(errors) or 'stop not accepted'
+            raise RobotError(f'RTDE stop uncertain: {self.motion_fault}')
         try:
-            if self._motion_mode == "linear":
-                self.control.stopL(float(self.config["stop_deceleration"]))
-            else:
-                self.control.speedStop(float(self.config["stop_deceleration"]))
-        except Exception:
-            # If the motion type is ambiguous after a transport error, attempt
-            # both stop primitives. Either call may itself fail on disconnect.
-            for method_name in ("speedStop", "stopL"):
-                try:
-                    getattr(self.control, method_name)(float(self.config["stop_deceleration"]))
-                except Exception:
-                    pass
-        finally:
-            self._stopped = True
+            # Strict continuous mode also requires a fresh device packet here.
+            self._check_packet_freshness(time.monotonic())
+            speed = _finite_six(self.receive.getActualTCPSpeed(), 'actual TCP speed after stop')
+            self._stopped = bool(np.linalg.norm(speed[:3]) <= float(self.config.get('continuous_settle_speed_mps', 1e-4)))
+        except Exception as exc:
+            self.motion_fault = f'stop observation unavailable: {exc}'
+            raise RobotError(self.motion_fault) from exc
+        if self._stopped:
             self._motion_mode = None
 
     def stop(self) -> None:
         self.safe_stop_motion()
 
     def close(self) -> None:
-        self.stop()
-        for interface in (self.control, self.receive):
-            if interface is not None and hasattr(interface, "disconnect"):
-                try:
-                    interface.disconnect()
-                except Exception:
-                    pass
-        self.control = None
-        self.receive = None
+        try:
+            self.stop()
+        finally:
+            # Stop errors must never skip disconnect cleanup.
+            for interface in (self.control, self.receive):
+                if interface is not None and hasattr(interface, 'disconnect'):
+                    try:
+                        interface.disconnect()
+                    except Exception:
+                        pass
+            self.control = self.receive = None
 
 
 def validate_execution_configuration(config: dict) -> None:
