@@ -353,3 +353,79 @@ def test_full_path_bounded_and_cross_state_decimation_conservative(config, scene
     model.tick(.31, work_budget_sec=10)
     assert all(p[3] == 'UNCERTAIN' for p in model.path_history[1:])
     model.stop()
+
+
+def assert_preview_logger_closed(model, logger):
+    assert model.logger is None
+    for name in ('_sample_file', '_full_log_file', '_boundary_file', '_waypoint_file', '_recovery_ray_file'):
+        assert getattr(logger, name).closed
+    model.stop()  # idempotent even after failed cleanup/display/logging
+
+
+def test_preview_missing_stop_code_still_finalizes(config, scene, tmp_path):
+    from experiment_logging.termination import TerminationReason
+    model = PreviewRun(config, scene, tmp_path)
+    model.start(0)
+    logger = model.logger
+    model.session.policy.request_stop(0, model.session.robot.pose, 'unclassified simulation failure')
+    model.session.policy.stop_reason = None  # legacy / partial failure state
+    model.stop()
+    assert model.status == 'ENDED'
+    assert model.session.policy.stop_reason == TerminationReason.STOP_UNKNOWN_REASON
+    assert 'STOP_UNKNOWN_REASON' in model.message
+    summary = json.loads((model.run_dir/'summary.json').read_text())
+    assert summary['termination_reason'] == 'STOP_UNKNOWN_REASON'
+    assert summary['reason'] == 'unclassified simulation failure'
+    assert_preview_logger_closed(model, logger)
+
+
+@pytest.mark.parametrize('code', ['STOP_FORCE_LIMIT', 'STOP_TIME_LIMIT'])
+def test_preview_keeps_specific_stop_code(config, scene, tmp_path, code):
+    from experiment_logging.termination import TerminationReason
+    model = PreviewRun(config, scene, tmp_path)
+    model.start(0)
+    logger = model.logger
+    model.session.policy.request_stop(0, model.session.robot.pose, 'original specific cause', code=TerminationReason(code))
+    model.stop('later user stop', code=None)
+    assert model.session.policy.stop_reason.value == code
+    summary = json.loads((model.run_dir/'summary.json').read_text())
+    assert summary['termination_reason'] == code and summary['reason'] == 'original specific cause'
+    assert_preview_logger_closed(model, logger)
+
+
+def test_preview_display_failure_still_closes_logs(config, scene, tmp_path, monkeypatch):
+    model = PreviewRun(config, scene, tmp_path)
+    model.start(0)
+    logger = model.logger
+    def fail_display(self, name, value):
+        if name == 'message' and str(value).startswith('Ended:'):
+            raise RuntimeError('injected display failure')
+        object.__setattr__(self, name, value)
+    monkeypatch.setattr(PreviewRun, '__setattr__', fail_display)
+    with pytest.raises(RuntimeError, match='injected display failure'):
+        model.stop()
+    assert_preview_logger_closed(model, logger)
+    assert (model.run_dir/'termination.json').is_file()
+
+
+@pytest.mark.parametrize('method', ['set_stop_reason', 'log_sample', 'write_stop_snapshot', 'write_summary', 'close'])
+def test_preview_logging_failure_still_attempts_cleanup(config, scene, tmp_path, monkeypatch, method):
+    model = PreviewRun(config, scene, tmp_path)
+    model.start(0)
+    logger = model.logger
+    target = logger.termination if method == 'set_stop_reason' else logger
+    original = getattr(target, method)
+    failed = False
+    def fail_once(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            if method == 'close':
+                original(*args, **kwargs)
+            raise OSError('injected log failure')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(target, method, fail_once)
+    with pytest.raises(OSError, match='injected log failure'):
+        model.stop()
+    assert_preview_logger_closed(model, logger)
+    assert (model.run_dir/'termination.json').is_file()

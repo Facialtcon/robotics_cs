@@ -13,7 +13,7 @@ import numpy as np
 import yaml
 
 from experiment_logging.data_logger import ExperimentLogger
-from experiment_logging.termination import TerminationReason
+from experiment_logging.termination import TerminationReason, classify_stop_reason
 from policy.continuous_tracking import EXTRA_SAMPLE_FIELDS, State
 from simulation.continuous_session import SimulationSession, validate_scene
 from simulation.simulator import load_simulation_config
@@ -129,12 +129,17 @@ class PreviewRun:
         if self.logger is None:
             return
         session, logger = self.session, self.logger
-        if session.policy.state != State.STOP:
-            session.policy.request_stop(session.robot.time, session.robot.pose, reason, event=event, code=code)
-        self.status = 'ENDED'
-        self.message = f'Ended: {session.policy.stop_reason.value}: {session.policy.reason}'
-        logger.termination.set_stop_reason(session.policy.stop_reason, session.policy.reason, source='continuous.preview')
         try:
+            if session.policy.state != State.STOP:
+                session.policy.request_stop(session.robot.time, session.robot.pose, reason, event=event, code=code)
+            # A partially completed/legacy stop may have no code. Classify its
+            # original detail, never relabel it as the later user stop request.
+            if session.policy.stop_reason is None:
+                session.policy.stop_reason = classify_stop_reason(session.policy.reason)
+            self.status = 'ENDED'
+            logger.termination.set_stop_reason(session.policy.stop_reason, session.policy.reason, source='continuous.preview')
+            display_code = getattr(session.policy.stop_reason, 'value', session.policy.stop_reason)
+            self.message = f'Ended: {display_code or TerminationReason.STOP_UNKNOWN_REASON.value}: {session.policy.reason}'
             # The same simulated execution adapter integrates its braking tail.
             # Record fresh force/pose samples during the tail, with STOP commands.
             for _ in range(int(session.policy.c['confirmation_timeout_sec']/session.dt)+1):

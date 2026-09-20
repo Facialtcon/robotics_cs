@@ -10,7 +10,7 @@ from collections import deque
 import numpy as np
 
 from core.models import PolicyCommand, PolicyWaypoint
-from experiment_logging.termination import TerminationReason
+from experiment_logging.termination import TerminationReason, classify_stop_reason
 from policy.boundary_estimation import handed_tangent, unit
 from safety.force_guard import ForceRateGuard, force_safety_reason
 
@@ -160,6 +160,7 @@ class ContinuousTrackingPolicy:
         self._last_time = self._started = self._lost = self._reacquire = None
         self._start_pose = None
         self._confirm_started = self._force_since = self._settle_since = None
+        self._low_force_pending = False
         self._confirmation_vectors = deque()
         self._saturation_since = self._saturation_force = None
         self._last_recovery_origin = None
@@ -183,6 +184,8 @@ class ContinuousTrackingPolicy:
         if self.state != State.STOP:
             self.state, self.reason, self.stop_reason = State.STOP, reason, code
             self._event(now, pose, event)
+        if self.stop_reason is None:
+            self.stop_reason = classify_stop_reason(self.reason)
         self.stop_requested = True
         self.stop_confirmed = False
         self.v_t = self.v_n = 0.
@@ -450,24 +453,44 @@ class ContinuousTrackingPolicy:
                 self._confirm_started = None
             return self._command(pose)
         if self.state == State.CONTINUOUS_TRACKING:
-            self.stop_requested = False
             self.stop_confirmed = False
             if self.fxy < float(self.c['contact_lost_threshold']):
                 self.direction_valid = False
                 self.stop_requested = True
+                if not self._low_force_pending:
+                    self._low_force_pending = True
+                    self._reset_confirmation(now)
                 if self._lost is None:
                     self._lost = now
-                    self._settle_since = None
                     self._event(now, pose, 'LOW_FORCE_STOP_REQUEST')
-                self._settled(now, robot)
+                # Keep one deadline for the whole pause, including repeated
+                # dips. Low force resets contact evidence, not settled speed.
+                self._confirm(now, robot, vector)
+                if self.state == State.STOP:
+                    return self._command(pose)
                 self.lost_timer = now-self._lost
                 if self.lost_timer+1e-12 >= float(self.c['contact_lost_hold_sec']):
                     self.state = State.CONTACT_LOST
+                    self._low_force_pending = False
                     self.loss_detection_pose = pose.copy()
                     self._confirm_started = now
                     self._event(now, pose, 'CONTACT_LOST')
                 return self._command(pose)
             self._lost, self.lost_timer = None, 0.
+            if self._low_force_pending:
+                self.stop_requested = True
+                if not self._direction(now, pose, vector):
+                    self._force_since = None
+                    self._confirmation_vectors.clear()
+                    self.contact_hold_elapsed = 0.
+                    return self._command(pose)
+                if self._confirm(now, robot, vector):
+                    self._low_force_pending = False
+                    self._confirm_started = None
+                    self._event(now, pose, 'LOW_FORCE_RECONFIRMED')
+                # Even the successful confirmation sample remains a stop.
+                return self._command(pose)
+            self.stop_requested = False
             if not self._direction(now, pose, vector):
                 self.stop_requested = True
                 return self._command(pose)

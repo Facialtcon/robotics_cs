@@ -245,3 +245,122 @@ def test_recovery_motion_does_not_keep_origin_standstill_flag():
     command=sample(p,1.18,(0,0))
     assert command.move
     assert not p.stop_confirmed
+
+
+def low_force_pause():
+    """Isolated fresh feedback; force return ramps respect the existing rate limit."""
+    p = settled()
+    assert not sample(p, 1.01, (.4, 0), speed=.002).move
+    assert p.state == State.CONTINUOUS_TRACKING
+    return p
+
+
+def returning_force(index):
+    return (min(1.5, .4 + (index-101)*.2), 0)
+
+
+def test_low_force_return_cannot_resume_while_tcp_is_moving():
+    p = low_force_pause()
+    for i in range(102, 125):
+        command = sample(p, i*.01, returning_force(i), speed=.002)
+        assert p.state == State.CONTINUOUS_TRACKING
+        assert not command.move and p.stop_requested
+        assert not p.stop_confirmed
+        assert command.speed == 0 and p.v_t == p.v_n == 0
+
+
+def test_low_force_return_requires_both_continuous_confirmation_windows():
+    p = low_force_pause()
+    for i in range(102, 111):
+        assert not sample(p, i*.01, returning_force(i), speed=.002).move
+    for i in range(111, 119):  # still short of the 80 ms standstill window
+        assert not sample(p, i*.01).move
+        assert p.stop_requested
+    command = sample(p, 1.19)
+    assert not command.move  # confirmation sample itself remains a stop
+    assert p.stop_confirmed and p.direction_valid
+    assert p.contact_hold_elapsed >= p.p['contact_hold_time']
+    assert sample(p, 1.20).move
+    assert not p.stop_requested
+
+
+def test_low_force_reconfirmation_resets_contact_and_speed_windows_independently():
+    p = low_force_pause()
+    for i in range(102, 109):
+        assert not sample(p, i*.01, returning_force(i)).move
+    # Force breaks contact confirmation but not the settled-speed window.
+    assert not sample(p, 1.09, (.9, 0)).move
+    assert p.contact_hold_elapsed == 0
+    assert p.settle_hold_elapsed >= .06
+    for i in range(110, 114):
+        assert not sample(p, i*.01, (min(1.5, .9+(i-109)*.2), 0)).move
+    # A velocity spike resets standstill independently of contact.
+    assert not sample(p, 1.14, speed=.002).move
+    assert p.settle_hold_elapsed == 0 and p.contact_hold_elapsed > 0
+    for i in range(115, 123):
+        assert not sample(p, i*.01).move
+    assert not sample(p, 1.23).move
+    assert sample(p, 1.24).move
+
+
+def test_low_force_reconfirmation_timeout_is_not_extended_by_repeated_dips():
+    p = low_force_pause()
+    for i in range(102, 215):
+        # Never reach stable contact, but avoid a continuous lost interval.
+        force = (.4 if i % 2 else .6, 0)
+        assert not sample(p, i*.01, force).move
+    assert p.state == State.STOP
+    assert 'confirmation timeout' in p.reason
+    assert not any(e.event_type == 'CONTACT_LOST' for e in p.events)
+
+
+def test_low_force_reconfirmation_moving_timeout():
+    p = low_force_pause()
+    for i in range(102, 215):
+        assert not sample(p, i*.01, returning_force(i), speed=.002).move
+    assert p.state == State.STOP and 'confirmation timeout' in p.reason
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_low_force_pending_preserves_sustained_loss_flow(enabled):
+    cfg = config()
+    cfg['continuous_tracking']['reacquire_enabled'] = enabled
+    p = settled(cfg)
+    for i in range(101, 117):
+        assert not sample(p, i*.01, (.4, 0)).move
+    assert p.state == State.CONTACT_LOST
+    assert not sample(p, 1.17, (.4, 0)).move
+    assert p.state == (State.LOCAL_REACQUIRE if enabled else State.STOP)
+
+
+def test_low_force_reconfirmation_rejects_stale_feedback_and_direction_jump():
+    p = low_force_pause()
+    for i in range(102, 109):
+        assert not sample(p, i*.01, returning_force(i), speed=.002).move
+    assert not sample(p, 1.2).move  # gap exceeds the unchanged sample-age guard
+    assert p.state == State.STOP and 'stale sample' in p.reason
+    p = low_force_pause()
+    assert not sample(p, 1.02, (-.6, 0)).move
+    assert p.state == State.STOP and 'direction jump' in p.reason
+
+
+def test_low_force_pending_manual_stop_never_restarts():
+    from experiment_logging.termination import TerminationReason
+    p = low_force_pause()
+    p.request_stop(1.015, np.zeros(6), 'operator stop', event='USER_STOP',
+                   code=TerminationReason.STOP_USER_REQUEST)
+    for i in range(102, 135):
+        assert not sample(p, i*.01, returning_force(i)).move
+    assert p.state == State.STOP
+    assert p.stop_reason == TerminationReason.STOP_USER_REQUEST
+    assert p.reason == 'operator stop'
+
+
+def test_request_stop_assigns_default_code_without_overwriting_first_reason():
+    from experiment_logging.termination import TerminationReason
+    p = settled()
+    p.request_stop(1.01, np.zeros(6), 'contact/standstill confirmation timeout')
+    assert p.stop_reason is not None
+    reason, code = p.reason, p.stop_reason
+    p.request_stop(1.02, np.zeros(6), 'operator stop', code=TerminationReason.STOP_USER_REQUEST)
+    assert (p.reason, p.stop_reason) == (reason, code)
