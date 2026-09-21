@@ -123,7 +123,9 @@ def test_display_modes_preserve_every_control_step_and_replay_force_values(tmp_p
     for key in ('boundary','robot_estimate'):
         np.testing.assert_allclose(v.arrows[key].xy,fig.continuous_vectors.arrows[key].xy)
         assert v.arrows[key].get_visible()==fig.continuous_vectors.arrows[key].get_visible()
-    assert not fig.axes[2].get_visible() and not fig.axes[0].get_legend().get_visible()
+    assert not fig.axes[2].get_visible()
+    legend=fig.axes[0].get_legend()
+    assert legend is None or not legend.get_visible()
     for size in [(12,8),(20,8)]:
         fig.set_size_inches(*size);update(len(data['time'])-1);fig.canvas.draw()
         origin,x,y=fig.axes[0].transData.transform([[0,0],[1,0],[0,1]])

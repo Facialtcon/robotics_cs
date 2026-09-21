@@ -2,6 +2,24 @@
 
 新用户先看：[【分支 experiment/continuous-tracking】连续贴边：傻瓜式操作指南](BRANCH_continuous-tracking_傻瓜式操作指南.md)。
 
+## 当前修订：fix5 后统一 Debug 样式、图例和真实切向对照
+
+起点为 `experiment/continuous-tracking`、HEAD `c6f8fc7`（fix5），工作区干净，与该基准无后续差异。生产修改仅 `simulation/continuous_view.py`、`simulation/continuous_preview.py`、`tools/visualize_continuous_run.py`；控制策略、方向估计、传感器/摩擦模型、仿真及真机配置未变。
+
+共享 `DISPLAY_STYLES` 定义颜色、线型、名称、单位，箭头、轨迹、右侧曲线、代理图例及分量说明复用。法向蓝实线，机器人估计红虚线，处理后合成力橙实线，估计切向绿色，朝内方向青色，命令黑色，实际速度紫色，轨迹深灰细线。Components 使用土黄点线、棕虚线、灰蓝点划线、粉点线。简洁模式不增加图例/辅助箭头；Debug 也保留单色轨迹，不叠加十字、重复标记和状态色路径。
+
+左侧 Debug 图例用明确的箭头/线段代理，在 XY 上方预留区域显示。只有启用项目集合或仿真/真机标签上下文改变时重建，普通帧只更新文本与“零 / 不可用”状态；关闭 Debug 隐藏整个图例。新增真实切向按钮默认关闭：预演在 Debug + Settings 中，回放在 Debug 底部，也支持 `--true-tangent`。只把已有可信物理法向日志转成短灰虚线，估计 tangent 不作几何修正。夹角采用 `acos(abs(dot))`，为无方向直线 0～90°，不用于判断倒退。无接触/法向缺失不画线；真机隐藏按钮并注明无真值。
+
+先补的两项显示测试在修改前失败。随后新增有限闭环比对，圆形及 30° 斜直边各 3000 步，开关 Debug / Components / 真值对照前后的时钟和 RNG 状态不变，raw、processed、控制方向、速度、move、状态逐值一致；运行中与停止帧的预演/回放箭头数值、颜色、线型、名称及真实切线一致。新增测试同时覆盖代理样式、缓存身份、零/缺失标注、按钮切换、真机无真值隐藏、16×9 / 12×8 英寸下图例及文字边界。
+
+实际测试：六个相关文件（`test_continuous_debug_display.py`、`test_continuous_force_display.py`、`test_continuous_friction_settings.py`、`test_continuous_preview_duration.py`、`test_continuous_direction.py`、`test_continuous_preview.py`）在 `-k 'not first_turn_closed_loop_geometry_and_failures'` 下 **105 passed / 5 deselected in 32.27s**；最后补充按钮和真机日志测试后，`test_continuous_debug_display.py tests/test_continuous_run.py` **29 passed in 16.80s**（与前轮有重叠）。命令前缀为 `MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q`。回放 CLI 帮助和 `git diff --check` 通过。
+
+首次含 180 秒几何用例的回归仍复现前轮三项穿透：圆形 0.03220 mm、方形 0.03265 mm、旋转方形 0.03276 mm，数值不变，未修改安全断言；同轮另两项失败为旧测试假定简洁模式也创建隐藏图例，现已改为检查不存在可见图例，并复测通过。后续没有重复这五项长几何用例；本轮未跑全量测试，也没有解决已知几何失败。
+
+最终截图和完整日志在 [verification_20260921_094639_943208](simulation_outputs/debug_display/verification_20260921_094639_943208/)，汇总见 `verification.json`。圆形与 30° 斜直边各运行 30 秒（40 秒明确预算），暂停在 29.99 秒生成预演/同帧回放，随后显式停止。每种均输出 `preview/replay_16x9/12x8_simple/debug.png`，已实际打开检查两种窗口尺寸下的简洁及 Debug 图；另查看 `controls/run_20260921_094911_043996/controls_12x8.png` 的 Debug + Settings + 摩擦设置组合。图例与状态、力数值、按钮不重叠，修复小窗口 Y 标签裁切及回放右图图例过宽。实测估计切向与真实切线偏差分别约 12.091°、12.150°，显示保留该差异，不代表几何验收通过。
+
+没有连接硬件或实机绘图，未手动点验真实桌面；检查使用离屏 GUI 回调、截图、有限仿真和设备替身。未 commit/push/reset，没有删除或覆盖旧实验数据。
+
 ## 当前修订：蓝色只显示法向反力
 
 本轮从 `experiment/continuous-tracking`、HEAD `51f855f`、干净工作区开始。生产修改仅涉及 `simulation/continuous_view.py`、`simulation/continuous_preview.py` 和 `tools/visualize_continuous_run.py`；模型、策略、传感器、配置和摩擦参数均未修改。

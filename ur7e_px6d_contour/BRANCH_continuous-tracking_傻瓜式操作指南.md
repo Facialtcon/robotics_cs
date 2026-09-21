@@ -79,7 +79,7 @@ git status
 |---|---|---|
 | 设置区域 | `Settings` | 展开/收起形状、旋转、倍速、场景文件、Global、Follow、Components；主画面常用按钮始终可用 |
 | 表面摩擦 | `摩擦设置`，旁边当前 μ | 编辑值与生效值分开；应用并重置后需重新 Start；不改颗粒背景阻力 |
-| 调试显示 | `Debug` | 默认关闭；开启后显示状态色轨迹、事件、实际半径包络、方向/速度、Fx/Fy/误差等诊断 |
+| 调试显示 | `Debug` | 默认关闭；开启后显示共享箭头图例、估计方向、命令/实际速度及 Fx/Fy/误差；轨迹仍为深灰细线 |
 | 三种形状 | `1 Square` / `2 Circle` / `3 Triangle`，或 `1` / `2` / `3` | 方形使用场景已有 width 作为边长；圆为半径，等边三角形为外接圆半径；尺寸在 Debug 中显示 |
 | 移动目标 | 目标内部左键拖动、松开 | 只改中心；拖动期间冻结播放，松开后校验；移出容器或包住起点会拒绝 |
 | 朝向 | `[ -15 deg` / `] +15 deg`，或 `[` / `]` | 每次旋转 15°；圆的外观不受朝向影响 |
@@ -92,6 +92,7 @@ git status
 | 全局 / 目标局部 / 探针附近 | `Global` / `Target` / `Probe` | 全局看容器；目标局部放大目标；探针附近看接触细节；始终 XY 等比例 |
 | 自动跟随 | `Follow` | 开启后跟随探针；再点关闭。滚轮或工具栏手动缩放平移会关闭跟随 |
 | 手动缩放、平移 | 左图滚轮；窗口工具栏的缩放、平移按钮 | 暂停或停止后仍可用；启用工具栏平移时不会误拖目标；刷新不覆盖手动视窗 |
+| 真实切向对照 | Debug + Settings 中“真实切向对照（仅仿真）” | 默认关闭；短灰虚线与策略绿色切向独立显示，只用于诊断 |
 | 合成力分量 | `Components` | 位于 Settings；开启时同时打开 Debug，显示 RAW 合成分量；只用于诊断，不传给策略 |
 | 静态图片 | 结束后 `Save PNG` | 保存本轮同步视图 `continuous_preview.png`；重复保存使用新的文件名 |
 
@@ -101,10 +102,10 @@ git status
 
 **界面不会保证沿边走完。** 默认恢复关闭，丢边即停。搜索线没有经过目标时，按搜索预算失败是有效结果。不要为了动画跑完调大安全阈值。若显示 `Playback throttled`，实际倍速低于请求值；每个传感器／控制／执行步仍完整计算。默认刷新 10 fps。
 
-左侧默认只画灰色目标、小实心圆点 TCP、单色已执行轨迹及最多两根非零力箭头。圆点只是位置符号，不改变模型探针半径；实际半径包络、十字事件、P0/P1、搜索线和状态色轨迹只在 Debug 中显示。两根力箭头都从同一 TCP 位置出发，共用固定 **8 mm/N** 标尺和一个 1 N 标记，不归一化、不按每帧最大值缩放。0 N 隐藏箭头但数值显示 0.00 N；未知值标为 unavailable，不能当成零。
+左侧默认只画灰色目标、小实心圆点 TCP、单色已执行轨迹及最多两根非零力箭头。圆点只是位置符号，不改变模型探针半径；Debug 也不叠加十字事件、P0/P1、半径包络或状态色轨迹；事件和模型尺寸仍可在调试文字与日志中查看。两根力箭头都从同一 TCP 位置出发，共用固定 **8 mm/N** 标尺和一个 1 N 标记，不归一化、不按每帧最大值缩放。0 N 隐藏箭头但数值显示 0.00 N；未知值标为 unavailable，不能当成零。
 
 - **蓝色 法向反力 / Normal reaction**。只表示物体对探针的物理法向接触分量，读取日志 `sim_normal_physical_fx/fy`。方向是接触模型的物理外法向：圆形沿圆心向外，直边垂直该边，尖角采用模型的有效法向，不假设唯一表面法向。长度为实际法向载荷，不是包含摩擦的边界合力模长，也不绑定 F_ref。无接触时蓝箭头为零，即使仍有颗粒阻力或测量噪声。默认不另画摩擦箭头，底部注明“法向反力示意；摩擦分量未绘制”。
-- **红色虚线 Robot force (estimate)：机器人作用力（准静态估计）**。按 `-(物理边界力 + 颗粒背景阻力 + 其他已知平面外力)` 计算；本模型没有其他平面外力项，measurement noise 不参与平衡。表示夹具传给探针的等效平面合力，画在 TCP 只是示意，不代表真实施力点或杆身弯曲/力矩计算。不是速度命令、力控输出或独立测量。
+- **红色虚线：机器人作用力估计（准静态）**。按 `-(物理边界力 + 颗粒背景阻力 + 其他已知平面外力)` 计算；本模型没有其他平面外力项，measurement noise 不参与平衡。表示夹具传给探针的等效平面合力，画在 TCP 只是示意，不代表真实施力点或杆身弯曲/力矩计算。不是速度命令、力控输出或独立测量。
 
 旧模型的控制合成信号依旧为 `object_force（向内）+ friction + background + noise`。复用已有诊断：`normal_physical = -object_force`，`boundary_physical = normal_physical + friction`，`robot_estimate = -(boundary_physical + background)`。蓝色只取 normal_physical；红色仍包含完整摩擦和背景阻力，不能简单取蓝色反向。raw/processed、零偏、变换、force_direction_sign、摩擦参数和策略完全保留。两套力的不同含义记录在配置快照的 `force_display`（schema_version、force_convention、force_source、estimate_method），CSV 另记物理分量及可用性。旧仿真日志若缺少可靠法向分量，蓝色显示 unavailable，不从合力猜测法向。
 
@@ -114,13 +115,35 @@ git status
 
 **真机回放**的蓝标签自动改为 `Measured environment resultant（测得环境合力）`，不能声称分离了目标与颗粒。只有独立记录确认了 Base 坐标、环境对探针的物理正负定义和标定来源，才可显示 processed 合力及其反号的准静态估计；噪声和未知外力的不确定性保留。现有现场 `force_sign_checked` 是控制方向核对，不能自动等同这项物理确认，因此新真机日志默认明确记录 unconfirmed，隐藏两箭头。可信离线记录的 schema 需要 `frame=Base`、`force_convention=environment_on_probe`、`force_source=processed_wrench`、两项 physical_sign_confirmed/base_frame_confirmed、calibration_reference；这不是新的上机放行方式。缺少元数据的旧日志仍能打开，但物理箭头显示不可用，不猜符号。
 
+### Debug 图例和真实切向对照
+
+点 **Debug** 后，左图上方出现独立预留的图例区，箭头、轨迹、右侧曲线及分量说明都复用 `simulation/continuous_view.py` 的样式定义。关闭 Debug 后恢复简洁画面；Components 关闭后，其图例和箭头一起消失。图例只在启用项目集合变化时重建，普通刷新更新数值和状态；零值或不可用项会标注“零 / 不可用”，不画虚假箭头。
+
+| 样式 | 含义与单位 |
+|---|---|
+| 蓝色实线箭头 | 法向反力 [N]；真机回放为测得环境合力，沿用原物理符号可信检查 |
+| 红色虚线箭头 | 机器人作用力估计 [N] |
+| 橙色实线箭头 | 处理后力信号 [N]；仿真注明“仿真合成”，不是物理反力；真机注明 processed Base |
+| 绿色箭头 | 策略输出的估计切向 [单位方向] |
+| 青色箭头 | 策略输出的估计朝内方向 [单位方向] |
+| 黑色实线箭头 | 命令速度 [mm/s] |
+| 紫色实线箭头 | 实际 TCP 速度 [mm/s] |
+| 深灰色无箭头细线 | 已执行轨迹 [mm] |
+| 短灰色虚线段（可选） | 真实切向对照（仅仿真），不是运动箭头 |
+
+力共用 **8 mm/N** 标尺，速度使用独立 **12 mm/(mm/s)** 标尺；单位方向只用固定 8 mm 示意长度，不把方向长度当作力或速度。Components 的四种分量配色见下文，均采用同一 N 标尺。
+
+**预演操作**：先点 Debug，再展开 Settings，右侧点“真实切向对照（仅仿真）：关”切换为开。默认关闭。灰色虚线只在已有日志的物理法向非零、有限且来源可信时显示，由接触模型有效法向转 90° 得到；尖角也用模型有效法向。绿色箭头始终采用策略 tangent，即使偏离边界也不修正。底部显示无方向直线夹角 **0～90°**，正反切向同为 0°，因此不能用它判断倒退。
+
+**回放操作**：Debug 打开后，底部可切换 Components 和“真实切向对照（仅仿真）”；导出时可加 `--debug --components --true-tangent`。真机回放隐藏真实切向按钮并注明不可用；旧仿真日志若没有可靠法向也不猜测。所有开关只读取当前样本，不推进仿真、不采新噪声、不改变反馈或控制。
+
 ### 看到 DIRECTION_RECONFIRM 时怎么办
 
 这是“方向暂停重确认”，不是结束，也不是自动判断了某种角。程序先随测量转速、估计滞后和可信度降低切向速度，必要时请求零运动，等实测 TCP 连续停稳、新接触方向连续稳定后再建立方向。确认当帧仍停止，之后低速恢复并验证一小段前进；Base、force_direction_sign 和 follow_hand 不会自动翻转。
 
 仍需看具体原因：`STOP_DIRECTION_UNCONFIRMED` 表示方向确认超时；`STOP_DIRECTION_REVERSAL` 表示接近反向、符号无法解释；`STOP_DIRECTION_NO_PROGRESS` 表示重复确认或恢复运动后缺少前进；`STOP_STALE_DATA` 表示数据/周期过期。力硬限仍是 `STOP_FORCE_LIMIT`，持续丢边仍按原 CONTACT_LOST 和默认关闭的恢复设置处理。安全或人工 STOP 不会自动恢复。出现 STOP 先看本轮 `termination.json`，不要盲目改阈值。
 
-`Components` 显示的橙色是**模型目标作用分量（仿真约定，采用向内符号）**，棕色表面摩擦、灰色背景阻力、粉色噪声。四者之和等于未处理 raw wrench 的 XY 分量；processed 还经过零偏、滤波和坐标处理，不能要求它等于这四个原始分量之和。它们不是实测分离出的真实边界反力。真实 PX6D 的这些分量和未知目标轮廓显示 unavailable，不伪造。
+`Components` 显示的土黄色点线是**模型法向合成分量（仿真约定，采用向内符号）**，棕色虚线是表面摩擦、灰蓝色点划线是颗粒背景、粉色点线是噪声。四者之和等于未处理 raw wrench 的 XY 分量；processed 还经过零偏、滤波和坐标处理，不能要求它等于这四个原始分量之和。它们不是实测分离出的真实边界反力。真实 PX6D 的这些分量和未知目标轮廓显示 unavailable，不伪造。
 
 ## 保存 / 加载独立场景
 
@@ -198,7 +221,7 @@ xdg-open "$CONTINUOUS_RUN_DIR/continuous_summary.png"
 ../.venv312/bin/python tools/visualize_continuous_run.py "$CONTINUOUS_RUN_DIR" --format none --view target
 ```
 
-会打印 `continuous_summary_target.png` 路径。默认双力箭头和 Fxy/F_ref；`--debug` 才分区显示 N 和 mm/s、另列原始力，仿真 raw 按模型 Base 坐标标注，真机 raw 按传感器坐标标注，processed 才是处理后的 Base 力。未知真机目标和分离力保持 unavailable。
+会打印 `continuous_summary_target.png` 路径。默认双力箭头和 Fxy/F_ref；`--debug` 才显示左侧箭头图例并分区显示 N 和 mm/s、另列原始力，仿真 raw 按模型 Base 坐标标注，真机 raw 按传感器坐标标注，processed 才是处理后的 Base 力。未知真机目标和分离力保持 unavailable。
 
 ## 真机章节：与上述纯仿真分开
 

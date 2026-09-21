@@ -19,7 +19,8 @@ from experiment_logging.termination import TerminationReason, classify_stop_reas
 from policy.continuous_tracking import EXTRA_SAMPLE_FIELDS, State
 from simulation.continuous_session import SimulationSession, validate_scene, SIMULATION_SAMPLE_FIELDS
 from simulation.simulator import load_simulation_config
-from simulation.continuous_view import XYViewport, VectorDisplay, force_demonstration, NORMAL_REACTION_NOTE
+from simulation.continuous_view import (XYViewport, VectorDisplay, force_demonstration, NORMAL_REACTION_NOTE,
+    CJK_FONT, FORCE_CURVES, SPEED_CURVES, line_style, component_note)
 
 
 def surface_friction(value):
@@ -297,8 +298,9 @@ class ContinuousPreview:
         self.xy = self.figure.add_subplot(grid[:, 0])
         self.force = self.figure.add_subplot(grid[0, 1])
         self.velocity = self.figure.add_subplot(grid[1, 1])
-        self.figure.subplots_adjust(left=.045, right=.98, bottom=.17, top=.88)
+        self.figure.subplots_adjust(left=.065, right=.98, bottom=.17, top=.88)
         self.show_components = False
+        self.show_true_tangent = False
         self.debug = self.settings = False
         self.friction_open = False
         self.friction_error = ''
@@ -325,7 +327,7 @@ class ContinuousPreview:
             self.paths[kind] = collection
         self.probe = Circle((0, 0), radius=0, fill=False, color='red', label='Synthetic probe radius (to scale)')
         self.xy.add_patch(self.probe)
-        self.executed, = self.xy.plot([], [], color='.3', lw=1.3)
+        self.executed, = self.xy.plot([], [], lw=1.3, **line_style('executed'))
         self.tcp, = self.xy.plot([], [], 'ko', ms=4, zorder=10)
         self.event_points, = self.xy.plot([], [], 'kx', ms=5, label='Policy events')
         self.vectors = VectorDisplay(self.xy)
@@ -337,19 +339,15 @@ class ContinuousPreview:
                                            fontfamily=['Noto Sans CJK JP', 'DejaVu Sans'])
         self.event_text = self.figure.text(.53, .245, '', fontsize=8)
         self.message_text = self.figure.text(.045, .225, '', fontsize=8, color='#8b3510')
-        self.force_lines = [self.force.plot([], [], color=color, label=label)[0] for label, color in
-                            [('Fx', '#be433a'), ('Fy', '#2271b2'), ('Fxy', '#008855'), ('F_ref', '#555555'), ('F_error', '#995599')]]
-        self.force_lines[3].set_linestyle('--')
+        self.force_lines = [self.force.plot([], [], **line_style(key))[0] for key in FORCE_CURVES]
         self.cursor = self.force.axvline(0, color='k', lw=.8)
-
-        self.velocity_lines = [self.velocity.plot([], [], color=color, label=label)[0] for label, color in
-                               [('Command', 'black'), ('Actual', '#9933aa'), ('v_t', '#008855'), ('v_n', '#b51d3c')]]
+        self.velocity_lines = [self.velocity.plot([], [], **line_style(key))[0] for key in SPEED_CURVES]
         self.velocity_cursor = self.velocity.axvline(0, color='k', lw=.8)
         self.velocity.set(xlabel='Simulation time [s]', ylabel='Velocity [mm/s]')
-        self.velocity.legend(fontsize=6, loc='upper right', ncol=2)
+        self.velocity.legend(prop={'family': CJK_FONT, 'size': 6}, loc='upper right', ncol=2)
         self.velocity.grid(alpha=.2)
         self.viewport = XYViewport(self.xy, [[-180,-130],[180,130]])
-        self.force.legend(loc='upper right', fontsize=8)
+        self.force.legend(loc='upper right', prop={'family': CJK_FONT, 'size': 7})
         self.buttons = []
         self.settings_axes = []
         def add_button(label,action,position,setting=False):
@@ -374,6 +372,10 @@ class ContinuousPreview:
         actions=[('Save scene',self.save_scene),('Load scene',self.load_scene),('Global',lambda:self.select_view('Global')),
                  ('Follow',self.toggle_follow),('Components',self.toggle_components)]
         for i,(label,action) in enumerate(actions):add_button(label,action,[.025+i*.16,.075,.15,.033],True)
+        self.truth_button=add_button('真实切向对照（仅仿真）：关',self.toggle_true_tangent,[.825,.075,.15,.033])
+        self.truth_button.label.set_fontfamily(CJK_FONT)
+        self.truth_button.label.set_fontsize(7)
+        self.truth_button.ax.set_visible(False)
         default_path=Path('simulation_scenes')/f'continuous_{datetime.now():%Y%m%d_%H%M%S_%f}.yaml'
         self.path_box=TextBox(self.figure.add_axes([.11,.175,.865,.033]),'Scene YAML: ',initial=str(default_path))
         self.settings_axes.append(self.path_box.ax)
@@ -475,6 +477,10 @@ class ContinuousPreview:
         self.show_components = not self.show_components
         if self.show_components:self.debug=True
 
+    def toggle_true_tangent(self):
+        self.show_true_tangent = not self.show_true_tangent
+        if self.show_true_tangent: self.debug = True
+
     def toggle_debug(self):
         self.debug = not self.debug
 
@@ -545,20 +551,22 @@ class ContinuousPreview:
                                     top=min(.88,.945-header_height-.012))
 
     def _display_mode(self):
+        self.truth_button.ax.set_visible(self.debug and self.settings)
+        self.truth_button.label.set_text("真实切向对照（仅仿真）："+("开" if self.show_true_tangent else "关"))
         mode=(self.debug,self.friction_open)
         if getattr(self,'_last_display_debug',None)==mode:return
         self._last_display_debug=mode
         for artist in [self.container,self.search,self.points,self.start_marker,self.probe,self.event_points,
                        *self.point_labels,*self.paths.values()]:
-            artist.set_visible(self.debug)
-        self.executed.set_visible(not self.debug)
+            artist.set_visible(False)
+        self.executed.set_visible(True)
         velocity_visible=self.debug and not self.friction_open
         self.velocity.set_visible(velocity_visible)
         # In Debug both right panels share time; label the lower one only.
         self.force.set_xlabel('' if velocity_visible else 'Simulation time [s]')
         self.force.tick_params(axis='x', labelbottom=not velocity_visible)
         for i,line in enumerate(self.force_lines):line.set_visible(self.debug or i in (2,3))
-        self.force.legend(handles=[line for line in self.force_lines if line.get_visible()],fontsize=7)
+        self.force.legend(handles=[line for line in self.force_lines if line.get_visible()],prop={'family': CJK_FONT, 'size': 7})
         for text in (self.geometry_text,self.event_text,self.message_text):text.set_visible(False)
 
 
@@ -616,12 +624,13 @@ class ContinuousPreview:
         self.tcp.set_data([xy[0]],[xy[1]])
         self.probe.center=xy
         self.viewport.update(xy,running=model.status=='RUNNING')
-        self.vectors.draw(xy,force,command,actual,tangent,inward,valid=valid,components=components,physical=physical,debug=self.debug)
+        self.vectors.draw(xy,force,command,actual,tangent,inward,valid=valid,components=components,physical=physical,debug=self.debug,
+                          components_enabled=self.show_components, true_tangent=self.show_true_tangent, simulated=True)
         for cursor in (self.cursor,self.velocity_cursor):cursor.set_xdata([self.display_time]*2)
         event_xy=np.array([e.pose[:2]*1000 for e in model.events]).reshape(-1,2)
         self.event_points.set_data(event_xy[:,0],event_xy[:,1])
         self.event_text.set_text('\n'.join(f'{e.timestamp:.2f}s {e.event_type}' for e in list(model.events)[-2:]))
-        self.xy.set_title(f'{self.viewport.mode} | scroll zoom; toolbar pan' if self.debug else '',fontsize=9)
+        self.xy.set_title('')
         self.force.set_title(current if self.debug else 'Control feedback load [N]',fontsize=9)
         self.force.set_ylabel('Control feedback [N]')
         self.velocity.set_title(motion,fontsize=8)
@@ -632,12 +641,11 @@ class ContinuousPreview:
         if model.session.policy.reason:detail += f' | {code or ""}: {model.session.policy.reason}'
         self.status_text.set_text(f'仿真时间：{self.display_time:.2f}秒｜{mode}\n'+
                                  textwrap.fill(detail,width=max(40,int(self.figure.get_figwidth()*12))))
-        diagnostic = ''
-        if self.show_components and history:
-            d=history[-1].diagnostics
-            diagnostic=f" | RAW components: orange model target action (inward convention) / brown friction / gray background / pink noise; d={d['signed_distance']*1000:.3f}mm, compression={d['tip_compression']*1000:.3f}mm"
-        self.message_text.set_text(model.message+diagnostic)
-        self._layout_footer((physical or {}).get('note',NORMAL_REACTION_NOTE+'\nPhysical force unavailable: no sample'))
+        diagnostic = component_note(simulated=True, enabled=self.debug and self.show_components)
+        self.message_text.set_text(model.message)
+        note = (physical or {}).get('note',NORMAL_REACTION_NOTE+'\nPhysical force unavailable: no sample')
+        self._layout_footer('\n'.join(part for part in (note, diagnostic, self.vectors.truth_note) if part))
+        self.vectors.layout_legend()
         self._draw_friction()
 
     def on_timer(self):
