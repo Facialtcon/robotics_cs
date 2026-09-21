@@ -2,6 +2,20 @@
 
 新用户先看：[【分支 experiment/continuous-tracking】连续贴边：傻瓜式操作指南](BRANCH_continuous-tracking_傻瓜式操作指南.md)。
 
+## 当前修订：蓝色只显示法向反力
+
+本轮从 `experiment/continuous-tracking`、HEAD `51f855f`、干净工作区开始。生产修改仅涉及 `simulation/continuous_view.py`、`simulation/continuous_preview.py` 和 `tools/visualize_continuous_run.py`；模型、策略、传感器、配置和摩擦参数均未修改。
+
+蓝色标签为“法向反力 / Normal reaction”，直接读取已有的 `sim_normal_physical_fx/fy`，即模型物理外法向乘实际法向载荷。圆形取径向，直边取垂线，尖角沿模型有效法向；不重新投影合力，不用合力模长替代法向载荷。零接触不画蓝箭头，缺失法向字段显示 unavailable。红色仍读取 `sim_robot_estimate_fx/fy = -(normal_physical + friction + background)`，保留准静态及瞬态限制。默认添加“法向反力示意；摩擦分量未绘制”，两箭头仍共用 8 mm/N；Debug 显式打开分力时不显示“摩擦分量未绘制”。真机合力的标签、物理符号可信检查及不可用处理不变，不猜法向。
+
+修改前新增的五项用例均按预期失败；修改后增加三角尖角、两种 μ 的控制独立性及缺失数据检查。隔离测试覆盖朝外、与切线正交、实际法向载荷、相同标尺、完整红色外力估计和零接触。μ=0.03 / 0.20 各做 1150 步有显示/无显示共享策略比对，raw、processed、方向、速度、move 和状态逐值一致，模型摩擦参数保持不变，预演与回放同采样箭头一致。
+
+最终相关回归 **89 passed in 26.38s**：`MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q tests/test_continuous_force_display.py tests/test_continuous_friction_settings.py tests/test_continuous_preview.py tests/test_continuous_preview_duration.py`。全部使用有限步数或明确终止条件。`git diff --check` 通过；源码差异核对确认策略、传感器、会话控制及配置文件未变。
+
+实际有限闭环演示：圆形、方形各运行 30 秒（配置总预算 40 秒），显式暂停截图后手动停止保存日志。截图为 29.99 秒的同一采样，蓝色法向载荷分别 1.85600 N、1.85679 N；红色仍包含表面摩擦及背景阻力。已实际查看 [圆形预演](simulation_outputs/normal_reaction/verification_20260921_091241_164771/circle/run_20260921_091241_432122/circle_preview_small.png)、[直边预演](simulation_outputs/normal_reaction/verification_20260921_091241_164771/square/run_20260921_091243_842455/square_preview_small.png)、[圆形回放](simulation_outputs/normal_reaction/verification_20260921_091241_164771/circle/run_20260921_091241_432122/circle_replay.png)、[直边回放](simulation_outputs/normal_reaction/verification_20260921_091241_164771/square/run_20260921_091243_842455/square_replay.png)。力标签、底部说明及按钮无重叠；同目录保留完整日志，汇总见 [verification.json](simulation_outputs/normal_reaction/verification_20260921_091241_164771/verification.json)。
+
+本轮未重跑全量及 180 秒几何验收；前轮 μ=0.20 的三项几何失败仍未修复，截图不能作为几何验收通过的证据。未点验真实桌面或连接真机，未 commit/push；离屏 GUI 回调与闭环演示不等价于实机验证。
+
 
 ## 当前修订：表面摩擦图形设置及默认 μ=0.20
 

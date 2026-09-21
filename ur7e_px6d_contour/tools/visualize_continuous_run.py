@@ -31,6 +31,7 @@ def read_run(run_dir):
                 'sim_components_available','sim_object_fx','sim_object_fy','sim_friction_fx','sim_friction_fy',
                 'sim_background_fx','sim_background_fy','sim_noise_fx','sim_noise_fy',
                 'measurement_jump_deg','estimate_residual_deg','physical_force_available',
+                'sim_normal_physical_fx','sim_normal_physical_fy',
                 'sim_boundary_physical_fx','sim_boundary_physical_fy','sim_robot_estimate_fx','sim_robot_estimate_fy'):
         data[key] = np.array([float(row.get(key) or 'nan') for row in rows])
     data['reason'] = [row.get('reason','') for row in rows]
@@ -128,7 +129,7 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
     velocity.set(xlabel='Elapsed time [s]',ylabel='Velocity [mm/s]')
     for axis in (force,velocity):axis.legend(fontsize=6,ncol=3,loc='upper right');axis.grid(alpha=.2)
     title=fig.suptitle('',fontsize=10)
-    note=fig.text(.055,.08,'',fontsize=8,va='bottom')
+    note=fig.text(.055,.08,'',fontsize=8,va='bottom',fontfamily=['Noto Sans CJK JP', 'DejaVu Sans'])
 
     # Exposed only for offline tests/interactive notebook inspection.
     fig.continuous_viewport=viewport;fig.continuous_vectors=vectors
@@ -178,6 +179,7 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
         row={key:values[index] for key,values in data.items()}
         row['current_state']=data['state'][index]
         physical=force_demonstration(row,config.get('force_display',{}),simulated=bool(scene),
+                      components_visible=comp is not None,
                       previous_velocity=np.array([data['tcp_vx'][index-1],data['tcp_vy'][index-1]]) if index else None)
         vectors.draw(point,np.array([data['dfx'][index],data['dfy'][index]]),
                      np.array([data['command_vx'][index],data['command_vy'][index]])*1000,

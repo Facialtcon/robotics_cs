@@ -4,6 +4,8 @@ import numpy as np
 FORCE_MM_PER_N = 8.0
 VELOCITY_MM_PER_MM_S = 12.0
 DIRECTION_LENGTH_MM = 8.0
+NORMAL_REACTION_LABEL = '法向反力 / Normal reaction'
+NORMAL_REACTION_NOTE = '法向反力示意；摩擦分量未绘制'
 
 
 class XYViewport:
@@ -67,7 +69,8 @@ class VectorDisplay:
         self.arrows={key:axis.annotate('',xy=(0,0),xytext=(0,0),arrowprops=dict(arrowstyle='->',color=color,lw=1.5))
                      for key,color in self.colors.items()}
         self.arrows['robot_estimate'].arrow_patch.set_linestyle('--')
-        self.boundary_text=axis.text(.02,.97,'',transform=axis.transAxes,va='top',fontsize=9,color='#1762d2')
+        self.boundary_text=axis.text(.02,.97,'',transform=axis.transAxes,va='top',fontsize=9,color='#1762d2',
+                                     fontfamily=['Noto Sans CJK JP', 'DejaVu Sans'])
         self.robot_text=axis.text(.02,.93,'',transform=axis.transAxes,va='top',fontsize=9,color='#d32f2f')
         self.force_bar,=axis.plot([],[],color=self.colors['measured'],lw=2)
         self.speed_bar,=axis.plot([],[],color=self.colors['command'],lw=2)
@@ -84,7 +87,7 @@ class VectorDisplay:
             vectors[key]=np.asarray((components or {}).get(key,[np.nan,np.nan]))*FORCE_MM_PER_N
         for key in list(vectors):
             if not debug:vectors[key]=np.zeros(2)
-        physical=physical or dict(blue=None,red=None,blue_label='Boundary contact (model)')
+        physical=physical or dict(blue=None,red=None,blue_label=NORMAL_REACTION_LABEL)
         for name,key in [('boundary','blue'),('robot_estimate','red')]:
             value=physical.get(key)
             vectors[name]=np.asarray(value)*FORCE_MM_PER_N if value is not None else np.full(2,np.nan)
@@ -106,15 +109,16 @@ class VectorDisplay:
             label.set_position(origin+[length+span[0]*.01,0])
 
 
-def force_demonstration(row, metadata, *, simulated, previous_velocity=None):
+def force_demonstration(row, metadata, *, simulated, previous_velocity=None, components_visible=False):
     """Resolve recorded physical diagnostics; never infer a sign from control hand/sign.
 
     Older/unidentified logs remain readable but cannot claim a physical force.
     Real confirmation is a separate recorded physical convention, not the existing
     targetward force_direction_sign used by the continuous controller.
     """
-    label='Boundary contact (model)' if simulated else 'Measured environment resultant'
-    result=dict(blue=None,red=None,blue_label=label,note='Physical force unavailable: missing/unconfirmed convention')
+    label=NORMAL_REACTION_LABEL if simulated else 'Measured environment resultant'
+    prefix=NORMAL_REACTION_NOTE+'\n' if simulated and not components_visible else ''
+    result=dict(blue=None,red=None,blue_label=label,note=prefix+'Physical force unavailable: missing/unconfirmed convention')
     def vector(x,y):
         try:
             value=np.array([float(row.get(x,np.nan)),float(row.get(y,np.nan))])
@@ -126,7 +130,10 @@ def force_demonstration(row, metadata, *, simulated, previous_velocity=None):
         if (metadata.get('force_convention')!='legacy_inward_normal_to_outward_physical_v1' or
                 metadata.get('force_source')!='synthetic_contact_and_drag_model' or
                 str(row.get('physical_force_available')) not in ('1','1.0', 'True')):return result
-        result['blue']=vector('sim_boundary_physical_fx','sim_boundary_physical_fy')
+        # Recorded outward normal * actual normal load. Never project the
+        # boundary resultant: its magnitude also includes surface friction.
+        result['blue']=vector('sim_normal_physical_fx','sim_normal_physical_fy')
+        # Still balances the FULL boundary + background; not merely -blue.
         result['red']=vector('sim_robot_estimate_fx','sim_robot_estimate_fy')
         note='Quasi-static estimate; inertia omitted'
     else:
@@ -141,6 +148,6 @@ def force_demonstration(row, metadata, *, simulated, previous_velocity=None):
     transient=(row.get('current_state')!='CONTINUOUS_TRACKING' or
                row.get('direction_phase')!='TRACK' or velocity is None or previous_velocity is None or
                not np.isfinite(previous_velocity).all() or np.linalg.norm(velocity-previous_velocity)>1e-6)
-    result['note']=('Transient: estimate approximate. ' if transient else '')+note
+    result['note']=prefix+('Transient: estimate approximate. ' if transient else '')+note
     if result['blue'] is None or result['red'] is None:result['note']+='; unavailable data'
     return result

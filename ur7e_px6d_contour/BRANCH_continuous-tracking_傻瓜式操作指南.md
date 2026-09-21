@@ -103,12 +103,12 @@ git status
 
 左侧默认只画灰色目标、小实心圆点 TCP、单色已执行轨迹及最多两根非零力箭头。圆点只是位置符号，不改变模型探针半径；实际半径包络、十字事件、P0/P1、搜索线和状态色轨迹只在 Debug 中显示。两根力箭头都从同一 TCP 位置出发，共用固定 **8 mm/N** 标尺和一个 1 N 标记，不归一化、不按每帧最大值缩放。0 N 隐藏箭头但数值显示 0.00 N；未知值标为 unavailable，不能当成零。
 
-- **蓝色 Boundary contact (model)：边界接触力（模型）**。表示目标施加给探针的物理法向加表面摩擦。法向朝目标外侧，摩擦阻碍沿边滑动；摩擦系数为零时不会人为偏转。数值随接触压缩及摩擦变化，大小不绑定 F_ref。无接触时蓝箭头为零，即使仍有颗粒阻力或测量噪声。
+- **蓝色 法向反力 / Normal reaction**。只表示物体对探针的物理法向接触分量，读取日志 `sim_normal_physical_fx/fy`。方向是接触模型的物理外法向：圆形沿圆心向外，直边垂直该边，尖角采用模型的有效法向，不假设唯一表面法向。长度为实际法向载荷，不是包含摩擦的边界合力模长，也不绑定 F_ref。无接触时蓝箭头为零，即使仍有颗粒阻力或测量噪声。默认不另画摩擦箭头，底部注明“法向反力示意；摩擦分量未绘制”。
 - **红色虚线 Robot force (estimate)：机器人作用力（准静态估计）**。按 `-(物理边界力 + 颗粒背景阻力 + 其他已知平面外力)` 计算；本模型没有其他平面外力项，measurement noise 不参与平衡。表示夹具传给探针的等效平面合力，画在 TCP 只是示意，不代表真实施力点或杆身弯曲/力矩计算。不是速度命令、力控输出或独立测量。
 
-旧模型的控制合成信号依旧为 `object_force（向内）+ friction + background + noise`。本轮只新增诊断：`normal_physical = -object_force`，`boundary_physical = normal_physical + friction`，`robot_estimate = -(boundary_physical + background)`。只翻法向，不将整个旧 wrench 取负。raw/processed、零偏、变换、force_direction_sign 和策略完全保留。两套力的不同含义记录在配置快照的 `force_display`（schema_version、force_convention、force_source、estimate_method），CSV 另记物理分量及可用性。
+旧模型的控制合成信号依旧为 `object_force（向内）+ friction + background + noise`。复用已有诊断：`normal_physical = -object_force`，`boundary_physical = normal_physical + friction`，`robot_estimate = -(boundary_physical + background)`。蓝色只取 normal_physical；红色仍包含完整摩擦和背景阻力，不能简单取蓝色反向。raw/processed、零偏、变换、force_direction_sign、摩擦参数和策略完全保留。两套力的不同含义记录在配置快照的 `force_display`（schema_version、force_convention、force_source、estimate_method），CSV 另记物理分量及可用性。旧仿真日志若缺少可靠法向分量，蓝色显示 unavailable，不从合力猜测法向。
 
-理想直边匀速、接触压缩和阻力不变时，两箭头可以基本稳定；忽略背景阻力时还可近似等大反向。这是数据和准静态假设的结果，不是人为抖动或定长。接触建立、加减速、急转或停止等阶段显示 `Transient: estimate approximate`；即使未触发提示，也始终注明忽略惯性，不能视为动态驱动力重建。两箭头平衡不能证明跟踪成功，仍须独立检查载荷误差、前进、穿透和停止原因。
+理想直边匀速、接触压缩和阻力不变时，两箭头可以基本稳定；只有摩擦及背景阻力均可忽略时才可近似等大反向。这是数据和准静态假设的结果，不是人为抖动或定长。接触建立、加减速、急转或停止等阶段显示 `Transient: estimate approximate`；即使未触发提示，也始终注明忽略惯性，不能视为动态驱动力重建。两箭头也不能证明跟踪成功，仍须独立检查载荷误差、前进、穿透和停止原因。
 
 右侧默认只显示实际进入策略的 processed **Fxy** 与 **F_ref**，标题为控制反馈载荷，不是纯边界载荷。Debug 中才展开 Fx/Fy、误差和独立的 mm/s 速度面板；辅助速度仍采用另一套标尺，不标成 N。所有显示取同一时间戳记录，不额外读传感器。曲线保留最近 30 秒及极值，预演执行轨迹最多 4096 点；完整数据保留在 CSV。
 

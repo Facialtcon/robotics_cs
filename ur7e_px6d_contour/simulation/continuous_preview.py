@@ -19,7 +19,7 @@ from experiment_logging.termination import TerminationReason, classify_stop_reas
 from policy.continuous_tracking import EXTRA_SAMPLE_FIELDS, State
 from simulation.continuous_session import SimulationSession, validate_scene, SIMULATION_SAMPLE_FIELDS
 from simulation.simulator import load_simulation_config
-from simulation.continuous_view import XYViewport, VectorDisplay, force_demonstration
+from simulation.continuous_view import XYViewport, VectorDisplay, force_demonstration, NORMAL_REACTION_NOTE
 
 
 def surface_friction(value):
@@ -330,7 +330,8 @@ class ContinuousPreview:
         self.event_points, = self.xy.plot([], [], 'kx', ms=5, label='Policy events')
         self.vectors = VectorDisplay(self.xy)
         self.arrows = self.vectors.arrows
-        self.force_note = self.figure.text(.045, .10, '', fontsize=8)
+        self.force_note = self.figure.text(.045, .10, '', fontsize=8,
+                                           fontfamily=['Noto Sans CJK JP', 'DejaVu Sans'])
         self.geometry_text = self.figure.text(.045, .245, '', fontsize=8)
         self.status_text = self.figure.text(.045, .945, '', fontsize=9, va='top',
                                            fontfamily=['Noto Sans CJK JP', 'DejaVu Sans'])
@@ -597,6 +598,7 @@ class ContinuousPreview:
             row={**last.simulation_telemetry,**last.telemetry,'current_state':last.command.state,
                  'tcp_vx':last.robot.tcp_speed[0],'tcp_vy':last.robot.tcp_speed[1]}
             physical=force_demonstration(row,model.session.config.get('force_display',{}),simulated=True,
+                         components_visible=components is not None,
                          previous_velocity=history[-2].robot.tcp_speed[:2] if len(history)>1 else None)
             self.executed.set_data([p[1]*1000 for p in model.path_history],[p[2]*1000 for p in model.path_history])
             current = f'Fx {values[-1,0]:.2f}, Fy {values[-1,1]:.2f}, Fxy {values[-1,2]:.2f} N\nF_ref {values[-1,3]:.2f}, error {values[-1,4]:+.2f} N'
@@ -635,7 +637,7 @@ class ContinuousPreview:
             d=history[-1].diagnostics
             diagnostic=f" | RAW components: orange model target action (inward convention) / brown friction / gray background / pink noise; d={d['signed_distance']*1000:.3f}mm, compression={d['tip_compression']*1000:.3f}mm"
         self.message_text.set_text(model.message+diagnostic)
-        self._layout_footer((physical or {}).get('note','Physical force unavailable: no sample'))
+        self._layout_footer((physical or {}).get('note',NORMAL_REACTION_NOTE+'\nPhysical force unavailable: no sample'))
         self._draw_friction()
 
     def on_timer(self):
