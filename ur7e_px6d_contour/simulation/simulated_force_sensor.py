@@ -7,6 +7,12 @@ import numpy as np
 from core.models import Wrench
 from simulation.geometry import TargetGeometry
 
+PHYSICAL_FORCE_METADATA = dict(schema_version=1, frame='Base',
+    force_convention='legacy_inward_normal_to_outward_physical_v1',
+    force_source='synthetic_contact_and_drag_model', estimate_method='quasistatic_planar_balance',
+    conversion='normal_physical=-object_force; friction/background unchanged; noise excluded',
+    other_known_planar='none in this model', physical_available=True)
+
 
 class SimulatedForceSensor:
     def __init__(self, target: TargetGeometry, config: dict):
@@ -53,7 +59,16 @@ class SimulatedForceSensor:
         noise = self.rng.normal(0.0, float(self.config["noise_std"]), size=2)
         force = background + object_force + friction + noise
         wrench = Wrench(float(force[0]), float(force[1]), 0.0, 0.0, 0.0, 0.0)
+        # Display/logging diagnostics ONLY. Preserve the historical synthetic
+        # control signal above, including its inward normal and measurement noise.
+        normal_physical = -object_force
+        boundary_physical = normal_physical + friction
+        environment_physical = boundary_physical + background
         return wrench, {
+            "normal_physical": normal_physical,
+            "boundary_physical": boundary_physical,
+            "environment_physical": environment_physical,
+            "robot_estimate": -environment_physical,
             "penetration": penetration,
             "tip_compression": compression,
             "signed_distance": signed_distance,

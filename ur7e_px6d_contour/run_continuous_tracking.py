@@ -86,6 +86,9 @@ def stop_after_exception(controller, termination):
 
 def prepare_real(config, config_path):
     """Use the same calibration/TCP binding as the discrete entry point."""
+    budget = config['continuous_tracking']['max_runtime_sec']
+    if budget is None or isinstance(budget, bool) or not np.isfinite(float(budget)) or float(budget) <= 0:
+        raise RobotError('real continuous_tracking.max_runtime_sec must be finite and positive')
     validate_execution_configuration(config)
     c = config['continuous_tracking']
     verification = c.get('site_verification')
@@ -179,10 +182,17 @@ def run(args):
             if not np.isfinite(args.duration) or args.duration <= 0:
                 raise ValueError("--duration must be finite and positive")
             # CLI may shorten the reviewed configuration budget, never raise it.
-            config["continuous_tracking"]["max_runtime_sec"] = min(
-                args.duration, float(config["continuous_tracking"]["max_runtime_sec"]))
+            budget = config["continuous_tracking"]["max_runtime_sec"]
+            config["continuous_tracking"]["max_runtime_sec"] = (
+                args.duration if budget is None else min(args.duration, float(budget)))
         dt = 1 / float(config["policy"]["control_rate_hz"])
         if args.execute:
+            # Existing site direction checks do not identify the physical object
+            # on which the measured force acts. Record that distinction explicitly;
+            # offline display must not guess a physical sign from targetward control.
+            config['force_display']=dict(schema_version=1,frame='Base',force_source='processed_wrench',
+                force_convention='unconfirmed',estimate_method='quasistatic_planar_balance',
+                physical_sign_confirmed=False,base_frame_confirmed=False,physical_available=False)
             policy = ContinuousTrackingPolicy(config)  # validate before any connection
             controller = URRTDEController(robot_config)
             s = config["sensor"]
@@ -312,7 +322,7 @@ def run(args):
                 # Motion/stop precedes disk writes. No rendering in this loop.
                 logger.log_sample(now, raw, processed, robot, command, policy.contact_direction,
                                   policy.tangent, extra={**policy.telemetry(command), **timing,
-                                      **({'sim_components_available': 0} if args.execute else sample.simulation_telemetry)})
+                                      **({'sim_components_available': 0, 'physical_force_available': 0} if args.execute else sample.simulation_telemetry)})
                 for event in policy.events:
                     logger.log_waypoint(event)
                 policy.events.clear()
@@ -425,7 +435,7 @@ def main():
     mode.add_argument("--preview", action="store_true", help="interactive offline SIMULATION / SYNTHETIC FORCE")
     mode.add_argument("--dry-run", action="store_true", help="offline simulation (default)")
     parser.add_argument("--scene", type=Path, default=ROOT / "simulation/scene_continuous.yaml")
-    parser.add_argument("--duration", type=float, help="shorten maximum duration in seconds")
+    parser.add_argument("--duration", type=float, help="finite preview duration (default: manual stop); shorten budget in other modes")
     parser.add_argument("--output", type=Path)
     parser.add_argument('--enable-reacquire', action='store_true', help='offline experimental arc recovery only')
     parser.add_argument('--site-digest', action='store_true', help='print current config binding hash; no devices')

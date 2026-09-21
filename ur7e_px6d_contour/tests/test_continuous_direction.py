@@ -117,8 +117,9 @@ def test_preview_magnitude_scales_velocity_panel_and_manual_views(tmp_path):
     from types import SimpleNamespace
     model=PreviewRun(load_config(ROOT/'config.yaml'),load_simulation_config(ROOT/'simulation/scene_continuous.yaml'),tmp_path)
     view=ContinuousPreview(model)
-    assert view.xy.get_subplotspec().get_gridspec().get_width_ratios()==[7,3]
+    assert view.xy.get_subplotspec().get_gridspec().get_width_ratios()==[3,1]
     assert view.viewport.mode=='Target'
+    view.toggle_debug()  # Auxiliary velocity/direction displays are opt-in.
     model.start(0);model.tick(.2,work_budget_sec=10);view.draw()
     last=model.history[-1];xy=last.robot.pose[:2]*1000
     np.testing.assert_allclose(view.arrows['measured'].xy-xy,last.processed.force[:2]*FORCE_MM_PER_N)

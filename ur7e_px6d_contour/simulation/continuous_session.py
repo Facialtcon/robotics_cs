@@ -10,12 +10,16 @@ from safety.force_guard import force_safety_reason
 from sensor.force_preprocess import WrenchPreprocessor
 from simulation.geometry import CircleTarget, create_target
 from simulation.simulated_robot import SimulatedRobot
-from simulation.simulated_force_sensor import SimulatedForceSensor
+from simulation.simulated_force_sensor import SimulatedForceSensor, PHYSICAL_FORCE_METADATA
 
 SIMULATION_SAMPLE_FIELDS = ('sim_components_available', 'sim_signed_distance_m', 'sim_penetration_m',
                            'sim_compression_m', 'sim_segment_penetration',
                            'sim_object_fx', 'sim_object_fy', 'sim_friction_fx', 'sim_friction_fy',
-                           'sim_background_fx', 'sim_background_fy', 'sim_noise_fx', 'sim_noise_fy')
+                           'sim_background_fx', 'sim_background_fy', 'sim_noise_fx', 'sim_noise_fy',
+                           'physical_force_available', 'sim_normal_physical_fx', 'sim_normal_physical_fy',
+                           'sim_boundary_physical_fx', 'sim_boundary_physical_fy',
+                           'sim_environment_physical_fx', 'sim_environment_physical_fy',
+                           'sim_robot_estimate_fx', 'sim_robot_estimate_fy')
 
 def validate_scene(scene):
     """Validate an independent copy; never move the target or calibration points."""
@@ -81,6 +85,7 @@ class SimulationSession:
     """Each step observes t, commands once, and integrates to t + dt (no snapping)."""
     def __init__(self, config, scene):
         self.config = deepcopy(config)
+        self.config['force_display'] = deepcopy(PHYSICAL_FORCE_METADATA)
         self.scene = validate_scene(scene)
         self.dt = 1 / float(config['policy']['control_rate_hz'])
         # Snapshot the actual continuous rate, not the old scene's discrete rate.
@@ -139,7 +144,9 @@ class SimulationSession:
         self._previous_xy = robot.pose[:2].copy()
         simulation_telemetry = dict(zip(SIMULATION_SAMPLE_FIELDS, (
             1, diagnostics['signed_distance'], diagnostics['penetration'], diagnostics['tip_compression'], int(crossed),
-            *diagnostics['object_force'], *diagnostics['friction_force'], *diagnostics['background_force'], *diagnostics['noise_force'])))
+            *diagnostics['object_force'], *diagnostics['friction_force'], *diagnostics['background_force'], *diagnostics['noise_force'],
+            1, *diagnostics['normal_physical'], *diagnostics['boundary_physical'],
+            *diagnostics['environment_physical'], *diagnostics['robot_estimate'])))
         return SimulationSample(now, robot, raw, processed, command, self.policy.telemetry(command),
                                 self.policy.tangent.copy(), self.policy.contact_direction.copy(), tuple(self.policy.events),
                                 diagnostics, simulation_telemetry)

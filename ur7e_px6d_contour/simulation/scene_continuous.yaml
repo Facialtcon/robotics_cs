@@ -1,6 +1,8 @@
 # Synthetic debugging only; reuse existing analytic target and force model.
 base_config: simulation_config.yaml
 scene_name: continuous_circle
+force_model:
+  friction_coefficient: 0.20  # Continuous scene only; shared discrete defaults stay unchanged.
 target_shape: circle
 target_center: [0.0, 0.0]
 target_radius: 0.055

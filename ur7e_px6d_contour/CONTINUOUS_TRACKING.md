@@ -3,6 +3,74 @@
 新用户先看：[【分支 experiment/continuous-tracking】连续贴边：傻瓜式操作指南](BRANCH_continuous-tracking_傻瓜式操作指南.md)。
 
 
+## 当前修订：表面摩擦图形设置及默认 μ=0.20
+
+在当前 experiment/continuous-tracking 工作区保留前轮未提交修改。本轮生产改动仅 `simulation/continuous_preview.py` 与 `simulation/scene_continuous.yaml`：连续场景独立覆盖表面 friction_coefficient=0.20，公共 `simulation/simulation_config.yaml`、真实配置和控制策略没有修改。新建默认预演及无窗口入口读取同一场景；显式用户场景尊重其 μ，原三角形复现场景继续为 0.03。
+
+底部右侧“摩擦设置”旁显示当前生效 μ，点击展开右侧紧凑输入区，输入或 ±0.01 只编辑草稿。应用后调用既有新场景流程：先校验/创建候选会话，旧轮次按 FRICTION_CHANGED 记录前后数值并关闭日志，再回到 READY；下一次 Start 才开始。目标/起点/其他环境参数保留，接触记忆、滤波和策略实例均重建。μ 实际进入既有传感器摩擦公式，不改 granular_drag_force，不改增益、方向重确认、速度或保护。输入区暂时替代 Debug 的速度面板，不挤压绘图区。
+
+新增 `tests/test_continuous_friction_settings.py`：修改前 **12 failed / 1 passed**，实现后初批 **13 passed in 4.30s**。覆盖连续专用默认、0.03 精确输入、保存/加载、非法值、READY/RUNNING/PAUSED 应用、旧日志保留、新会话重置、无窗口参数/反馈一致性及相同载荷下 μ 改变真实模型摩擦分量。补充实际按钮回调、输入数字不触发形状快捷键、展开区域与原文字不重叠的检查。全部运行有有限时长或有限步数。
+
+实际生成并查看：[待应用 0.03、当前仍为 0.20](simulation_outputs/friction_editor/run_20260921_082052_057337/friction_draft.png)、[小窗口 Debug/Settings](simulation_outputs/friction_editor/run_20260921_082052_057337/friction_small_debug_settings.png)、[应用后回到 READY](simulation_outputs/friction_editor/run_20260921_082052_057337/friction_applied_ready.png)。原 μ=0.20 轮次日志保留在同目录，`scene_mu_003.yaml` 是实际保存的 0.03 场景；重新 Start 的 0.03 日志在 `simulation_outputs/friction_editor/run_20260921_082053_665003/`。
+
+最终全量命令：`MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q`，结果 **776 passed / 3 failed in 186.73s**；包含上述新增 13 项全部通过。全量验证仍复现下列三项几何失败，其余测试通过。
+
+**新默认参数下有几何回归失败，未修改断言或掩盖。** 相关测试曾得到 **3 failed / 120 passed in 72.54s**。180 秒闭环实际结果：
+
+| μ=0.20 场景 | 最大中心穿透 | 最大压缩 | 跟踪反馈范围 | 真实终止 |
+|---|---:|---:|---:|---|
+| 圆 | 0.03220 mm | 1.03220 mm | 1.3024–1.9052 N | STOP_TIME_LIMIT |
+| 方形 | 0.03265 mm | 1.03265 mm | 1.3027–1.9063 N | STOP_TIME_LIMIT |
+| 平移、旋转方形 | 0.03276 mm | 1.03276 mm | 1.3029–1.9061 N | STOP_TIME_LIMIT |
+
+压缩超过 1 mm 模型包络，故不能把这些轨迹视为通过几何验收。失败记录及评分已原样复制保留在 [failed_geometry_reports.json](simulation_outputs/friction_editor/geometry_mu020_20260921_082255/failed_geometry_reports.json) 所列目录。本轮不调整控制律/保护/速度、不将 μ 偷改回 0.03，也不将测试改成接受穿透；默认参数变化带来的这项模型行为仍需后续独立处理。
+
+未连接真机、未手动点验真实桌面；图像和 GUI 回调是离屏检查，μ 不是实机标定值。未 commit、push、reset 或删除实验数据。
+
+## 当前修订：预演默认手动停止及底部排版
+
+保留上一轮双力演示的未提交修改。`--preview` 在深复制的本次仿真配置中将 `continuous_tracking.max_runtime_sec` 设为 **None**，配置快照为 YAML **null**。共享策略允许 None 且只跳过总运行时限比较；原文件 `config.yaml` 的 120 秒和所有控制/保护参数不变。没有增加绕圈完成判定；正常跟踪持续到用户停止或保护触发，不以“过圈”作为退出条件。
+
+`--preview --duration 180` 是明确有限的 180 秒仿真，可以大于原 120 秒；参数必须有限且为正。无窗口保留原默认预算，真机在设备/现场准备之前明确拒绝 null、非有限或非正总预算，原配置摘要和现场验证要求保留。预演模型直接用于测试/批量时仍尊重显式配置预算；仅 CLI 预演默认改为 None，避免既有有限批量用例变成无限循环。
+
+Q / Esc（包括路径框有焦点时）、Stop、关闭窗口和 Ctrl+C 都按用户停止收尾；重复关闭/停止不覆盖首次原因。磁盘写入异常仍走原异常停止与 finally 日志关闭流程。日志每 20 个采样刷新，不把全历史留在内存；显示缓存仍最多 3001 个最近采样、4096 个路径点、200 个事件（默认 100 Hz）。完整 CSV 持续增长，未自动编码视频。
+
+底部多个重叠的文字图元改为一个随窗口宽度换行的说明区；按行数给坐标轴和 Settings 控件预留间隔，Debug 的时间轴仅在下方显示标签。回放说明区也避开 Debug 按钮。顶部显示“仿真时间：xxx秒｜手动停止模式”，具体状态和停止原因集中在其下一行。有限模式明确显示时限。
+
+新增 `tests/test_continuous_preview_duration.py`。修改前复现 **13 failed / 5 passed**；初始 18 项修复后全部通过，追加不限时保护与写盘失败测试后，相关回归 **92 passed in 26.02s**。覆盖默认 None/有限时长/配置不被改写、130 秒真实几何闭环仍在跟踪、有界缓存与持续落盘、真机前置拒绝 null、力/力矩/无效数据/采样过期/方向超时/搜索耗尽保护，以及手动停止、Ctrl+C 和故障清理。所有自动运行都用有限步数、显式时限或注入停止事件，没有等待不限时预演自然结束。
+
+全量回归 **765 passed in 184.23s**。最后补充启动零偏采样中 Ctrl+C 应记为用户停止（而非传感器失败），并完成时间轴排版小修后，四个相关文件复测 **93 passed in 26.25s**；此次小修后没有重复全量测试。新增本轮测试共 26 项。实际命令使用 `MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q`；定向复测指定 `tests/test_continuous_preview_duration.py tests/test_continuous_force_display.py tests/test_continuous_preview.py tests/test_continuous_run.py`。CLI `--help` 及 `git diff --check` 通过。
+
+离屏闭环记录与最终布局截图：[运行目录](simulation_outputs/manual_preview/verified_layout/run_20260921_073614_811746/)。[130 秒仍在运行](simulation_outputs/manual_preview/verified_layout/run_20260921_073614_811746/manual_running_130s.png)，[小窗口展开 Debug / Settings](simulation_outputs/manual_preview/verified_layout/run_20260921_073614_811746/manual_debug_settings_small.png)，均已实际查看。目录保留配置 null、完整采样、停止报告和缓存统计；停止前状态 CONTINUOUS_TRACKING，测试显式手动停止后为 STOP_USER_REQUEST。早一轮布局检查截图也保留，未覆盖实验数据。
+
+本次没有真机连接或真实桌面手动点验；离屏截图/回调及合成闭环不等价于设备物理验证。没有 commit、push、reset 或删除实验数据。
+
+## 当前修订：18ef729 fix3 之后的简洁双力演示
+
+本轮从 `experiment/continuous-tracking`、HEAD `18ef729`、干净工作区开始。控制策略、配置阈值、方向重确认、低力暂停、恢复开关、speedL 及原离散策略未改；共同传感器只追加诊断字段，旧 raw/processed 和随机样本保持不变。以下旧版方向修复的可视化说明是历史记录，当前界面以本节及分支傻瓜式指南为准。
+
+- 蓝箭头为 `F_boundary_physical = -object_force + friction_force`，物理法向朝外，表面摩擦仍反向于滑动。不是旧 inward 合成合力取负，也不固定到 F_ref。
+- 红色虚线为 `F_robot_estimate = -(F_boundary_physical + background_force)`；本模型无其他已知平面外力。measurement noise 不进入物理平衡。它是忽略平面惯性的夹具作用力估计，不是速度型导纳输出的力命令或真实电机驱动力。
+- 新 `force_display` 配置元数据记录 schema_version=1、Base 坐标、明确的旧 inward 到物理 outward 转换、来源、估计方法和可用性。CSV 保留旧分量，同时追加 normal/boundary/environment/robot_estimate 的 XY 及 physical_force_available。诊断真值不进入 policy。
+- 真机入口只追加数值可用性与来源，不绘图。现有控制方向核对不等于物理作用对象/符号确认，故明确记录 unconfirmed。回放蓝标签自动为“测得环境合力”；只有另有可靠物理坐标/符号与标定记录时才显示合力及其反号估计，继承测量噪声不确定性。旧日志缺少这些字段仍能打开，物理箭头不可用，不推测分力。
+- 默认约 75/25，灰色目标、小实心 TCP 点、单色执行轨迹、两根同标尺力箭头和一个 1 N 标记；右侧仅控制反馈 Fxy/F_ref。Debug 默认关；Settings 折叠形状、倍速、场景文件等次要控件。回放默认 PNG，视频需显式 `--format`。
+
+修改文件：`simulation/simulated_force_sensor.py`、`simulation/continuous_session.py`、`simulation/continuous_view.py`、`simulation/continuous_preview.py`、`run_continuous_tracking.py`、`tools/visualize_continuous_run.py`；新增 `tests/test_continuous_force_display.py`，更新两处旧显示测试及本指南/操作指南。
+
+新增前先运行 7 项测试，全部按预期失败；实现后定向回归 **79 passed, 5 deselected in 17.89s**。测试覆盖法向/摩擦符号、物理/旧合成求和、排除噪声、零接触且有阻力、加载/卸载、同标尺翻倍、未知值、默认与调试切换、逐周期控制独立及同时间戳预演/回放一致性。显示切换使用既有记录，测试核对 RNG 不前进。
+
+最终全量 **740 passed in 179.44s**，前述五个几何用例也全部执行通过。命令：`MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q`。新测试共 10 项；旧测试仅更新布局/图元断言及显式视频导出请求，保留安全断言。回放 CLI `--help` 和 `git diff --check` 通过；GIF 显式导出及编码失败回退有自动测试，未验证真实桌面或成功 MP4 编码。
+
+独立保存修改前原三角形 **12,001 周期**的 raw、processed、TCP、状态和命令；修改后逐值精确一致，无数值容差放宽。不是新动力学验证。全量仍保留圆/方/三角形/平移旋转几何、方向重确认、低力及安全回归。
+
+实际截图与结果位于 `simulation_outputs/dual_force_demo/run_20260921_070749_157213/`：
+
+- [简洁预演截图](simulation_outputs/dual_force_demo/run_20260921_070749_157213/simple_preview_stable.png)及[简洁回放截图](simulation_outputs/dual_force_demo/run_20260921_070749_157213/simple_replay_stable.png)均已实际打开检查。两者分别取 79.99 s 和 80.00 s；同一采样时刻的箭头数值一致性另有自动测试。
+- 同目录 `continuous_preview.png` / `continuous_summary_target.png` 是停止后的图，`display_validation.json` 记录基准比对及两种窗口尺寸的 XY 等比例检查，`steady_display_report.json` 记录下列载荷数据。原实验数据未覆盖。
+- 70–80 s 直边段：控制反馈 **1.7280–1.7366 N**，平均高于 1.5 N 目标 **0.2318 N**；物理边界力 **1.7293–1.7307 N**。箭头相对稳定但未抹平误差，也未宣称精确跟随 F_ref。存在细微速度变化时保守显示瞬态估计提示。该 120 s 轮次中心/运动线段穿透均为 0，最终是 STOP_TIME_LIMIT，不是一圈完成。
+
+未连接真实 UR7e/PX6D，没有执行真机 CLI、commit、push、reset 或删除数据。实际桌面交互、真实动态驱动力和真机物理行为未经验证；自动 GUI 回调、离屏截图与设备替身不等价于现场验证。
+
 ## 当前修订：403e9e9 fix2 之后的方向重确认
 
 本轮开始于 `experiment/continuous-tracking`、HEAD `403e9e9`，工作区干净。原三角形 run 为 `simulation_outputs/continuous_preview/run_20260920_235436_498310/`；读取 config_snapshot、samples 和事件后，用同一场景/seed 精确复现了 102.02 s 的停止位置。

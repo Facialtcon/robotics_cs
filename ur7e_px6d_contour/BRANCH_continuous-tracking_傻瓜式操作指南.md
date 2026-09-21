@@ -33,44 +33,86 @@ git status
 ../.venv312/bin/python run_continuous_tracking.py --preview --output simulation_outputs/continuous_preview
 ```
 
-应出现标题为 **SIMULATION / SYNTHETIC FORCE** 的窗口：左侧约 70% 为运动图，右侧为分开的力、速度面板，顶部状态为 `READY`，默认 `Target` 目标局部视角。此时尚未开始仿真，不创建真实控制器、不打开串口。没有图形桌面时改用下文的无窗口命令。
+应出现标题为 **SIMULATION / SYNTHETIC FORCE** 的窗口：左侧约 75% 为简洁运动图，右侧默认只有“Control feedback load（控制反馈载荷）”曲线，顶部状态为 `READY`，默认 `Target` 目标局部视角。此时尚未开始仿真，不创建真实控制器、不打开串口。没有图形桌面时改用下文的无窗口命令。
 
-**4．摆放目标。** 点 `1 Square`、`2 Circle` 或 `3 Triangle`；在左图目标内部按住鼠标左键，拖到新位置后松开。虚线是待放置轮廓，松开后才应用。点 `[ -15 deg` 或 `] +15 deg` 调整朝向。下面显示中心、尺寸和旋转角；尺寸单位为 mm。
+**4．摆放目标。** 先点 `Settings` 展开设置，再点 `1 Square`、`2 Circle` 或 `3 Triangle`；在左图目标内部按住鼠标左键，拖到新位置后松开。虚线是待放置轮廓，松开后才应用。点 `[ -15 deg` 或 `] +15 deg` 调整朝向。需要查看中心、尺寸、搜索线时打开 `Debug`；尺寸单位为 mm。
 
-应看到目标改变，**P0、P1、Start 和搜索线保持原位**。非法位置会显示 `Rejected / stopped` 并撤销该次编辑，不会自动缩小或挪动目标。先用默认圆形、不拖动，可以直接观察首次接触。
+应看到目标改变，**P0、P1、Start 和搜索线保持原位（默认隐藏，Debug 中可见）**。非法位置会显示 `Rejected / stopped` 并撤销该次编辑，不会自动缩小或挪动目标。先用默认圆形、不拖动，可以直接观察首次接触。
 
-**5．开始和停止。** 点 `Start`；左右图应同步推进。可点 `5x` 加快预演。点 `Pause/Continue` 暂停，再点同一按钮继续。点 `Stop` 结束这一轮。正常预算结束也会显示 `ENDED` 及具体停止原因。
+**5．开始和停止。** 点 `Start`；左右图应同步推进。可在 `Settings` 中点 `5x` 加快预演。点 `Pause/Continue` 暂停，再点同一按钮继续。默认显示“仿真时间：xxx秒｜手动停止模式”，没有总运行时限；不会在 120 秒或绕完一圈时自动结束。点 `Stop`、按 `Q` / `Esc`、终端 `Ctrl+C` 或关闭窗口结束。保护触发仍会停止并显示具体代码/原因。
 
 **6．找到结果。** 每次真正开始时，终端打印以 `Continuous preview run_dir:` 开头的一行，后面是本轮的完整目录。停止后点 `Save PNG`，应打印 PNG 的完整路径。保留这行路径；下一节说明如何打开。每次 `Reset` 后再次开始都会生成新目录，不覆盖旧日志。
+
+## 调整表面摩擦系数 μ
+
+主窗口底部右侧新增 **摩擦设置** 小按钮，旁边 `μ=...` 表示当前真正生效的值。新建默认连续场景是 **μ=0.20**；公共离散仿真配置仍为 0.03。显式加载已保存场景时使用文件中的 μ（例如原三角形复现场景仍为 0.03），不会强行改成 0.20。
+
+1. 点击 **摩擦设置**，右侧下方展开紧凑输入区；再次点击收起。不会缩小 XY 绘图区。Debug 下打开它会暂时隐藏速度曲线，关闭后恢复。
+2. 在“表面摩擦 μ（待应用）”中准确输入 `0.03`、`0.20` 等非负有限数值；也可点 `−` / `+`，每次调整 **0.01**。编辑和按 Enter 都不应用；底部当前 μ 保持原值。
+3. 点击 **应用并重置本轮** 才生效。READY 时重建会话并继续等待；运行中或暂停时先结束、保存旧轮次，旧日志记录 `FRICTION_CHANGED` 及 μ 前后值，然后清空策略、滤波与接触记忆，回到 READY。**必须再点 Start** 才开始新一轮。
+4. 目标形状、中心、朝向、起点、随机种子及其他环境参数保持不变。特别是 `granular_drag_force` 颗粒背景阻力不会跟着修改，本轮没有颗粒参数按钮。
+5. 空输入、负值、NaN、无穷或非数值会在输入区显示提示，原场景/运行不变。保存场景只保存真正生效的 μ，不保存未应用的草稿；加载会同步输入框和当前值。很长的数值在底部用 `≈` 简写，输入框保留完整可往返数值。
+
+μ 直接进入既有合成表面摩擦公式，改变 raw/processed 控制反馈和物理诊断分量，不是只倾斜箭头。预演和 `--dry-run --scene <保存文件>` 使用相同参数、同一策略。仿真 μ 不代表已经标定的真实摩擦系数，真实设备参数与导纳公式没有修改。
+
+**已发现的模型限制：** 新默认 μ=0.20 的 180 秒圆形、方形及旋转方形闭环中，独立评分检测到约 **0.0322–0.0328 mm 中心穿透**，压缩约 **1.0322–1.0328 mm**，超过模型 1 mm 接触包络。因此这三项几何验收失败，虽然最终代码是 STOP_TIME_LIMIT，也不能称为几何跟踪成功。本轮按要求没有调控制律、速度或安全阈值来消除失败；完整失败日志保留，详见当前修订报告。可显式输入历史 μ=0.03 对照，但默认值不会自动回退。
+
+## 预演不限时与有限测试
+
+`--preview` 会在本次配置副本中把 `continuous_tracking.max_runtime_sec` 设为 Python `None`，日志快照写作 YAML `null`。不写回 config.yaml，不采用巨大秒数，也不修改真机预算或现场验证。共享策略只跳过总时限比较；力/力矩、无效/过期数据、方向确认、低力/丢边、局部搜索、workspace 和其他保护仍生效。没有增加绕圈完成自动退出。
+
+需要有限预演，例如自动测试或固定截点演示：
+
+```bash
+../.venv312/bin/python run_continuous_tracking.py --preview --duration 180 --scene simulation/scene_direction_triangle.yaml --output simulation_outputs/continuous_preview
+```
+
+时长必须有限且大于零；到期显示 STOP_TIME_LIMIT。自动测试必须给出有限时长、有限步数或注入明确停止操作，不能等待手动模式自行结束。无窗口批量运行仍用下文带 `--duration` 的命令。真机入口拒绝 null / None 总预算，且保留原配置绑定和现场检查。
+
+长时间预演只保留最近 30 秒采样、最多 4096 个显示路径点及 200 个显示事件；完整采样持续写入 CSV，不累积全部历史帧，不自动编码视频。停止后照常保存完整日志和停止原因；磁盘写入失败按异常流程停止和关闭日志。
+
+底部说明统一为随窗口宽度换行的独立文本区；展开 Settings / Debug 时自动预留高度，不再将几何、事件与说明堆在同一位置。手动缩放不因设置切换重置。
 
 ## 窗口具体怎么用
 
 | 操作 | 按钮 / 快捷键 | 结果 |
 |---|---|---|
-| 三种形状 | `1 Square` / `2 Circle` / `3 Triangle`，或 `1` / `2` / `3` | 方形使用场景已有 width 作为边长；圆为半径，等边三角形为外接圆半径；尺寸显示在左图下方 |
+| 设置区域 | `Settings` | 展开/收起形状、旋转、倍速、场景文件、Global、Follow、Components；主画面常用按钮始终可用 |
+| 表面摩擦 | `摩擦设置`，旁边当前 μ | 编辑值与生效值分开；应用并重置后需重新 Start；不改颗粒背景阻力 |
+| 调试显示 | `Debug` | 默认关闭；开启后显示状态色轨迹、事件、实际半径包络、方向/速度、Fx/Fy/误差等诊断 |
+| 三种形状 | `1 Square` / `2 Circle` / `3 Triangle`，或 `1` / `2` / `3` | 方形使用场景已有 width 作为边长；圆为半径，等边三角形为外接圆半径；尺寸在 Debug 中显示 |
 | 移动目标 | 目标内部左键拖动、松开 | 只改中心；拖动期间冻结播放，松开后校验；移出容器或包住起点会拒绝 |
 | 朝向 | `[ -15 deg` / `] +15 deg`，或 `[` / `]` | 每次旋转 15°；圆的外观不受朝向影响 |
-| 开始 | `Start` 或 `Enter` | 从 READY 开始；ENDED 后先 Reset；输入框有焦点时快捷键用于输入文本 |
+| 开始 | `Start` 或 `Enter` | 从 READY 开始；ENDED 后先 Reset；输入框有焦点时普通快捷键用于输入文本；Q / Esc 始终停止 |
 | 暂停 / 继续 | `Pause/Continue` 或空格 | 同一场景保留策略、滤波、接触记忆；仿真时钟冻结，不累计墙钟等待 |
 | 播放速度 | `1x` / `5x` / `10x` | 只改变固定仿真步的推进频率；默认 dt=0.01 s，控制参数不变 |
 | 重置 | `Reset` 或 `r` | 结束并保留旧轮次，清空历史，原场景回到 READY |
 | 停止 | `Stop` 或 `q` / `Esc` | 结束本轮并记录停止原因；要再开始须重置 |
 | 关闭 | 窗口关闭按钮 | 当前轮次记录 WINDOW_CLOSED / 用户停止；不代表轮廓完成 |
 | 全局 / 目标局部 / 探针附近 | `Global` / `Target` / `Probe` | 全局看容器；目标局部放大目标；探针附近看接触细节；始终 XY 等比例 |
-| 自动跟随 | `Follow` | 开启后跟随探针；再点关闭。顶部显示 follow=True/False；滚轮或工具栏手动缩放平移会关闭跟随 |
+| 自动跟随 | `Follow` | 开启后跟随探针；再点关闭。滚轮或工具栏手动缩放平移会关闭跟随 |
 | 手动缩放、平移 | 左图滚轮；窗口工具栏的缩放、平移按钮 | 暂停或停止后仍可用；启用工具栏平移时不会误拖目标；刷新不覆盖手动视窗 |
-| 合成力分量 | `Components` | 切换 RAW 合成分量箭头，颜色见窗口说明；只用于仿真诊断，不传给策略 |
+| 合成力分量 | `Components` | 位于 Settings；开启时同时打开 Debug，显示 RAW 合成分量；只用于诊断，不传给策略 |
 | 静态图片 | 结束后 `Save PNG` | 保存本轮同步视图 `continuous_preview.png`；重复保存使用新的文件名 |
 
-键盘操作前点一下绘图区空白处，退出 `Scene YAML` 文本输入焦点。停止按钮始终可直接点击。终端 `Ctrl+C` 也会结束预演并收尾日志。
+键盘操作前点一下绘图区空白处，退出 `Scene YAML` 文本输入焦点。Stop、Q / Esc 始终可停止，输入路径时也不要按 Q 作为普通字符；终端 `Ctrl+C` 会结束预演并收尾日志。重复 Stop 或关窗安全无副作用。
 
 **运行中或暂停后编辑场景**：有效形状、位置、旋转或加载操作会结束旧一轮，记录 `SCENE_CHANGED`，保留旧日志，然后用新的策略、滤波、时钟和接触记忆回到 READY。不能拖动物体后接着沿用旧接触。无效编辑被拒绝；拖动被取消或拒绝后原轮次保持暂停。
 
 **界面不会保证沿边走完。** 默认恢复关闭，丢边即停。搜索线没有经过目标时，按搜索预算失败是有效结果。不要为了动画跑完调大安全阈值。若显示 `Playback throttled`，实际倍速低于请求值；每个传感器／控制／执行步仍完整计算。默认刷新 10 fps。
 
-左侧 XY 坐标严格等比例，灰色是已知合成目标；探针圆使用合成模型的实际半径，醒目的 `+` 只是放大的 TCP 中心标记。路径分为 SEARCH、RELIABLE、UNCERTAIN、RECOVERY，表示已执行运动，不是重建出的真实轮廓。蓝色是 processed 测得合力，固定 **8 mm/N**；黑色是命令速度、紫色是实测 TCP 速度，固定 **12 mm 显示长度 / (mm/s)**，左图分别显示 1 N、1 mm/s 标尺。箭头不再归一化成等长，零命令不画箭头。绿/红只是有效切向/sign 修正向内估计的 8 mm 方向辅助箭头；暂停确认或方向无效时隐藏。速度单位是 mm/s，**不是机械臂驱动力 N**。
+左侧默认只画灰色目标、小实心圆点 TCP、单色已执行轨迹及最多两根非零力箭头。圆点只是位置符号，不改变模型探针半径；实际半径包络、十字事件、P0/P1、搜索线和状态色轨迹只在 Debug 中显示。两根力箭头都从同一 TCP 位置出发，共用固定 **8 mm/N** 标尺和一个 1 N 标记，不归一化、不按每帧最大值缩放。0 N 隐藏箭头但数值显示 0.00 N；未知值标为 unavailable，不能当成零。
 
-右上 Fx、Fy、Fxy、F_ref、F_error 单位 N；右下命令速度大小、实际 TCP 速度大小、命令切向 v_t / 法向 v_n 单位 mm/s。命令和实际速度向量在左图用不同颜色显示。三处使用同一仿真时间，只显示已经算出的数据。F_error 是目标载荷减测得力幅值，不能当作额外计算出的驱动力。默认 F_ref=1.5 N。力曲线保留最近 30 秒，降采样保留力极值；左图保留本轮全程的降采样路径，最多 4096 个点，合并跨状态段按 UNCERTAIN 显示。完整采样在 CSV 中。这里的 1 mm 探针接触包络、弹性接触、噪声和简单阻力都是合成假设，不是现场探针规格或颗粒物理验证。
+- **蓝色 Boundary contact (model)：边界接触力（模型）**。表示目标施加给探针的物理法向加表面摩擦。法向朝目标外侧，摩擦阻碍沿边滑动；摩擦系数为零时不会人为偏转。数值随接触压缩及摩擦变化，大小不绑定 F_ref。无接触时蓝箭头为零，即使仍有颗粒阻力或测量噪声。
+- **红色虚线 Robot force (estimate)：机器人作用力（准静态估计）**。按 `-(物理边界力 + 颗粒背景阻力 + 其他已知平面外力)` 计算；本模型没有其他平面外力项，measurement noise 不参与平衡。表示夹具传给探针的等效平面合力，画在 TCP 只是示意，不代表真实施力点或杆身弯曲/力矩计算。不是速度命令、力控输出或独立测量。
+
+旧模型的控制合成信号依旧为 `object_force（向内）+ friction + background + noise`。本轮只新增诊断：`normal_physical = -object_force`，`boundary_physical = normal_physical + friction`，`robot_estimate = -(boundary_physical + background)`。只翻法向，不将整个旧 wrench 取负。raw/processed、零偏、变换、force_direction_sign 和策略完全保留。两套力的不同含义记录在配置快照的 `force_display`（schema_version、force_convention、force_source、estimate_method），CSV 另记物理分量及可用性。
+
+理想直边匀速、接触压缩和阻力不变时，两箭头可以基本稳定；忽略背景阻力时还可近似等大反向。这是数据和准静态假设的结果，不是人为抖动或定长。接触建立、加减速、急转或停止等阶段显示 `Transient: estimate approximate`；即使未触发提示，也始终注明忽略惯性，不能视为动态驱动力重建。两箭头平衡不能证明跟踪成功，仍须独立检查载荷误差、前进、穿透和停止原因。
+
+右侧默认只显示实际进入策略的 processed **Fxy** 与 **F_ref**，标题为控制反馈载荷，不是纯边界载荷。Debug 中才展开 Fx/Fy、误差和独立的 mm/s 速度面板；辅助速度仍采用另一套标尺，不标成 N。所有显示取同一时间戳记录，不额外读传感器。曲线保留最近 30 秒及极值，预演执行轨迹最多 4096 点；完整数据保留在 CSV。
+
+**真机回放**的蓝标签自动改为 `Measured environment resultant（测得环境合力）`，不能声称分离了目标与颗粒。只有独立记录确认了 Base 坐标、环境对探针的物理正负定义和标定来源，才可显示 processed 合力及其反号的准静态估计；噪声和未知外力的不确定性保留。现有现场 `force_sign_checked` 是控制方向核对，不能自动等同这项物理确认，因此新真机日志默认明确记录 unconfirmed，隐藏两箭头。可信离线记录的 schema 需要 `frame=Base`、`force_convention=environment_on_probe`、`force_source=processed_wrench`、两项 physical_sign_confirmed/base_frame_confirmed、calibration_reference；这不是新的上机放行方式。缺少元数据的旧日志仍能打开，但物理箭头显示不可用，不猜符号。
 
 ### 看到 DIRECTION_RECONFIRM 时怎么办
 
@@ -82,7 +124,7 @@ git status
 
 ## 保存 / 加载独立场景
 
-窗口底部 `Scene YAML` 框默认给出 `simulation_scenes/continuous_日期时间.yaml` 的独立路径。
+打开 `Settings` 后，`Scene YAML` 框默认给出 `simulation_scenes/continuous_日期时间.yaml` 的独立路径。
 
 1. 摆好目标后点 `Save scene`；成功后界面和终端显示完整保存路径。只写该独立 YAML，不写 `config.yaml` 或任何现场标定文件。
 2. 同名文件已存在时拒绝覆盖。在框中改一个新文件名，再保存。
@@ -115,7 +157,7 @@ ls -dt simulation_outputs/continuous_preview/run_*
 ../.venv312/bin/python run_continuous_tracking.py --dry-run --duration 12 --output simulation_outputs/continuous_preview
 ```
 
-终端打印 `Continuous run:` 后的完整目录。12 秒是缩短总预算，默认圆形通常已进入首次贴边；停止原因为 `STOP_TIME_LIMIT`，不是一圈完成。`--duration` 只能缩短配置预算。
+终端打印 `Continuous run:` 后的完整目录。12 秒是缩短总预算，默认圆形通常已进入首次贴边；停止原因为 `STOP_TIME_LIMIT`，不是一圈完成。无窗口与真机的 `--duration` 仍只能缩短已有有限预算；默认无窗口仍保留配置的 120 秒。
 
 若要查看刚做的无窗口这一轮，先再次执行前面的 `read` 命令，把新的 `Continuous run:` 路径赋给 `CONTINUOUS_RUN_DIR`；否则变量仍指向原预演目录。然后**显式**生成静态图：
 
@@ -130,17 +172,17 @@ xdg-open "$CONTINUOUS_RUN_DIR/continuous_summary.png"
 ../.venv312/bin/python tools/visualize_continuous_run.py "$CONTINUOUS_RUN_DIR" --fps 10 --format auto
 ```
 
-终端打印实际产物路径；有 ffmpeg 时尝试 MP4，没有时回退 GIF，帧数受工具预算限制。需要看目标局部用 `--view target`、探针附近用 `--view probe`，全局用 `--view global`；`--local-xy` 仍按已记录轨迹裁剪。真实日志没有目标时 `target` 视角按轨迹取景。需要记录中的合成分量时加 `--components`，不可用时明确标记 unavailable。回放属于已有数据展示，不能用来证明闭环控制成功。**本轮结束、失败停止、通过独立验收是三件不同的事**；退出码 0、ENDED、关窗、保存成功都不表示完成轮廓。
+终端打印实际产物路径；有 ffmpeg 时尝试 MP4，没有时回退 GIF，帧数受工具预算限制。需要看目标局部用 `--view target`、探针附近用 `--view probe`，全局用 `--view global`；`--local-xy` 仍按已记录轨迹裁剪。真实日志没有目标时 `target` 视角按轨迹取景。默认仅导出 PNG。需要调试图时加 `--debug`；需要记录中的旧合成分量时加 `--components`（同时启用调试），不可用时明确标记 unavailable。回放属于已有数据展示，不能用来证明闭环控制成功。**本轮结束、失败停止、通过独立验收是三件不同的事**；退出码 0、ENDED、关窗、保存成功都不表示完成轮廓。
 
 ### 复查这次三角形及首次转折验证
 
-原失败记录仍保存在 `simulation_outputs/continuous_preview/run_20260920_235436_498310/`。其独立场景已保存为 `simulation/scene_direction_triangle.yaml`，中心和旋转来自原 config_snapshot。打开该场景：
+原失败记录仍保存在 `simulation_outputs/continuous_preview/run_20260920_235436_498310/`。以下历史三角形场景显式保留 μ=0.03，不会被新默认 0.20 覆盖。其独立场景已保存为 `simulation/scene_direction_triangle.yaml`，中心和旋转来自原 config_snapshot。打开该场景：
 
 ```bash
 ../.venv312/bin/python run_continuous_tracking.py --preview --scene simulation/scene_direction_triangle.yaml --output simulation_outputs/direction_preview
 ```
 
-保持默认 120 秒预算即可观察本次原失败位置附近的方向重确认。无 GUI 时把 `--preview` 改为 `--dry-run`。原停在 102.02 秒，诊断为估计滞后 46.34°，相邻测量仅变化 2.84°；不是已发现的中心穿透。
+默认预演不限总时长，可观察原失败位置后继续运行，再手动停止。要复现旧版 120 秒截点，明确加 `--duration 120`。无 GUI 时把 `--preview` 改为 `--dry-run`，并为批量任务明确设置有限时长。原停在 102.02 秒，诊断为估计滞后 46.34°，相邻测量仅变化 2.84°；不是已发现的中心穿透。
 
 需要重跑圆形、方形、三角形、平移旋转和无目标的独立几何验证，用这个纯离线命令：
 
@@ -148,15 +190,15 @@ xdg-open "$CONTINUOUS_RUN_DIR/continuous_summary.png"
 ../.venv312/bin/python -m simulation.continuous_validation --directions --output simulation_outputs/direction_revision
 ```
 
-它仅把离线验证时长延至 180 秒，不提高速度或放宽硬保护；主入口 `--duration` 仍只能缩短预算。终端打印各轮目录和汇总 `direction_reports.json` 路径，每轮另有 `direction_geometry_report.json`，报告首次转折后的净前进、载荷、暂停/恢复、中心及线段穿透、异常压缩和真实终止原因。当前三角形已通过原处转折，180 秒内转折后净前进约 65.8 mm；**不是整圈完成或真机验证**。报告中任何穿透都算失败，不能以动画看起来连续为准。
+它仅把离线验证时长延至 180 秒，不提高速度或放宽硬保护；预演的 `--duration` 是显式有限仿真时长，可以超过 120 秒；其他入口仍保留原有限预算规则。终端打印各轮目录和汇总 `direction_reports.json` 路径，每轮另有 `direction_geometry_report.json`，报告首次转折后的净前进、载荷、暂停/恢复、中心及线段穿透、异常压缩和真实终止原因。当前三角形已通过原处转折，180 秒内转折后净前进约 65.8 mm；**不是整圈完成或真机验证**。报告中任何穿透都算失败，不能以动画看起来连续为准。
 
 用实际本轮目录显式导出新回放（先按前面的 read 命令设置目录变量）：
 
 ```bash
-../.venv312/bin/python tools/visualize_continuous_run.py "$CONTINUOUS_RUN_DIR" --format none --view target --components
+../.venv312/bin/python tools/visualize_continuous_run.py "$CONTINUOUS_RUN_DIR" --format none --view target
 ```
 
-会打印 `continuous_summary_target.png` 路径。右侧分区显示 N 和 mm/s；原始力另列，仿真 raw 按模型 Base 坐标标注，真机 raw 按传感器坐标标注，processed 才是处理后的 Base 力。未知真机目标和分离力保持 unavailable。
+会打印 `continuous_summary_target.png` 路径。默认双力箭头和 Fxy/F_ref；`--debug` 才分区显示 N 和 mm/s、另列原始力，仿真 raw 按模型 Base 坐标标注，真机 raw 按传感器坐标标注，processed 才是处理后的 Base 力。未知真机目标和分离力保持 unavailable。
 
 ## 真机章节：与上述纯仿真分开
 
@@ -194,7 +236,7 @@ xdg-open "$CONTINUOUS_RUN_DIR/continuous_summary.png"
 | 真机前置检查拒绝 | 按错误项与《连续跟踪修复说明》核对现场记录或配置，保留拒绝，不跳过检查 |
 | 快捷键没有反应 | 点绘图区空白处退出路径输入焦点，再操作；也可直接点 Stop |
 
-核验证据范围：本轮最终全量回归 **730 passed in 171.40s**。无硬件 CLI、固定步长闭环一致性和可调用按钮/拖动回调已自动测试，静态 PNG 已离屏渲染检查；预演、无窗口及真机入口设备替身在同一观测流上逐条比对，真实控制主循环没有加入绘图。三种窗口尺寸的 XY 等比例也已离屏检查，完整结果与图像路径见 [CONTINUOUS_TRACKING.md](CONTINUOUS_TRACKING.md)。**未手动点击真实桌面窗口，未验证真机物理行为。**
+核验证据范围：前一轮双力显示全量回归 **740 passed in 179.44s**；本轮不限时预演及底部布局的验收见当前修订报告。结果与截图见 [当前修订报告](CONTINUOUS_TRACKING.md)。修改前后原三角形 12,001 个周期的 raw/processed、TCP、状态和命令精确一致，显示开关不推进 RNG。无硬件 CLI、固定步长闭环一致性和可调用按钮/拖动回调已自动测试，静态 PNG 已实际查看；预演、无窗口及真机入口设备替身在同一观测流上逐条比对，真实控制主循环没有加入绘图。窗口缩放保持 XY 等比例。**未手动点击真实桌面窗口，未验证真机物理行为。**
 
 ## 需要保存代码时：由你检查后手动提交
 

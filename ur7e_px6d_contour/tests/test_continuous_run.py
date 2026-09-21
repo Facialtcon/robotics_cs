@@ -52,7 +52,7 @@ def test_closed_loop_logs_and_offline_summary(offline_run):
 def test_replay_fallback_and_actual_gif(offline_run, monkeypatch):
     from matplotlib.animation import FFMpegWriter
     monkeypatch.setattr(FFMpegWriter, "isAvailable", classmethod(lambda cls: False))
-    paths = render(offline_run, fps=.2)
+    paths = render(offline_run, fps=.2, output_format="auto")
     assert paths[-1].suffix == ".gif" and paths[-1].stat().st_size > 1000
     # Explicit encoder failure must leave the summary available.
     monkeypatch.setattr(FFMpegWriter, "saving", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("missing encoder")))
@@ -262,10 +262,10 @@ def test_replay_shows_simulated_target_and_separate_motion_segments(offline_run)
     data,config,events=read_run(offline_run)
     fig,_=make_figure(data,config,events)
     labels=[line.get_label() for line in fig.axes[0].lines]
-    assert 'simulation target truth' in labels
+    assert any(p.get_label()=='simulation target truth' for p in fig.axes[0].patches)
     assert 'reliable contact TCP path' in labels
     assert 'search / lost / recovery TCP path' in labels
-    assert any('enlarged' in line.get_label() for line in fig.axes[0].lines)
+    assert any(line.get_marker()=='o' and line.get_markersize()==4 for line in fig.axes[0].lines)
     import matplotlib.pyplot as plt
     plt.close(fig)
 
@@ -380,7 +380,9 @@ def test_replay_unknown_hardware_components_and_target_are_not_invented(offline_
     assert fig.axes[2].get_ylabel()=='Velocity [mm/s]'
     assert 'simulation target truth' not in [line.get_label() for line in fig.axes[0].lines]
     assert not fig.continuous_vectors.arrows['object'].get_visible()
-    assert any('unavailable (trajectory/TCP framing only)' in text.get_text() for text in fig.texts)
+    assert 'unavailable' in fig.continuous_vectors.boundary_text.get_text()
+    assert 'Measured environment resultant' in fig.continuous_vectors.boundary_text.get_text()
+    assert not fig.continuous_vectors.arrows['robot_estimate'].get_visible()
     assert fig.axes[1].lines[-1].get_xdata()[0]==fig.axes[2].lines[-1].get_xdata()[0]
     import matplotlib.pyplot as plt
     plt.close(fig)

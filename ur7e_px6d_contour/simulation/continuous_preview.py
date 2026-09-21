@@ -6,8 +6,10 @@ No geometry is used here to plan commands. All motion comes from session.step().
 from collections import deque
 from copy import deepcopy
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 import time
+import textwrap
 
 import numpy as np
 import yaml
@@ -17,7 +19,26 @@ from experiment_logging.termination import TerminationReason, classify_stop_reas
 from policy.continuous_tracking import EXTRA_SAMPLE_FIELDS, State
 from simulation.continuous_session import SimulationSession, validate_scene, SIMULATION_SAMPLE_FIELDS
 from simulation.simulator import load_simulation_config
-from simulation.continuous_view import XYViewport, VectorDisplay
+from simulation.continuous_view import XYViewport, VectorDisplay, force_demonstration
+
+
+def surface_friction(value):
+    """Parse an editable coefficient without changing any live session."""
+    try:
+        if isinstance(value, bool):raise ValueError
+        value = float(value)
+        if not np.isfinite(value) or value < 0:raise ValueError
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError('请输入非负有限数值，例如 0.03 或 0.20') from None
+    return value
+
+
+def friction_text(value):
+    text = repr(float(value))
+    if 'e' not in text.lower():
+        whole, _, fraction = text.partition('.')
+        text = whole + '.' + fraction.ljust(2, '0')
+    return text
 
 
 class PreviewRun:
@@ -56,6 +77,9 @@ class PreviewRun:
             print(f'Continuous preview run_dir: {self.run_dir}', flush=True)
             try:
                 self.session.capture_bias(observe=self.logger.termination.observe)
+            except KeyboardInterrupt:
+                self.stop('keyboard interrupt', event='USER_STOP', code=TerminationReason.STOP_USER_REQUEST)
+                raise
             except BaseException as exc:
                 self.stop(str(exc), event='BIAS_FAILURE', code=TerminationReason.STOP_SENSOR_ERROR)
                 raise
@@ -169,11 +193,11 @@ class PreviewRun:
             finally:
                 logger.termination.flush(emit=True)
 
-    def _new_scene(self, candidate, event):
+    def _new_scene(self, candidate, event, *, reason=None):
         candidate = validate_scene(candidate)
         # Build/validate before replacing any state; invalid edits are rejected.
         fresh = SimulationSession(self.base_config, candidate)
-        self.stop('scene changed' if event == 'SCENE_CHANGED' else 'preview reset', event=event)
+        self.stop(reason or ('scene changed' if event == 'SCENE_CHANGED' else 'preview reset'), event=event)
         self.session, self.scene = fresh, deepcopy(fresh.scene)
         self.history.clear()
         self.path_history.clear()
@@ -186,6 +210,14 @@ class PreviewRun:
         candidate = deepcopy(self.scene)
         candidate.update(deepcopy(changes))
         self._new_scene(candidate, 'SCENE_CHANGED')
+
+    def set_surface_friction(self, value):
+        value = surface_friction(value)
+        old = float(self.scene['force_model']['friction_coefficient'])
+        candidate = deepcopy(self.scene)
+        candidate['force_model']['friction_coefficient'] = value
+        self._new_scene(candidate, 'FRICTION_CHANGED',
+                        reason=f'friction_coefficient changed: {old!r} -> {value!r}')
 
     def reset(self):
         self._new_scene(self.scene, 'USER_RESET')
@@ -261,13 +293,17 @@ class ContinuousPreview:
         self.model, self.fps = model, fps
         self._drag = None
         self.figure = plt.figure(figsize=(16, 9))
-        grid = self.figure.add_gridspec(2, 2, width_ratios=[7, 3], hspace=.4, wspace=.18)
+        grid = self.figure.add_gridspec(2, 2, width_ratios=[3, 1], hspace=.4, wspace=.18)
         self.xy = self.figure.add_subplot(grid[:, 0])
         self.force = self.figure.add_subplot(grid[0, 1])
         self.velocity = self.figure.add_subplot(grid[1, 1])
-        self.figure.subplots_adjust(left=.045, right=.98, bottom=.32, top=.84)
+        self.figure.subplots_adjust(left=.045, right=.98, bottom=.17, top=.88)
         self.show_components = False
-        self.figure.suptitle('SIMULATION / SYNTHETIC FORCE — continuous tracking', fontsize=14)
+        self.debug = self.settings = False
+        self.friction_open = False
+        self.friction_error = ''
+        self._friction_session = None
+        self.figure.suptitle('SIMULATION — force demonstration', fontsize=13)
         self.figure.canvas.manager.set_window_title('SIMULATION / SYNTHETIC FORCE')
         self.xy.set(xlabel='X [mm]', ylabel='Y [mm]')
         self.xy.set_aspect('equal', adjustable='box')
@@ -289,20 +325,22 @@ class ContinuousPreview:
             self.paths[kind] = collection
         self.probe = Circle((0, 0), radius=0, fill=False, color='red', label='Synthetic probe radius (to scale)')
         self.xy.add_patch(self.probe)
-        self.tcp, = self.xy.plot([], [], 'r+', ms=9, label='TCP center (+ enlarged marker)')
+        self.executed, = self.xy.plot([], [], color='.3', lw=1.3)
+        self.tcp, = self.xy.plot([], [], 'ko', ms=4, zorder=10)
         self.event_points, = self.xy.plot([], [], 'kx', ms=5, label='Policy events')
         self.vectors = VectorDisplay(self.xy)
         self.arrows = self.vectors.arrows
-        self.figure.text(.045, .915, 'Blue: processed force (8 mm/N); black: command / purple: actual velocity (12 mm per mm/s). Green/red: valid tangent/inward directions only.', fontsize=8)
+        self.force_note = self.figure.text(.045, .10, '', fontsize=8)
         self.geometry_text = self.figure.text(.045, .245, '', fontsize=8)
-        self.status_text = self.figure.text(.045, .94, '', fontsize=9)
+        self.status_text = self.figure.text(.045, .945, '', fontsize=9, va='top',
+                                           fontfamily=['Noto Sans CJK JP', 'DejaVu Sans'])
         self.event_text = self.figure.text(.53, .245, '', fontsize=8)
         self.message_text = self.figure.text(.045, .225, '', fontsize=8, color='#8b3510')
         self.force_lines = [self.force.plot([], [], color=color, label=label)[0] for label, color in
                             [('Fx', '#be433a'), ('Fy', '#2271b2'), ('Fxy', '#008855'), ('F_ref', '#555555'), ('F_error', '#995599')]]
         self.force_lines[3].set_linestyle('--')
         self.cursor = self.force.axvline(0, color='k', lw=.8)
-        self.xy.legend(loc='lower left', bbox_to_anchor=(0, 1.03), ncol=4, fontsize=6)
+
         self.velocity_lines = [self.velocity.plot([], [], color=color, label=label)[0] for label, color in
                                [('Command', 'black'), ('Actual', '#9933aa'), ('v_t', '#008855'), ('v_n', '#b51d3c')]]
         self.velocity_cursor = self.velocity.axvline(0, color='k', lw=.8)
@@ -312,34 +350,49 @@ class ContinuousPreview:
         self.viewport = XYViewport(self.xy, [[-180,-130],[180,130]])
         self.force.legend(loc='upper right', fontsize=8)
         self.buttons = []
-        actions = [('Start', self.start), ('Pause/Continue', self.pause), ('Reset', lambda: model.reset()),
-                   ('Stop', lambda: model.stop()), ('1 Square', lambda: model.choose_shape('square')),
-                   ('2 Circle', lambda: model.choose_shape('circle')), ('3 Triangle', lambda: model.choose_shape('triangle')),
-                   ('[ -15 deg', lambda: model.rotate(-15)), ('] +15 deg', lambda: model.rotate(15))]
-        for index, (label, action) in enumerate(actions):
-            button = Button(self.figure.add_axes([.025+index*.105, .115, .10, .035]), label)
+        self.settings_axes = []
+        def add_button(label,action,position,setting=False):
+            button=Button(self.figure.add_axes(position),label)
             button.label.set_fontsize(8)
-            button.on_clicked(lambda event, action=action: self.invoke(action))
+            button.on_clicked(lambda event: self.invoke(action))
             self.buttons.append(button)
-        for index, speed in enumerate((1, 5, 10)):
-            button = Button(self.figure.add_axes([.025+index*.065, .067, .06, .033]), f'{speed}x')
-            button.on_clicked(lambda event, speed=speed: self.invoke(lambda: model.set_speed(speed)))
-            self.buttons.append(button)
-        for index, (label, action) in enumerate([('Save scene', self.save_scene), ('Load scene', self.load_scene), ('Save PNG', self.save_png)]):
-            button = Button(self.figure.add_axes([.235+index*.13, .067, .12, .033]), label)
-            button.on_clicked(lambda event, action=action: self.invoke(action))
-            self.buttons.append(button)
-        for index, label in enumerate(('Global', 'Target', 'Probe', 'Follow', 'Components')):
-            action = (lambda label=label: self.select_view(label)) if label in ('Global','Target','Probe') else (self.toggle_follow if label=='Follow' else self.toggle_components)
-            button = Button(self.figure.add_axes([.025+index*.13, .165, .12, .035]), label)
-            button.on_clicked(lambda event, action=action: self.invoke(action))
-            self.buttons.append(button)
-        default_path = Path('simulation_scenes')/f'continuous_{datetime.now():%Y%m%d_%H%M%S_%f}.yaml'
-        self.path_box = TextBox(self.figure.add_axes([.11, .015, .865, .033]), 'Scene YAML: ', initial=str(default_path))
+            if setting:self.settings_axes.append(button.ax)
+            return button
+        actions=[('Start',self.start),('Pause/Continue',self.pause),('Stop',lambda:model.stop()),
+                 ('Reset',lambda:model.reset()),('Settings',self.toggle_settings),('Debug',self.toggle_debug),
+                 ('Target',lambda:self.select_view('Target')),('Probe',lambda:self.select_view('Probe')),('Save PNG',self.save_png)]
+        for i,(label,action) in enumerate(actions):add_button(label,action,[.025+i*.0875,.025,.082,.035])
+        cjk = ['Noto Sans CJK JP', 'DejaVu Sans']
+        self.friction_button=add_button('摩擦设置',self.toggle_friction,[.815,.025,.09,.035])
+        self.friction_button.label.set_fontfamily(cjk)
+        self.friction_current=self.figure.text(.918,.042,'',fontsize=8,va='center')
+        actions=[('1 Square',lambda:model.choose_shape('square')),('2 Circle',lambda:model.choose_shape('circle')),
+                 ('3 Triangle',lambda:model.choose_shape('triangle')),('[ -15 deg',lambda:model.rotate(-15)),
+                 ('] +15 deg',lambda:model.rotate(15))]+[(f'{speed}x',lambda speed=speed:model.set_speed(speed)) for speed in (1,5,10)]
+        for i,(label,action) in enumerate(actions):add_button(label,action,[.025+i*.118,.12,.11,.033],True)
+        actions=[('Save scene',self.save_scene),('Load scene',self.load_scene),('Global',lambda:self.select_view('Global')),
+                 ('Follow',self.toggle_follow),('Components',self.toggle_components)]
+        for i,(label,action) in enumerate(actions):add_button(label,action,[.025+i*.16,.075,.15,.033],True)
+        default_path=Path('simulation_scenes')/f'continuous_{datetime.now():%Y%m%d_%H%M%S_%f}.yaml'
+        self.path_box=TextBox(self.figure.add_axes([.11,.175,.865,.033]),'Scene YAML: ',initial=str(default_path))
+        self.settings_axes.append(self.path_box.ax)
+        for axis in self.settings_axes:axis.set_visible(False)
+        # Reuse the otherwise empty lower signal area; never shrink XY for this editor.
+        self.friction_box=TextBox(self.figure.add_axes([0,0,.1,.035]),'μ ',initial='')
+        self.friction_box.on_text_change(lambda text:setattr(self,'friction_error',''))
+        self.friction_minus=add_button('−',lambda:self.adjust_friction(-1),[0,0,.04,.035])
+        self.friction_plus=add_button('+',lambda:self.adjust_friction(1),[0,0,.04,.035])
+        self.friction_apply=add_button('应用并重置本轮',self.apply_friction,[0,0,.2,.035])
+        self.friction_apply.label.set_fontfamily(cjk)
+        self.friction_axes=[self.friction_box.ax,self.friction_minus.ax,self.friction_plus.ax,self.friction_apply.ax]
+        self.friction_caption=self.figure.text(0,0,'表面摩擦 μ（待应用）',fontsize=8,va='top',fontfamily=cjk)
+        self.friction_status=self.figure.text(0,0,'',fontsize=8,va='top',fontfamily=cjk)
+        for artist in [*self.friction_axes,self.friction_caption,self.friction_status]:artist.set_visible(False)
         self.timer = self.figure.canvas.new_timer(interval=round(1000/fps))
         self.timer.add_callback(self.on_timer)
         for event, callback in [('key_press_event', self.on_key), ('button_press_event', self.on_press),
-                                ('scroll_event', self.viewport.scroll), ('motion_notify_event', self.on_motion), ('button_release_event', self.on_release), ('close_event', self.on_close)]:
+                                ('scroll_event', self.viewport.scroll), ('resize_event', lambda event: self.draw()),
+                                ('motion_notify_event', self.on_motion), ('button_release_event', self.on_release), ('close_event', self.on_close)]:
             self.figure.canvas.mpl_connect(event, callback)
         self.refresh_scene()
         self.draw()
@@ -419,11 +472,101 @@ class ContinuousPreview:
 
     def toggle_components(self):
         self.show_components = not self.show_components
+        if self.show_components:self.debug=True
+
+    def toggle_debug(self):
+        self.debug = not self.debug
+
+    def toggle_settings(self):
+        self.settings = not self.settings
+        for axis in self.settings_axes:axis.set_visible(self.settings)
+
+    def toggle_friction(self):
+        self.friction_open = not self.friction_open
+        for artist in [*self.friction_axes,self.friction_caption,self.friction_status]:artist.set_visible(self.friction_open)
+
+    def adjust_friction(self, steps):
+        try:
+            surface_friction(self.friction_box.text)
+            draft = Decimal(self.friction_box.text.strip()) + Decimal(steps)*Decimal('0.01')
+            value = surface_friction(draft)
+        except ValueError as exc:
+            self.friction_error = str(exc)
+            return
+        self.friction_box.set_val(friction_text(value))
+
+    def apply_friction(self):
+        try:
+            value = surface_friction(self.friction_box.text)
+        except ValueError as exc:
+            self.friction_error = str(exc)
+            return
+        self.model.set_surface_friction(value)
+        self.refresh_scene()
+
+    def _draw_friction(self):
+        value = self.model.scene['force_model']['friction_coefficient']
+        if self._friction_session is not self.model.session:
+            self._friction_session = self.model.session
+            self.friction_box.set_val(friction_text(value))
+            self.friction_error = ''
+        text = friction_text(value)
+        self.friction_current.set_text('μ='+text if len(text)<=8 else 'μ≈'+format(float(value),'.3g'))
+        box = self.velocity.get_position(original=True)
+        x,w,top = box.x0,box.width,box.y1
+        self.friction_caption.set_position((x,top-.008))
+        self.friction_box.ax.set_position([x+.02,top-.060,w*.46,.035])
+        self.friction_minus.ax.set_position([x+w*.60,top-.060,w*.17,.035])
+        self.friction_plus.ax.set_position([x+w*.83,top-.060,w*.17,.035])
+        self.friction_apply.ax.set_position([x,top-.108,w,.036])
+        self.friction_status.set_position((x,top-.123))
+        self.friction_status.set_text(self.friction_error or '仅编辑不生效；应用后回到 READY。\n点击 Start 开始新一轮。')
+        self.friction_status.set_color('#a22' if self.friction_error else '.25')
+
+    def _layout_footer(self, note):
+        # One persistent text block, with measured line spacing reserved below
+        # the axes. Never stack independent notes over the Settings controls.
+        width, height = self.figure.get_size_inches()
+        columns = max(30, int(width*72*.935/4.8))
+        lines = [note]
+        if self.debug:
+            lines += [self.geometry_text.get_text(), self.event_text.get_text(), self.message_text.get_text()]
+        elif self.model.message.startswith(('Rejected', 'Saved')):
+            lines += [self.model.message]
+        wrapped = '\n'.join(textwrap.fill(line, width=columns) for block in lines for line in block.splitlines() if line)
+        self.force_note.set_text(wrapped)
+        base = .225 if self.settings else .077
+        self.force_note.set_position((.045, base))
+        self.force_note.set_verticalalignment('bottom')
+        footer_height = (wrapped.count('\n')+1)*12/(height*72)
+        header_height = (self.status_text.get_text().count('\n')+1)*14/(height*72)
+        self.figure.subplots_adjust(bottom=base+footer_height+40/(height*72),
+                                    top=min(.88,.945-header_height-.012))
+
+    def _display_mode(self):
+        mode=(self.debug,self.friction_open)
+        if getattr(self,'_last_display_debug',None)==mode:return
+        self._last_display_debug=mode
+        for artist in [self.container,self.search,self.points,self.start_marker,self.probe,self.event_points,
+                       *self.point_labels,*self.paths.values()]:
+            artist.set_visible(self.debug)
+        self.executed.set_visible(not self.debug)
+        velocity_visible=self.debug and not self.friction_open
+        self.velocity.set_visible(velocity_visible)
+        # In Debug both right panels share time; label the lower one only.
+        self.force.set_xlabel('' if velocity_visible else 'Simulation time [s]')
+        self.force.tick_params(axis='x', labelbottom=not velocity_visible)
+        for i,line in enumerate(self.force_lines):line.set_visible(self.debug or i in (2,3))
+        self.force.legend(handles=[line for line in self.force_lines if line.get_visible()],fontsize=7)
+        for text in (self.geometry_text,self.event_text,self.message_text):text.set_visible(False)
+
 
     def draw(self):
         model = self.model
         history = list(model.history)
+        self._display_mode()
         components = None
+        physical = None
         valid = False
         if history:
             last = history[-1]
@@ -442,14 +585,20 @@ class ContinuousPreview:
                 indices = extrema_indices(rows, buckets=60)
                 for i,line in enumerate(lines): line.set_data(times[indices],rows[indices,i])
                 axis.set_xlim(max(0,last.time-30),max(.1,last.time))
-                lo,hi=min(0,rows.min()),max(0,rows.max());pad=max(.1,(hi-lo)*.1)
+                visible_rows=rows[:,[2,3]] if axis is self.force and not self.debug else rows
+                lo,hi=min(0,visible_rows.min()),max(0,visible_rows.max());pad=max(.1,(hi-lo)*.1)
                 axis.set_ylim(lo-pad,hi+pad)
             segments = {kind: [] for kind in self.paths}
             for a,b in zip(model.path_history,model.path_history[1:]):
                 segments[b[3]].append(np.asarray([a[1:3],b[1:3]])*1000)
             for kind,artist in self.paths.items():artist.set_segments(segments[kind])
-            if self.show_components:
+            if self.show_components and self.debug:
                 components={key:last.diagnostics[key+'_force'] for key in ('object','friction','background','noise')}
+            row={**last.simulation_telemetry,**last.telemetry,'current_state':last.command.state,
+                 'tcp_vx':last.robot.tcp_speed[0],'tcp_vy':last.robot.tcp_speed[1]}
+            physical=force_demonstration(row,model.session.config.get('force_display',{}),simulated=True,
+                         previous_velocity=history[-2].robot.tcp_speed[:2] if len(history)>1 else None)
+            self.executed.set_data([p[1]*1000 for p in model.path_history],[p[2]*1000 for p in model.path_history])
             current = f'Fx {values[-1,0]:.2f}, Fy {values[-1,1]:.2f}, Fxy {values[-1,2]:.2f} N\nF_ref {values[-1,3]:.2f}, error {values[-1,4]:+.2f} N'
             motion = f'cmd {velocities[-1,0]:.3f}, actual {velocities[-1,1]:.3f} mm/s\nv_t {velocities[-1,2]:+.3f}, v_n {velocities[-1,3]:+.3f} mm/s'
             policy_state = last.command.state+' / '+last.telemetry['direction_phase']
@@ -459,38 +608,52 @@ class ContinuousPreview:
             force=command=actual=tangent=inward=np.zeros(2)
             for line in self.force_lines+self.velocity_lines:line.set_data([],[])
             for artist in self.paths.values():artist.set_segments([])
+            self.executed.set_data([],[])
             current,motion,policy_state='No force samples yet','No velocity samples yet','READY'
             for axis in (self.force,self.velocity):axis.set_xlim(0,1);axis.set_ylim(-.2,2)
         self.tcp.set_data([xy[0]],[xy[1]])
         self.probe.center=xy
         self.viewport.update(xy,running=model.status=='RUNNING')
-        self.vectors.draw(xy,force,command,actual,tangent,inward,valid=valid,components=components)
+        self.vectors.draw(xy,force,command,actual,tangent,inward,valid=valid,components=components,physical=physical,debug=self.debug)
         for cursor in (self.cursor,self.velocity_cursor):cursor.set_xdata([self.display_time]*2)
         event_xy=np.array([e.pose[:2]*1000 for e in model.events]).reshape(-1,2)
         self.event_points.set_data(event_xy[:,0],event_xy[:,1])
         self.event_text.set_text('\n'.join(f'{e.timestamp:.2f}s {e.event_type}' for e in list(model.events)[-2:]))
-        self.xy.set_title(f't={self.display_time:.2f}s | {self.viewport.mode} | follow={self.viewport.follow} | scroll zoom; toolbar pan',fontsize=9)
-        self.force.set_title(current,fontsize=8)
+        self.xy.set_title(f'{self.viewport.mode} | scroll zoom; toolbar pan' if self.debug else '',fontsize=9)
+        self.force.set_title(current if self.debug else 'Control feedback load [N]',fontsize=9)
+        self.force.set_ylabel('Control feedback [N]')
         self.velocity.set_title(motion,fontsize=8)
-        self.status_text.set_text(f'{model.status} | {policy_state} | dt={model.session.dt:g}s | {model.speed}x requested, {model.effective_speed:.2f}x effective | {self.fps:g} fps')
+        budget = model.session.policy.c['max_runtime_sec']
+        mode = '手动停止模式' if budget is None else f'限时 {float(budget):g} 秒'
+        code = getattr(model.session.policy.stop_reason, 'value', model.session.policy.stop_reason)
+        detail = f'{model.status} | {policy_state}'
+        if model.session.policy.reason:detail += f' | {code or ""}: {model.session.policy.reason}'
+        self.status_text.set_text(f'仿真时间：{self.display_time:.2f}秒｜{mode}\n'+
+                                 textwrap.fill(detail,width=max(40,int(self.figure.get_figwidth()*12))))
         diagnostic = ''
         if self.show_components and history:
             d=history[-1].diagnostics
             diagnostic=f" | RAW components: orange model target action (inward convention) / brown friction / gray background / pink noise; d={d['signed_distance']*1000:.3f}mm, compression={d['tip_compression']*1000:.3f}mm"
         self.message_text.set_text(model.message+diagnostic)
+        self._layout_footer((physical or {}).get('note','Physical force unavailable: no sample'))
+        self._draw_friction()
 
     def on_timer(self):
         self.invoke(self.model.tick)
 
     def on_key(self, event):
+        key = (event.key or '').lower()
+        if key in ('q', 'escape'):
+            self.invoke(self.model.stop)
+            return
         # Ignore shortcuts while typing a scene filename.
-        if self.path_box.capturekeystrokes:
+        if ((self.settings and self.path_box.capturekeystrokes) or
+                (self.friction_open and self.friction_box.capturekeystrokes)):
             return
         actions = {'1': lambda: self.model.choose_shape('square'), '2': lambda: self.model.choose_shape('circle'),
                    '3': lambda: self.model.choose_shape('triangle'), '[': lambda: self.model.rotate(-15),
                    ']': lambda: self.model.rotate(15), ' ': self.pause, 'enter': self.start,
                    'r': self.model.reset, 'q': self.model.stop, 'escape': self.model.stop}
-        key = (event.key or '').lower()
         if key in actions:
             self.invoke(actions[key])
 
@@ -534,6 +697,8 @@ class ContinuousPreview:
         self.timer.start()
         try:
             plt.show()
+        except KeyboardInterrupt:
+            self.model.stop('keyboard interrupt', event='USER_STOP')
         finally:
             self.on_close(None)
 
@@ -545,10 +710,11 @@ def launch_preview(args, config, provenance):
     config['continuous_provenance'] = provenance
     if getattr(args, 'enable_reacquire', False):
         config['continuous_tracking']['reacquire_enabled'] = True
-    if args.duration is not None:
-        if not np.isfinite(args.duration) or args.duration <= 0:
-            raise ValueError('--duration must be finite and positive')
-        config['continuous_tracking']['max_runtime_sec'] = min(args.duration, config['continuous_tracking']['max_runtime_sec'])
+    if args.duration is not None and (not np.isfinite(args.duration) or args.duration <= 0):
+        raise ValueError('--duration must be finite and positive')
+    # Override this simulation copy only. None is explicit manual-stop mode;
+    # finite offline horizons may exceed the unchanged, reviewed real budget.
+    config['continuous_tracking']['max_runtime_sec'] = args.duration
     output = args.output or resolve_calibration_path(args.config, config['logging']['output_root'])
     model = PreviewRun(config, load_simulation_config(args.scene), output)
     import matplotlib

@@ -43,7 +43,7 @@ def validate_config(config: dict) -> None:
                 "search_speed", "search_max_distance", "search_max_time_sec",
                 "contact_lost_threshold", "contact_lost_hold_sec", "reacquire_speed",
                 "reacquire_max_angle_deg", "reacquire_angular_speed_deg_s",
-                "reacquire_max_time_sec", "reacquire_max_distance", "max_runtime_sec",
+                "reacquire_max_time_sec", "reacquire_max_distance",
                 "visualization_fps", "max_sample_gap_sec", "max_observation_age_sec",
                 "cycle_timeout_sec", "settle_speed_mps", "settle_hold_sec", "confirmation_timeout_sec",
                 "direction_min_force", "direction_min_filtered_force", "direction_jump_deg",
@@ -59,6 +59,9 @@ def validate_config(config: dict) -> None:
     for key in positive:
         if not np.isfinite(float(c[key])) or float(c[key]) <= 0:
             raise ValueError(f"continuous_tracking.{key} must be finite and positive")
+    budget = c['max_runtime_sec']
+    if budget is not None and (isinstance(budget, bool) or not np.isfinite(float(budget)) or float(budget) <= 0):
+        raise ValueError('continuous_tracking.max_runtime_sec must be null or finite and positive')
     if not 0 <= float(c["force_deadband"]) < float(c["force_reference"]):
         raise ValueError("force_deadband must be in [0, force_reference)")
     if not 0 <= float(c["force_direction_filter_alpha"]) < 1:
@@ -569,7 +572,8 @@ class ContinuousTrackingPolicy:
         self.measurement_direction = self.force_direction.copy()
         if self._started is None:
             self._started, self._start_pose = now, pose.copy()
-        if now-self._started >= float(self.c['max_runtime_sec']):
+        budget = self.c['max_runtime_sec']
+        if budget is not None and now-self._started >= float(budget):
             self.request_stop(now, pose, 'maximum experiment duration reached', event='BUDGET_STOP', code=TerminationReason.STOP_TIME_LIMIT)
             return self._command(pose)
         if self.state in (State.READY, State.TARGET_SEARCH):
