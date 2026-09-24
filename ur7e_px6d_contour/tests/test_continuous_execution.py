@@ -64,10 +64,12 @@ def test_close_disconnects_even_when_stopping_fails():
     assert calls==['control','receive']
 
 
-def test_real_preflight_rejects_missing_site_evidence_before_devices():
+def test_real_preflight_rejects_invalid_explicit_site_evidence_before_devices(monkeypatch):
     from config.loader import load_config
     from run_continuous_tracking import prepare_real, ROOT
     config = load_config(ROOT/'config.yaml')
+    config['continuous_tracking']['site_verification']={}
+    monkeypatch.setattr(URRTDEController,'connect',lambda *a,**k:pytest.fail('hardware forbidden'))
     with pytest.raises((ValueError, RobotError), match='site|bound|verification'):
         prepare_real(config, ROOT/'config.yaml')
 
@@ -86,6 +88,18 @@ def test_experimental_xy_envelope_applies_on_every_state_read():
     c.config.update(continuous_xy_limits=dict(x_min=-.01,x_max=.01,y_min=-.01,y_max=.01),continuous_boundary_margin=.0005)
     c.receive.getActualTCPPose=lambda:[.011,0,0,0,0,0]
     with pytest.raises(RobotError,match='boundary'): c.read_state()
+
+
+def test_calibrated_sloping_sandbox_edge_blocks_actual_and_predicted_motion():
+    c=controller()
+    c.config.update(continuous_xy_polygon=[[0,.01],[.01,0],[0,-.01],[-.01,0]],
+                    continuous_boundary_margin=.0001)
+    c.receive.getActualTCPPose=lambda:[.008,.008,0,0,0,0]
+    with pytest.raises(RobotError,match='sandbox boundary'):c.read_state()
+    c.receive.getActualTCPPose=lambda:[.009,0,0,0,0,0]
+    c.control.speedL=lambda *a:pytest.fail('outside prediction must not send speedL')
+    with pytest.raises(RobotError,match='sandbox boundary'):
+        c.command_planar_velocity([1,0],.02,.1)
 
 
 def test_pending_stop_disallows_motion_even_if_watchdog_is_active():

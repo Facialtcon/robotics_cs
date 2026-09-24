@@ -165,6 +165,7 @@ class SafeReturnExecutor:
                     source="safe_return.execute", terminal=self.termination.record is None,
                     policy=self.policy)
             self.controller.safe_stop_motion()
+            self._after_abort_stop()
             reason = f"{type(exc).__name__}: {exc}"
             print(f"SAFE RETURN ABORTED: {reason}")
             final_pose = stop_pose
@@ -179,6 +180,7 @@ class SafeReturnExecutor:
             self.controller.end_return_mode()
 
     def _run_segment(self, phase: str, target: np.ndarray, speed: float) -> None:
+        position_tolerance = self._segment_position_tolerance(phase)
         # Check the stationary stopped condition before enabling each segment.
         # A return must never begin by moving against an already excessive load.
         self._observe(phase=f"{phase}_PRECHECK_SENSOR_READ", return_target=target)
@@ -211,13 +213,12 @@ class SafeReturnExecutor:
             orientation_error = _orientation_distance(state.pose[3:], target[3:])
             self._log_cycle(cycle_started, raw, processed, state, target, speed, phase)
             if (
-                position_error <= float(self.settings["return_position_tolerance"])
+                position_error <= position_tolerance
                 and orientation_error <= float(self.settings["return_orientation_tolerance"])
             ):
                 # End every segment at rest.  In particular, do not blend the
                 # vertical retreat into the horizontal transit.
-                self.controller.safe_stop_motion()
-                settled = self.controller.read_state()
+                settled = self._stop_at_segment_end(phase, target)
                 self._observe(robot=settled, phase=f"{phase}_SETTLED_POSE")
                 settled_position_error = float(
                     np.linalg.norm(settled.pose[:3] - target[:3])
@@ -225,9 +226,7 @@ class SafeReturnExecutor:
                 settled_orientation_error = _orientation_distance(
                     settled.pose[3:], target[3:]
                 )
-                if settled_position_error > float(
-                    self.settings["return_position_tolerance"]
-                ):
+                if settled_position_error > position_tolerance:
                     raise ReturnAborted(
                         f"{phase} settled position error "
                         f"{settled_position_error:.6f} m"
@@ -245,6 +244,17 @@ class SafeReturnExecutor:
             remaining = self.period - (time.monotonic() - cycle_started)
             if remaining > 0.0:
                 time.sleep(remaining)
+
+    def _segment_position_tolerance(self, phase):
+        return float(self.settings["return_position_tolerance"])
+
+    def _stop_at_segment_end(self, phase, target):
+        """Default discrete return behavior; continuous mode supervises braking."""
+        self.controller.safe_stop_motion()
+        return self.controller.read_state()
+
+    def _after_abort_stop(self):
+        """Optional terminal cleanup; successful return keeps its controller."""
 
     def _observe(self, **context) -> None:
         """Keep return diagnostics in memory without changing device ordering."""
@@ -302,6 +312,7 @@ class SafeReturnExecutor:
             self.termination.set_stop_reason(detail=reason, source="safe_return._aborted",
                                              terminal=self.termination.record is None)
         self.controller.safe_stop_motion()
+        self._after_abort_stop()
         print(f"SAFE RETURN ABORTED: {reason}")
         result = ReturnResult("aborted", reason, stop_pose.tolist(), stop_pose.tolist())
         self._save_status(result)
@@ -310,19 +321,19 @@ class SafeReturnExecutor:
     def _save_status(self, result: ReturnResult) -> None:
         if self.logger is None:
             return
-        path = Path(self.logger.run_dir) / "return_status.json"
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(
-                {
-                    "return_status": result.status,
-                    "return_abort_reason": result.abort_reason,
-                    "stop_pose": result.stop_pose,
-                    "p0": self.start_pose.tolist(),
-                    "return_target_label": self.target_label,
-                    "return_target": self.start_pose.tolist(),
-                    "final_pose": result.final_pose,
-                },
-                handle,
-                ensure_ascii=False,
-                indent=2,
-            )
+        payload = {
+            "return_status": result.status,
+            "return_abort_reason": result.abort_reason,
+            "stop_pose": result.stop_pose,
+            "p0": self.start_pose.tolist(),
+            "return_target_label": self.target_label,
+            "return_target": self.start_pose.tolist(),
+            "final_pose": result.final_pose,
+        }
+        write_json = getattr(self.logger, 'write_json', None)
+        if write_json is not None:
+            write_json('return_status.json', payload)
+        else:
+            path = Path(self.logger.run_dir) / "return_status.json"
+            with path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)

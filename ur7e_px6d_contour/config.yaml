@@ -217,6 +217,7 @@ continuous_tracking:
   boundary_margin: 0.0005         # m; reserve for stopping/communication, MUST VALIDATE
   reacquire_min_progress: 0.002   # m; reject repeated loss without spatial progress
   watchdog_frequency_hz: 20.0    # Hz; robot-side timeout 50 ms; SDK 1.6.5 only verified
-  # No default real envelope or sign/frame attestation. Missing => reject before connect.
-  real_test_xy_limits: null       # {x_min, x_max, y_min, y_max}, Base m, finite site bounds
-  site_verification: null        # see CONTINUOUS_TRACKING.md; bound to tool/frame/sign/config
+  # Continuous execute reuses the existing scan P0/P1 and measured sandbox corners.
+  workspace_calibration_file: workspace/config/workspace_calibration.yaml
+  real_test_xy_limits: null       # optional extra Base XY restriction; null uses saved raw corners
+  site_verification: null        # optional additional record; supplied records must match both calibrations

@@ -2,6 +2,88 @@
 
 新用户先看：[【分支 experiment/continuous-tracking】连续贴边：傻瓜式操作指南](BRANCH_continuous-tracking_傻瓜式操作指南.md)。
 
+## 当前修订：下降停稳周期与扫描启动衔接
+
+核对 `run_20260921_132757_660403`：返回已进入 `DESCEND_TO_START_SETTLE`，失败周期 45.480 ms；从周期开始到 TCP 时间戳约 3.129 ms，额外约 42.35 ms 出现在此后的处理/写日志/调度期间。现有记录不能将这部分耗时全部归因于磁盘，但同步双 CSV 写入位于该路径，已用阻塞写入替身复现其占用控制预算的问题。此前 `13:27` 的连接快照确实记录 protective_stopped=true；这不等于 `13:28` 的下降超时也是同一种连接故障。
+
+新增 `ContinuousLogWriter` 仅包装连续真机入口的原 `ExperimentLogger`，深复制样本、事件和返回结果，单独写入原文件格式。64 条队列包含正在写入的记录，积压上限使用原 confirmation_timeout_sec；失败、满队列或最老记录过期即拒绝后续健康周期。控制线程仍负责实时终止观测，磁盘线程不读取设备、不喂狗，旧排队样本不会覆盖最新诊断。停止设备之后分别尝试最终事件、停止快照与摘要，关闭文件前排空已接受记录；不可解除的系统写入阻塞有界返回错误并由线程延后清理，不宣称全部日志已经保存。原离散日志及仿真入口不改用线程。
+
+最终下降原先用返回 0.5 mm 到位条件触发刹停，随后扫描却要求 0.2 mm；最新日志的约 0.433 mm 残差因此还会触发下一处拒绝。现仅连续最终下降使用两者中更严格的容差，停稳后再次检查；其他返回段、离散返回和校准点保持原值。返回预检、返回后的零偏和跟踪在 kickWatchdog 返回后补查原周期/样本时限，避免调用本身延迟后继续依据旧观测发命令。
+
+回归先复现同步日志阻塞、45 ms kick 后错误放行下一段，以及下降在 0.433 mm 提前停止。组合入口测试使用完整 runner 和设备替身，模拟首条磁盘写入延迟 45 ms、下降 0.433 → 0.19 mm、重新采扫描零偏、进入 TARGET_SEARCH、有限时限停止，并核对两份 CSV 全部记录一致。保护阈值、控制律、实际标定、传感器超时及摩擦参数均未修改。本轮未连接设备，未验证真机调度、路径或现场保护恢复。
+
+独立审查补齐了事件部分入队失败时仅重试未接受后缀，以及首个文件关闭失败时仍由磁盘线程逐个清理其余文件；首次错误保留。最终实际回归 **248 passed in 18.14s**，包含隔离单元/设备替身、伪终端及既有有限时长闭环仿真和三个入口的数据一致性测试；没有运行全量套件或新的长期几何验收。命令如下，测试全部显式有限终止，未连接机器人/传感器：
+
+```bash
+MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q tests/test_continuous_writer.py tests/test_data_logger.py tests/test_continuous_startup_return.py tests/test_continuous_run.py tests/test_continuous_execution.py tests/test_continuous_connection_cleanup.py tests/test_continuous_saved_calibration.py tests/test_safe_return.py tests/test_safe_return_termination.py tests/test_controller.py tests/test_real_policy_parity.py tests/test_app_termination.py tests/test_continuous_revision.py tests/test_px6d_reader.py tests/test_operator_input.py tests/test_termination.py
+```
+
+`git diff --check` 通过；保存标定文件、连续策略源码、原离散入口及共享日志类无差异。保留此前本地修改及实验数据，未 commit/push。
+
+## 当前修订：现场总线报警相关的退出看门狗生命周期
+
+最新两次 `13:13` 日志在 RTDEControlInterface 构造期间报告控制脚本 5 秒启动超时，尚未进入返回逻辑；用户随后报告示教器提示“检查现场总线连接”，尚未提供精确报警号。UR 官方 [C207 说明](https://www.universal-robots.com/manuals/EN/HTML/SW10_7/Content/prod-err-codes/topics/CODE_207.html) 明确列出 RTDE 看门狗；不能仅凭终端超时判定具体保护原因，也不能断言任何现场总线报警都来自本程序。
+
+已确认的代码缺陷：终止收尾不再踢 20 Hz 看门狗，却继续等待至少 80 ms 的停稳确认，超过其 50 ms 周期。现改为停止运动、取得新鲜的低速观测后，先用本机 SDK `stopScript()` 结束本程序启用看门狗的控制脚本，再完成连续停稳确认和断开接口。正常终止、异常停止及返回中止均在终止打印/写日志之前进行此处理，避免终止 I/O 再占用看门狗期限；成功返回和非终止暂停不结束脚本。UR 的 [watchdog 官方说明](https://www.universal-robots.com/manuals/EN/HTML/SW10_14/Content/prod-scriptmanual/all_scripts/rtde_set_watchdog_variable_name.htm) 指出程序停止时移除其看门狗。仍在移动或无法取得新鲜状态时不移除保护；不增加后台续期，不修改频率、力限、速度或保护设置。`close()` 也采用同样的幂等收尾；原离散入口没有启用该看门狗，其关闭行为不变，共享返回仅增加默认空操作的终止扩展点。
+
+连接失败时，先从已存在的 receive 接口保存机器人模式、安全/程序状态、状态位、TCP 等故障快照，再关闭接口；每项读取失败独立保留未知及错误，不覆盖原异常，也不把快照作为实时状态或停稳证明。连续入口打印并记录该快照；确认连接初始化失败且接口已关闭时，不再二次读取已关闭接口制造 `receive interface is not connected` 错误。没有新增设备连接或自动恢复动作。
+
+验证使用 SDK/时钟/状态替身与原有有限仿真，覆盖正常收尾先结束脚本再等待、移动/不可读状态保留保护、脚本结束失败仍关闭接口、幂等、原离散关闭行为，以及连接失败快照和原始原因保留。最终十文件回归 **163 passed in 18.18s**：`tests/test_continuous_connection_cleanup.py tests/test_continuous_run.py tests/test_continuous_startup_return.py tests/test_continuous_execution.py tests/test_controller.py tests/test_app_termination.py tests/test_safe_return_termination.py tests/test_safe_return.py tests/test_real_policy_parity.py tests/test_continuous_revision.py`，沿用前述 pytest 环境前缀。另补充/强化终止 I/O 前结束脚本的两项专项测试，**2 passed / 65 deselected in 0.50s**（与上一批重叠一项）。包含角速度非零、设备包停滞及诊断 getter 不可用的拒绝/保留原异常测试。没有连接硬件，没有复位当前报警；现场根因及恢复效果仍需与示教器具体报警核对。未 commit/push。
+
+## 当前修订：分段返回的非阻塞刹停与连续停稳确认
+
+`run_20260921_130905_900053` 最后一个 `VERTICAL_RETREAT` 周期到下一段 `MOVE_ABOVE_START_PRECHECK` 相隔约 40.87 ms；原分段执行器调用阻塞 `stopL`，连续适配器因此触发原 30 ms 周期间隔限制。先用 40 ms 阻塞停机替身复现同一错误，并复现未停稳时直接尝试下一段的问题。
+
+共享 `SafeReturnExecutor` 只增加 `_stop_at_segment_end` 扩展点，默认仍按原顺序调用同步停止和状态读取，原离散返回行为不变。连续子类改用本机 ur-rtde 1.6.5 已核对签名的 `stopL(a, asynchronous=True)`，随后在原线程持续执行力/TCP 采样、日志与时序检查。新增 `*_SETTLE` 阶段要求实测速度连续满足原 `settle_speed_mps` 和 `settle_hold_sec`，中断则重新计时，等待受原 `confirmation_timeout_sec` 限制；原执行器继续校验最终目标位置/姿态。停止请求成功不等于停稳，也不允许发送下一段 moveL。
+
+看门狗健康检查与新运动授权检查分开：健康采样可在刹停期间续期，但新运动仍受“停稳未确认”限制；已经超期的看门狗不能通过重置时间恢复。没有清空周期历史、增大时序阈值、后台无条件喂狗或改变返回路径、减速度及跟踪公式。停止请求拒绝、刹停中力/数据/日志异常、持续未停稳和键盘停止都阻止后续分段。
+
+实际测试：十文件回归 **163 passed in 15.55s**：`tests/test_continuous_startup_return.py tests/test_continuous_execution.py tests/test_continuous_run.py tests/test_safe_return.py tests/test_safe_return_termination.py tests/test_controller.py tests/test_real_policy_parity.py tests/test_app_termination.py tests/test_continuous_saved_calibration.py tests/test_continuous_revision.py`；随后新增停稳确认中断重置测试单独 **1 passed / 39 deselected in 0.53s**。均使用离线替身或原有有限仿真，未调用设备构造连接；`git diff --check` 通过。未做真机验证或全量/长期几何测试，未 commit/push。
+
+## 当前修订：启动返回零偏采集的有限超时恢复
+
+针对 `run_20260921_130152_573202` 在 `STARTUP_RETURN_BIAS` 的 PX6D 50 ms 超时，新增 `PX6DTimeout`（继承原 `PX6DError`），仅在连续入口返回前已确认停稳的临时零偏窗口捕获该类型。再次请求停止并检查新鲜 TCP、位置/姿态和速度后，清除残留缓存并用现有版本查询响应重新同步；不重连串口、不触发硬件清零。丢弃恢复后的首帧，清空此前零偏样本及滤波状态，重新取得全部有效样本后才允许返回。
+
+最多两次重试，第三次超时终止；总窗口预算为 `startup_bias_sample_count / poll_rate_hz + confirmation_timeout_sec`，重同步超时计入同一预算。记录写入本轮 `startup_bias_retries.json`，写入失败仍终止。断开、非有限数据、超载、实测移动、过期状态及人工取消不被吞掉。返回及跟踪仍调用原不重试的 `read_wrench()`，原 50 ms 超时和运动时序阈值不变。原离散策略、共享返回路径及标定文件未修改。
+
+先补五项失败测试后实现；最终相关九文件回归 **144 passed in 13.25s**：`tests/test_px6d_reader.py tests/test_continuous_startup_return.py tests/test_continuous_run.py tests/test_safe_return.py tests/test_safe_return_termination.py tests/test_app_termination.py tests/test_termination.py tests/test_continuous_execution.py tests/test_operator_input.py`，使用 `MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q`。覆盖短暂超时后重新采集完整窗口、持续超时/重同步超时次数限制、总时限、运动时禁止重试、移动和断开拒绝、人工取消及原异常类型兼容；包含原有有限时长仿真和终端回归。`git diff --check` 通过。
+
+本次为软件恢复行为修复，所有新增串口/机器人交互均使用替身验证；未连接硬件，未验证现场 USB 链路稳定性，未运行全量测试或长期几何验收。未 commit/push，旧实验日志保留。
+
+## 当前修订：连续入口复用原工程启动安全返回
+
+后续输入修复：启动返回确认原先位于 `OperatorKeyboard` 的 cbreak 上下文内，`tty.setcbreak()` 关闭 ECHO，导致输入没有可见回显。新增 `read_line()` 在确认期间临时启用行输入/回显，支持退格和回车；正常返回、Ctrl+C、EOF 后均恢复逐键监听，外层退出恢复原终端。连续入口使用该方法，原离散调用不变。真实伪终端子进程测试验证输入在回车前可见、退格、取消、EOF、后续无需回车的 Q 以及最终终端恢复；不是硬件测试。相关四文件回归 **61 passed in 11.56s**：`tests/test_operator_input.py tests/test_continuous_startup_return.py tests/test_continuous_run.py tests/test_app_termination.py`，使用相同 pytest 环境前缀；`git diff --check` 通过。未连接硬件。
+
+针对连接后 `TCP z drift +0.029567 m exceeds tolerance`，连续入口现在使用原控制器的 `allow_start_away_from_fixed_pose=True` 连接方式；实际 active TCP 和沙箱 XY 检查仍执行。离开 P0 时复用 `SafeReturnExecutor` 的安全高度计算和分段 moveL 路径，原 `safe_return` 参数不变，未修改 `app/main.py`、离散策略或共享返回算法。返回目标仍来自保存的扫描标定；跟踪仍使用原连续策略和 speedL。
+
+需要返回时，将已有的一次 START 确认提前到返回之前，然后确认实测停稳、采集独立临时偏置、执行受力监控的返回；完成后重新检查 P0 和固定姿态，再采集扫描偏置、开始跟踪。已在 P0 时仍跳过返回并保留原确认流程。返回期间启用连续看门狗，仅通过新鲜、未超时且力检查及日志写入成功的周期续期；扫描零偏阶段继续监控并续期，不增加后台无条件喂狗线程，不在看门狗已启动时阻塞等待第二次 START。
+
+连续入口的返回适配器只补充时序、非有限数据和键盘停止检查；返回轨迹、分段超时、力限及保存状态仍由原执行器负责。控制器在返回模式按原机器人最高速度校验；退出返回模式立即恢复较低的连续跟踪速度限制。moveL 目标及当前 TCP 均检查已有沙箱多边形，并要求返回模式、RTDE 包进展和有效看门狗。启动前校验返回配置，配置摘要新增返回参数。返回期间的 Q/Esc/Ctrl+C 或异常均终止本轮，不转入扫描；停止后不自动返回。
+
+新增离线测试先得到 9 项失败，随后实现并覆盖：29.567 mm 偏高时复用原安全高度跳过逻辑、低于安全高度的三段返回、已在 P0、参数摘要/有限值、沙箱越界拒绝、返回/跟踪速度隔离、力异常/NaN、过期数据、停稳超时、串口/日志超时、日志失败、看门狗失败，以及完整入口返回后重新采集扫描偏置、只确认一次并运行共享策略。所有设备均为内存替身，有限步数或明确短时限。
+
+实际回归 **146 passed in 13.14s**，命令：`MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q tests/test_continuous_startup_return.py tests/test_continuous_execution.py tests/test_continuous_saved_calibration.py tests/test_safe_return.py tests/test_safe_return_termination.py tests/test_controller.py tests/test_continuous_run.py tests/test_real_policy_parity.py tests/test_app_termination.py tests/test_continuous_revision.py`。包含隔离单元/设备替身测试及原有有限时长离线仿真；未运行全量测试或长期闭环几何验收。`git diff --check` 通过。
+
+未连接机器人或传感器，未验证真机路径、碰撞余量或机械停稳效果；未改变旧标定、离散策略、连续控制公式和配置数值。本节替代下文历史版本中“连续入口不自动返回 P0”的说明。
+
+## 当前修订：连续入口复用已有扫描点和沙箱标定
+
+按本轮用户明确要求，连续真机入口直接沿用旧工程的 `scan_calibration.yaml` 和 `workspace/config/workspace_calibration.yaml`，不再要求默认为空的 `site_verification` 作为第二份启动记录。以下旧章节关于“缺省记录为空即拒绝连接”的描述为历史行为，以本节及操作指南为准。没有生成虚构核对人/时间/通过标记；显式提供的额外记录仍校验完整性和配置摘要，实验性恢复仍需独立记录、默认关闭。
+
+`prepare_real()` 在任何设备构造前调用已有扫描/沙箱校验器，核对有效数据、已有机器人 IP/TCP 元数据、扫描 P0/P1 的距离和 Z 约束。两路径相对 `--config` 所在目录，沙箱路径由 `continuous_tracking.workspace_calibration_file` 指定。配置摘要现在包含两份文件内容；配置日志保留标准化扫描记录、完整实测沙箱四角及原始采集元数据、来源路径和有效执行范围。旧沙箱 `active_tcp_verified: false` 如实保留，运行时仍由原控制器检查实际 active TCP。
+
+当前扫描 P0：`[0.6211867726148192, 0.25265294809033256, 0.09310900761687047, 1.513281627715119, -2.7528827770096442, 0.00068325703538375]`；搜索方向 `[-0.04853710860316569, -0.9988213799716366]`。沙箱角点 P0..P3 与扫描 P0/P1 是不同记录。固定 Z/姿态只取扫描 P0，不使用沙箱平均 Z 或坐标轴替换。
+
+沙箱原始四角 Base XY 用于执行范围，原 `boundary_margin` 不变；显式额外矩形限制同时生效。RTDE 连接、实际状态读取及下一步预测通过同一多边形检查，拒绝“虽在包围盒内但越过斜边”的位置。沙箱几何只作边界保护，不输入策略找目标边。无连续边界配置的原离散控制器路径保持原行为。
+
+正式命令仍为 `../.venv312/bin/python run_continuous_tracking.py --execute`。**本次接入标定数据，没有加入自动返回 P0；当前 TCP 仍须已在保存的扫描 P0 并静止。** 原连续零偏、START、watchdog、停稳及原地停止流程保留。首次接触后仍直接连续跟踪，不恢复三点初始化，不修改力控、方向估计、速度或任何阈值。
+
+新增 `--check-calibration`：读取文件并执行离线配置/SDK 检查、打印加载结果，然后返回，不构建设备、不触发运动；实际已执行通过。保留的结果：[calibration_check.json](simulation_outputs/saved_calibration/verification_20260921_121034_570607/calibration_check.json)。两份旧标定文件与 `app/main.py`、`policy/continuous_tracking.py` 均无差异。
+
+测试先复现 **3 failed / 7 passed**，实现后覆盖旧点位复用、扫描 Z 与沙箱 Z 不混用、相对路径、文件不被改写、无效标定/IP/TCP/范围拒绝、显式记录拒绝、恢复默认限制、四角摘要绑定、斜边实际/预测越界拒绝及只读 CLI 不构建设备。最终新增及连续执行测试 **23 passed in 0.40s**。此前相关六文件 **120 passed in 20.36s**；连续/旧返回测试 **39 passed in 0.49s**；控制器、原策略适配、旧应用收尾及连续修复回归 **60 passed in 3.05s**（各批有重叠）。命令均用 `MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bin/python -m pytest -q`。`git diff --check` 通过。
+
+这些是文件校验、隔离及设备替身测试；本轮未运行真机或全量测试，也未重做长期闭环几何验收。此前 μ=0.20 的几何穿透问题未在本次修改中处理。未连接硬件、未 commit/push/reset、未改写旧标定或删除实验数据。
+
 ## 当前修订：fix5 后统一 Debug 样式、图例和真实切向对照
 
 起点为 `experiment/continuous-tracking`、HEAD `c6f8fc7`（fix5），工作区干净，与该基准无后续差异。生产修改仅 `simulation/continuous_view.py`、`simulation/continuous_preview.py`、`tools/visualize_continuous_run.py`；控制策略、方向估计、传感器/摩擦模型、仿真及真机配置未变。

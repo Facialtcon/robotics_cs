@@ -27,6 +27,10 @@ class PX6DError(RuntimeError):
     """Base error for serial, timeout, and protocol failures."""
 
 
+class PX6DTimeout(PX6DError):
+    """No complete valid response within the existing request deadline."""
+
+
 class ProtocolError(PX6DError):
     """Raised when a PX6D frame is malformed."""
 
@@ -162,7 +166,24 @@ class PX6DReader:
             except Exception as exc:
                 raise PX6DError(f"PX6D serial read failed: {exc}") from exc
             time.sleep(0.0002)
-        raise PX6DError(f"PX6D response timeout after {timeout_sec:.3f} s")
+        raise PX6DTimeout(f"PX6D response timeout after {timeout_sec:.3f} s")
+
+    def resynchronize_after_timeout(self) -> None:
+        """Explicit stationary-startup recovery; normal reads never retry.
+
+        Discard the partial response and verify a different response type
+        before collecting a new bias window. No hardware zero or reconnect.
+        """
+        if self._port is None:
+            raise PX6DError('PX6D is not connected')
+        self._buffer.clear()
+        try:
+            self._port.reset_input_buffer()
+        except Exception as exc:
+            raise PX6DError(f'PX6D input reset failed: {exc}') from exc
+        self.firmware = parse_version_packet(
+            self._request(GET_VERSION_COMMAND, VERSION_PACKET_SIZE, self.timeout_sec))
+        self._buffer.clear()
 
     def _request(self, command: bytes, size: int, timeout_sec: float) -> bytes:
         if self._port is None:

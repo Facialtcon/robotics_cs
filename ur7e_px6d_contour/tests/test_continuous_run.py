@@ -93,7 +93,8 @@ def fake_real(tmp_path, monkeypatch):
             return self.read_state()
         def __init__(self, cfg):
             calls.append("controller_construct")
-        def connect(self):
+        def connect(self, allow_start_away_from_fixed_pose=False):
+            assert allow_start_away_from_fixed_pose
             calls.append("connect")
         def safe_stop_motion(self, force=False):
             calls.append("stop")
@@ -205,18 +206,75 @@ def test_safety_cause_survives_cleanup_failure(fake_real, monkeypatch):
     assert summary["termination_reason"] == "STOP_FORCE_LIMIT"
 
 
-def test_logging_stall_stops_and_never_kicks_again(fake_real, monkeypatch):
-    arguments, _, calls, _, _ = fake_real
+def test_disk_write_does_not_block_healthy_control_cycles(fake_real, monkeypatch):
+    from threading import Event
+    arguments, _, calls, controller, _ = fake_real
+    released = Event()
+    written = []
     original=runner.ExperimentLogger.log_sample
+    original_motion = controller.command_planar_velocity
+    def motion(self, *args):
+        original_motion(self, *args)
+        if calls.count('motion') >= 3:
+            released.set()
     def slow_log(*a,**kw):
+        if not written:
+            # Only continuing control can release this disk write. The timeout
+            # keeps the regression finite even with the old synchronous logger.
+            written.append(released.wait(.2))
         original(*a,**kw)
-        calls.append('log_block')
-        runner.time.sleep(.04)
     monkeypatch.setattr(runner.ExperimentLogger,'log_sample',slow_log)
-    assert runner.run(arguments)==1
-    tail=calls[calls.index('log_block')+1:]
-    assert tail[0]=='stop'
-    assert 'motion' not in tail and 'watchdog_kick' not in tail
+    monkeypatch.setattr(controller, 'command_planar_velocity', motion)
+    try:
+        assert runner.run(arguments) == 0
+        assert written == [True]
+    finally:
+        released.set()
+    run_dir = next(arguments.output.glob('run_*'))
+    with (run_dir/'samples.csv').open() as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) >= 4 and rows[-1]['current_state'] == 'STOP'
+
+
+def test_watchdog_call_timeout_blocks_following_motion(fake_real, monkeypatch):
+    arguments, _, calls, controller, _ = fake_real
+    def slow_kick(self):
+        calls.append('watchdog_kick')
+        if calls.count('watchdog_kick') == 2:
+            runner.time.sleep(.045)
+    monkeypatch.setattr(controller, 'kick_watchdog', slow_kick)
+    assert runner.run(arguments) == 1
+    assert calls.count('watchdog_kick') == 2
+    assert 'motion' not in calls
+
+
+def test_partial_event_enqueue_failure_preserves_each_event_once(fake_real, monkeypatch):
+    from core.models import PolicyWaypoint
+    arguments, _, _, _, _ = fake_real
+    original_update = runner.ContinuousTrackingPolicy.update
+    original_enqueue = runner.ContinuousLogWriter.log_waypoint
+    enqueued = []
+    def update(self, now, raw, processed, robot):
+        command = original_update(self, now, raw, processed, robot)
+        self.events.extend(PolicyWaypoint(now, self.state.value, label, robot.pose.copy())
+                           for label in ('EXTRA_FIRST', 'EXTRA_SECOND'))
+        return command
+    def enqueue(self, event):
+        if enqueued:
+            raise OSError('test partial event queue failure')
+        original_enqueue(self, event)
+        enqueued.append(event.event_type)
+    monkeypatch.setattr(runner.ContinuousTrackingPolicy, 'update', update)
+    monkeypatch.setattr(runner.ContinuousLogWriter, 'log_waypoint', enqueue)
+    assert runner.run(arguments) == 1
+    run_dir = next(arguments.output.glob('run_*'))
+    with (run_dir/'policy_waypoints.csv').open() as stream:
+        events = [row['event_type'] for row in csv.DictReader(stream)]
+    assert events.count(enqueued[0]) == 1
+    assert events.count('EXTRA_FIRST') == events.count('EXTRA_SECOND') == 1
+    assert events[-1] == 'SAFETY_STOP'
+    assert (run_dir/'summary.json').exists()
+    assert (run_dir/'scan_stop_snapshot.json').exists()
 
 
 def test_slow_serial_read_never_sends_motion(fake_real,monkeypatch):
@@ -239,7 +297,11 @@ def test_watchdog_setup_failure_prevents_first_motion(fake_real,monkeypatch):
 
 def test_final_snapshot_uses_fresh_post_stop_pose(fake_real,monkeypatch):
     arguments,_,calls,controller,_=fake_real
-    monkeypatch.setattr(controller,'read_diagnostic_state',lambda self:RobotState(runner.time.monotonic(),np.full(6,.123),np.zeros(6)))
+    reads = []
+    def diagnostic(self):
+        reads.append(1)
+        return self.read_state() if len(reads) == 1 else RobotState(runner.time.monotonic(),np.full(6,.123),np.zeros(6))
+    monkeypatch.setattr(controller,'read_diagnostic_state',diagnostic)
     assert runner.run(arguments)==0
     snapshot=json.loads(next(arguments.output.glob('run_*/scan_stop_snapshot.json')).read_text())
     assert snapshot['tcp_pose']==[.123]*6
@@ -249,13 +311,71 @@ def test_final_snapshot_uses_fresh_post_stop_pose(fake_real,monkeypatch):
 
 def test_final_snapshot_marks_unavailable_post_stop_state(fake_real,monkeypatch):
     arguments,_,_,controller,_=fake_real
-    def unavailable(self): raise runner.RobotError('stale RTDE package')
+    reads = []
+    def unavailable(self):
+        reads.append(1)
+        if len(reads) == 1: return self.read_state()
+        raise runner.RobotError('stale RTDE package')
     monkeypatch.setattr(controller,'read_diagnostic_state',unavailable)
     assert runner.run(arguments)==1
     snapshot=json.loads(next(arguments.output.glob('run_*/scan_stop_snapshot.json')).read_text())
     assert snapshot['stop_observation']['source']=='last_valid_sample'
     assert not snapshot['stop_observation']['standstill_confirmed']
     assert 'host_age_sec' in snapshot['stop_observation']
+
+
+def test_failed_connection_keeps_snapshot_without_reading_closed_interface(fake_real, monkeypatch):
+    arguments, _, _, controller, _ = fake_real
+    def fail(self, **kwargs):
+        self.connection_failed = True
+        self.receive = None
+        self.connection_diagnostics = dict(protective_stopped=True, freshness='not_verified',
+                                          tcp_pose=[.6,.2,.1,0,0,0], tcp_speed=[0]*6)
+        raise runner.RobotError('Failed to start control script, before timeout of 5 seconds')
+    monkeypatch.setattr(controller, 'connect', fail)
+    monkeypatch.setattr(controller, 'read_diagnostic_state', lambda self: pytest.fail('closed receive must not be read'))
+    assert runner.run(arguments) == 1
+    report = json.loads(next(arguments.output.glob('run_*/termination.json')).read_text())
+    assert report['robot_connection']['protective_stopped'] is True
+    assert report['tcp_pose'] == [.6,.2,.1,0,0,0]
+    assert report['reason'] == 'STOP_MOTION_ERROR'
+    assert not report['secondary_errors']
+
+
+def test_terminal_hold_does_not_expire_owned_watchdog(fake_real, monkeypatch):
+    arguments, _, calls, controller, _ = fake_real
+    original_enable, original_kick = controller.enable_watchdog, controller.kick_watchdog
+    def enable(self, hz):
+        self.watched = True; self.last_kick = runner.time.monotonic()
+        original_enable(self, hz)
+    def kick(self):
+        self.last_kick = runner.time.monotonic(); original_kick(self)
+    def diagnostic(self):
+        if getattr(self, 'watched', False) and runner.time.monotonic()-self.last_kick >= .05:
+            raise runner.RobotError('simulated C207 watchdog expired during terminal hold')
+        return self.read_state()
+    def finish(self):
+        if getattr(self, 'watched', False):
+            diagnostic(self)
+            calls.append('stopScript'); self.watched = False
+            return True
+        return False
+    monkeypatch.setattr(controller, 'enable_watchdog', enable)
+    monkeypatch.setattr(controller, 'kick_watchdog', kick)
+    monkeypatch.setattr(controller, 'read_diagnostic_state', diagnostic)
+    monkeypatch.setattr(controller, 'finish_control_script_if_stopped', finish, raising=False)
+    original_log = runner.ExperimentLogger.log_sample
+    def log(self, now, raw, processed, robot, command, *args, **kwargs):
+        if command.state == 'STOP':
+            assert 'stopScript' in calls  # end before terminal disk I/O
+        return original_log(self, now, raw, processed, robot, command, *args, **kwargs)
+    monkeypatch.setattr(runner.ExperimentLogger, 'log_sample', log)
+    assert runner.run(arguments) == 0
+    assert calls.count('stopScript') == 1
+    assert calls.index('stopScript') < calls.index('close')
+    assert 'watchdog_kick' not in calls[calls.index('stopScript')+1:]
+    snapshot = json.loads(next(arguments.output.glob('run_*/scan_stop_snapshot.json')).read_text())
+    assert snapshot['stop_observation']['standstill_confirmed']
 
 
 def test_replay_shows_simulated_target_and_separate_motion_segments(offline_run):
@@ -324,7 +444,8 @@ def test_identical_geometric_observation_stream_across_three_entry_adapters(tmp_
     class FakeRobot:
         observation_timing={};motion_fault=''
         def __init__(self,cfg):device_calls.append('fake_robot')
-        def connect(self):pass
+        def connect(self, allow_start_away_from_fixed_pose=False):
+            assert allow_start_away_from_fixed_pose
         def safe_stop_motion(self,**kwargs):pass
         def read_state(self):
             s=at(clock.t).robot

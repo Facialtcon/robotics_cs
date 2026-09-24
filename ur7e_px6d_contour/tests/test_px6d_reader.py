@@ -39,3 +39,31 @@ def test_bad_crc_rejected():
     with pytest.raises(ProtocolError, match="CRC"):
         parse_wrench_packet(bytes(packet))
 
+
+def test_stationary_resynchronization_discards_old_bytes_and_checks_version():
+    from sensor.px6d_reader import PX6DReader
+    version = bytes.fromhex('aa 55 7f 07 00 76 31 2e 30 2e 31 00 64')
+    class Port:
+        data = b'old partial packet'
+        writes = []
+        def reset_input_buffer(self): self.data = b''
+        def write(self, command):
+            self.writes.append(command); self.data += version
+        def flush(self): pass
+        @property
+        def in_waiting(self): return len(self.data)
+        def read(self, n):
+            data, self.data = self.data[:n], self.data[n:]; return data
+    r = PX6DReader('fake'); r._port = Port(); r._buffer.extend(b'old software buffer')
+    r.resynchronize_after_timeout()
+    assert r._port.writes == [GET_VERSION_COMMAND]
+    assert r.firmware == 'v1.0.1' and not r._buffer
+
+
+def test_read_timeout_keeps_original_base_exception_contract():
+    from types import SimpleNamespace
+    from sensor.px6d_reader import PX6DReader, PX6DError, PX6DTimeout
+    r = PX6DReader('fake'); r._port = SimpleNamespace(in_waiting=0)
+    with pytest.raises(PX6DTimeout) as exc:
+        r._read_packet(29, .001)
+    assert isinstance(exc.value, PX6DError)
