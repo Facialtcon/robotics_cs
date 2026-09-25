@@ -1,6 +1,6 @@
 # 【分支 experiment/continuous-tracking】连续贴边：傻瓜式操作指南
 
-本指南只适用于 `experiment/continuous-tracking` 连续贴边实验分支。`main` 保留原离散探测路线；这里不把它称为已通过真机验证的稳定版。本地仍是同一个项目文件夹，切换分支会切换受 Git 管理的代码。原来的《从这里开始》《操作文档》用于原路线，不要混用入口。
+本指南只适用于 `experiment/continuous-tracking` 连续贴边实验分支。`main` 保留原离散探测路线；这里不把它称为已通过真机验证的稳定版。本地仍是同一个项目文件夹，切换分支会切换受 Git 管理的代码。日常唯一主指南为 [从这里开始.md](从这里开始.md)，两种策略统一从 `python run_project.py` 选择。第 12 项仍为原离散，第 18 项才是连续真机；本文保留连续窗口细节。
 
 ## 先打开纯仿真预演：最短路线
 
@@ -27,13 +27,16 @@ git status
 
 应看到 Python 3.12、上述环境的 Python 路径和“环境导入成功”。这样直接指定解释器即可，不必先激活或重装全部依赖；缺失时先核对环境位置。
 
-**3．打开窗口。** 复制这一条纯离线命令：
+**3．打开菜单并选择 15。**
 
 ```bash
-../.venv312/bin/python run_continuous_tracking.py --preview --output simulation_outputs/continuous_preview
+source /home/user-linux/robotics_cs/.venv312/bin/activate
+python run_project.py
 ```
 
-应出现标题为 **SIMULATION / SYNTHETIC FORCE** 的窗口：左侧约 75% 为简洁运动图，右侧默认只有“Control feedback load（控制反馈载荷）”曲线，顶部状态为 `READY`，默认 `Target` 目标局部视角。此时尚未开始仿真，不创建真实控制器、不打开串口。没有图形桌面时改用下文的无窗口命令。
+输入 `15`，场景提示按回车使用默认场景；输入 `:q` 可取消。
+
+应出现标题为 **SIMULATION / SYNTHETIC FORCE** 的窗口：左侧约 75% 为简洁运动图，右侧默认只有“Control feedback load（控制反馈载荷）”曲线，顶部状态为 `READY`，默认 `Target` 目标局部视角。此时尚未开始仿真，不创建真实控制器、不打开串口。没有图形桌面时选择菜单 16 的有限无窗口模拟。
 
 **4．摆放目标。** 先点 `Settings` 展开设置，再点 `1 Square`、`2 Circle` 或 `3 Triangle`；在左图目标内部按住鼠标左键，拖到新位置后松开。虚线是待放置轮廓，松开后才应用。点 `[ -15 deg` 或 `] +15 deg` 调整朝向。需要查看中心、尺寸、搜索线时打开 `Debug`；尺寸单位为 mm。
 
@@ -44,6 +47,8 @@ git status
 **6．找到结果。** 每次真正开始时，终端打印以 `Continuous preview run_dir:` 开头的一行，后面是本轮的完整目录。停止后点 `Save PNG`，应打印 PNG 的完整路径。保留这行路径；下一节说明如何打开。每次 `Reset` 后再次开始都会生成新目录，不覆盖旧日志。
 
 ## 调整表面摩擦系数 μ
+
+以下模型和控制修订报告中的“本轮/当前”指此前连续预演修订，不是本次菜单改造。参数以所选场景/实际配置为准；历史测试数量不作为本轮结果。
 
 主窗口底部右侧新增 **摩擦设置** 小按钮，旁边 `μ=...` 表示当前真正生效的值。新建默认连续场景是 **μ=0.20**；公共离散仿真配置仍为 0.03。显式加载已保存场景时使用文件中的 μ（例如原三角形复现场景仍为 0.03），不会强行改成 0.20。
 
@@ -61,13 +66,11 @@ git status
 
 `--preview` 会在本次配置副本中把 `continuous_tracking.max_runtime_sec` 设为 Python `None`，日志快照写作 YAML `null`。不写回 config.yaml，不采用巨大秒数，也不修改真机预算或现场验证。共享策略只跳过总时限比较；力/力矩、无效/过期数据、方向确认、低力/丢边、局部搜索、workspace 和其他保护仍生效。没有增加绕圈完成自动退出。
 
-需要有限预演，例如自动测试或固定截点演示：
+日常菜单 15 保持手动停止。自动测试或固定截点演示需要有限预演，见高级调试附录；日常无窗口验证用菜单 16：
 
-```bash
-../.venv312/bin/python run_continuous_tracking.py --preview --duration 180 --scene simulation/scene_direction_triangle.yaml --output simulation_outputs/continuous_preview
-```
+（直接脚本示例见文末“高级调试”；日常从菜单选择。）
 
-时长必须有限且大于零；到期显示 STOP_TIME_LIMIT。自动测试必须给出有限时长、有限步数或注入明确停止操作，不能等待手动模式自行结束。无窗口批量运行仍用下文带 `--duration` 的命令。真机入口拒绝 null / None 总预算，且保留原配置绑定和现场检查。
+时长必须有限且大于零；到期显示 STOP_TIME_LIMIT。自动测试必须给出有限时长、有限步数或注入明确停止操作，不能等待手动模式自行结束。日常无窗口运行选择菜单 16；高级批量测试见附录，必须传有限 `--duration`。真机入口拒绝 null / None 总预算，且保留原配置绑定和现场检查。
 
 长时间预演只保留最近 30 秒采样、最多 4096 个显示路径点及 200 个显示事件；完整采样持续写入 CSV，不累积全部历史帧，不自动编码视频。停止后照常保存完整日志和停止原因；磁盘写入失败按异常流程停止和关闭日志。
 
@@ -157,69 +160,31 @@ git status
 
 ## 查看日志、无窗口模拟和显式回放
 
-按快速开始命令运行时，结果在 `simulation_outputs/continuous_preview/run_日期时间微秒/`。若省略 `--output`，当前配置默认在项目 `data/`。**以终端的本轮 run_dir 行为准**，不要误把上一轮当作本轮。
+菜单 **15/16** 将输出根目录传为 `simulation_outputs/continuous_preview`。每轮以子程序实际打印的 `Continuous preview run_dir:` 或 `Continuous run:` 完整目录为准，不把旧轮次当成本轮。
 
-停止后，在终端复制下面两条；提示输入时，粘贴本轮 `run_dir:` 后面的完整目录，不带引号：
+主要文件是 samples.csv/full_log.csv、事件 policy_waypoints.csv、实际配置 config_snapshot.yaml、summary.json/termination.json 及 scan_stop_snapshot.json；早期异常可能缺文件。快照中的 Git dirty 说明有未提交改动，提交号不足以复现所有本地代码。
 
-```bash
-read -r -p '粘贴本轮完整 run_dir 路径后按回车：' CONTINUOUS_RUN_DIR
-xdg-open "$CONTINUOUS_RUN_DIR"
-```
+无窗口使用 **16**：菜单内选择场景并输入有限正数秒数，默认 12，只缩短原预算。`STOP_TIME_LIMIT` 不是一圈完成。查看时选 **19** 并选择实际目录，连续工具显式使用 `--format none`，默认只生成静态 PNG；输出以工具打印为准。需要箱体坐标图用 **20**，按提示选择匹配本轮的四角标定。菜单不默认选择最新仿真为真机，不覆盖采样数据。
 
-应打开该目录。双击 `continuous_preview.png` 看图；若尚未保存 PNG，可用下面静态回放命令生成 `continuous_summary.png`。找不到终端那行时，先列出最近目录再选择正确一轮：
-
-```bash
-ls -dt simulation_outputs/continuous_preview/run_*
-```
-
-主要文件：`samples.csv` / `full_log.csv` 是完整逐步数据；`policy_waypoints.csv` 是事件；`config_snapshot.yaml` 包含实际连续控制参数、场景、随机种子、模拟执行延迟/加速度和 Git 分支/提交/dirty 状态；`summary.json` / `termination.json` 记录停止原因；`scan_stop_snapshot.json` 记录最终停止观测。Git dirty 表示代码仍有未提交修改，不能只凭提交号重现所有本地内容。
-
-**纯无窗口模拟**（不会弹窗，不会连接设备）：
-
-```bash
-../.venv312/bin/python run_continuous_tracking.py --dry-run --duration 12 --output simulation_outputs/continuous_preview
-```
-
-终端打印 `Continuous run:` 后的完整目录。12 秒是缩短总预算，默认圆形通常已进入首次贴边；停止原因为 `STOP_TIME_LIMIT`，不是一圈完成。无窗口与真机的 `--duration` 仍只能缩短已有有限预算；默认无窗口仍保留配置的 120 秒。
-
-若要查看刚做的无窗口这一轮，先再次执行前面的 `read` 命令，把新的 `Continuous run:` 路径赋给 `CONTINUOUS_RUN_DIR`；否则变量仍指向原预演目录。然后**显式**生成静态图：
-
-```bash
-../.venv312/bin/python tools/visualize_continuous_run.py "$CONTINUOUS_RUN_DIR" --format none
-xdg-open "$CONTINUOUS_RUN_DIR/continuous_summary.png"
-```
-
-要视频时再执行，默认运行不会自动编码视频：
-
-```bash
-../.venv312/bin/python tools/visualize_continuous_run.py "$CONTINUOUS_RUN_DIR" --fps 10 --format auto
-```
-
-终端打印实际产物路径；有 ffmpeg 时尝试 MP4，没有时回退 GIF，帧数受工具预算限制。需要看目标局部用 `--view target`、探针附近用 `--view probe`，全局用 `--view global`；`--local-xy` 仍按已记录轨迹裁剪。真实日志没有目标时 `target` 视角按轨迹取景。默认仅导出 PNG。需要调试图时加 `--debug`；需要记录中的旧合成分量时加 `--components`（同时启用调试），不可用时明确标记 unavailable。回放属于已有数据展示，不能用来证明闭环控制成功。**本轮结束、失败停止、通过独立验收是三件不同的事**；退出码 0、ENDED、关窗、保存成功都不表示完成轮廓。
+**运行结束、失败停止、独立验收通过是三件不同的事。** 退出码 0、ENDED、关窗、保存成功都不表示完成轮廓。视频编码、指定视角和独立几何批量验证的直接命令移至文末高级调试，默认菜单不批量编码视频。
 
 ### 复查这次三角形及首次转折验证
 
-原失败记录仍保存在 `simulation_outputs/continuous_preview/run_20260920_235436_498310/`。以下历史三角形场景显式保留 μ=0.03，不会被新默认 0.20 覆盖。其独立场景已保存为 `simulation/scene_direction_triangle.yaml`，中心和旋转来自原 config_snapshot。打开该场景：
+原失败记录仍保存在 `simulation_outputs/continuous_preview/run_20260920_235436_498310/`。以下历史三角形场景显式保留 μ=0.03，不会被新默认 0.20 覆盖。其独立场景已保存为 `simulation/scene_direction_triangle.yaml`，中心和旋转来自原 config_snapshot。用菜单 **15**，场景提示输入 `simulation/scene_direction_triangle.yaml`；也可在窗口中加载。对应高级调试命令见附录：
 
-```bash
-../.venv312/bin/python run_continuous_tracking.py --preview --scene simulation/scene_direction_triangle.yaml --output simulation_outputs/direction_preview
-```
+（直接脚本示例见文末“高级调试”；日常从菜单选择。）
 
 默认预演不限总时长，可观察原失败位置后继续运行，再手动停止。要复现旧版 120 秒截点，明确加 `--duration 120`。无 GUI 时把 `--preview` 改为 `--dry-run`，并为批量任务明确设置有限时长。原停在 102.02 秒，诊断为估计滞后 46.34°，相邻测量仅变化 2.84°；不是已发现的中心穿透。
 
-需要重跑圆形、方形、三角形、平移旋转和无目标的独立几何验证，用这个纯离线命令：
+需要重跑圆形、方形、三角形、平移旋转和无目标的独立几何验证，使用附录中的纯离线高级验证命令：
 
-```bash
-../.venv312/bin/python -m simulation.continuous_validation --directions --output simulation_outputs/direction_revision
-```
+（直接脚本示例见文末“高级调试”；日常从菜单选择。）
 
-它仅把离线验证时长延至 180 秒，不提高速度或放宽硬保护；预演的 `--duration` 是显式有限仿真时长，可以超过 120 秒；其他入口仍保留原有限预算规则。终端打印各轮目录和汇总 `direction_reports.json` 路径，每轮另有 `direction_geometry_report.json`，报告首次转折后的净前进、载荷、暂停/恢复、中心及线段穿透、异常压缩和真实终止原因。当前三角形已通过原处转折，180 秒内转折后净前进约 65.8 mm；**不是整圈完成或真机验证**。报告中任何穿透都算失败，不能以动画看起来连续为准。
+它仅把离线验证时长延至 180 秒，不提高速度或放宽硬保护；预演的 `--duration` 是显式有限仿真时长，可以超过 120 秒；其他入口仍保留原有限预算规则。终端打印各轮目录和汇总 `direction_reports.json` 路径，每轮另有 `direction_geometry_report.json`，报告首次转折后的净前进、载荷、暂停/恢复、中心及线段穿透、异常压缩和真实终止原因。历史三角形报告曾通过原处转折，180 秒内转折后净前进约 65.8 mm；**不是整圈完成或真机验证**。报告中任何穿透都算失败，不能以动画看起来连续为准。
 
-用实际本轮目录显式导出新回放（先按前面的 read 命令设置目录变量）：
+日常菜单 19 选择实际目录；指定视角的高级命令见附录（先设置实际目录变量）：
 
-```bash
-../.venv312/bin/python tools/visualize_continuous_run.py "$CONTINUOUS_RUN_DIR" --format none --view target
-```
+（直接脚本示例见文末“高级调试”；日常从菜单选择。）
 
 会打印 `continuous_summary_target.png` 路径。默认双力箭头和 Fxy/F_ref；`--debug` 才显示左侧箭头图例并分区显示 N 和 mm/s、另列原始力，仿真 raw 按模型 Base 坐标标注，真机 raw 按传感器坐标标注，processed 才是处理后的 Base 力。未知真机目标和分离力保持 unavailable。
 
@@ -231,11 +196,7 @@ xdg-open "$CONTINUOUS_RUN_DIR/continuous_summary.png"
 - 沙箱四角：`continuous_tracking.workspace_calibration_file`（默认 `workspace/config/workspace_calibration.yaml`）。复用原有校验器检查实测 `raw_points.P0..P3` 和派生变换的一致性。这里的角点 P0 **不是扫描 P0**。
 - 两条相对路径均以所用 `--config` 文件的目录为基准。缺失、损坏或已有 IP/TCP 元数据不匹配时，仍在设备构造前报出实际问题，不生成替代标定、不覆盖文件。
 
-在项目目录运行连续贴边入口：
-
-```bash
-../.venv312/bin/python run_continuous_tracking.py --execute
-```
+在菜单选择 **18**，先核对现场与完整路径，再输入 `OPEN_CONTINUOUS_SCAN`；子程序原 `START` 流程仍保留。输入错误或 `:q` 不启动子程序。
 
 启动打印文件来源、扫描 P0/P1、四角及运行边界，并检查实际 TCP。**不在保存的扫描 P0 时，现在复用原工程的安全返回：输入一次 `START` 后，确认停稳、采集临时返回零偏，按原路径抬升到安全高度、移到 P0 上方、下降到 P0。** 已在安全高度时按原逻辑跳过多余抬升，不叠加高度。返回使用原 `safe_return` 参数和执行器，日志记录 `RETURN_TO_START`，本轮目录写入 `return_status.json`。
 
@@ -245,11 +206,11 @@ xdg-open "$CONTINUOUS_RUN_DIR/continuous_summary.png"
 
 如果在安全返回前采集临时零偏时偶发 `PX6D response timeout`，程序现在保持停止，清除旧串口缓存、查询版本响应重新同步，再丢弃首个力样本并重新采集完整零偏窗口。最多重试两次，总采集预算为样本数/采样频率加 `confirmation_timeout_sec`（当前默认约 2 秒）；重试记录保存在本轮 `startup_bias_retries.json`。机器人移动、状态过期、力异常、串口断开、持续超时或用户取消仍终止。此处理仅用于返回前已停稳的临时零偏阶段；返回运动、返回后的扫描零偏及连续跟踪不增加重试，50 ms 串口超时及原时序保护不变。
 
-返回期间保留原返回力/力矩、速度和分段超时保护，并检查连续入口的沙箱边界、数据新鲜度和看门狗；不放宽跟踪的固定 Z、姿态或速度阈值。返回失败、日志失败或人工停止时终止本轮，不继续下降或开始扫描。**启动命令不会立即绕过确认执行返回，但输入 `START` 后会产生真实返回运动。** 本次只通过离线设备替身验证，未验证真机返回路径。
+返回期间保留原返回力/力矩、速度和分段超时保护，并检查连续入口的沙箱边界、数据新鲜度和看门狗；不放宽跟踪的固定 Z、姿态或速度阈值。返回失败、日志失败或人工停止时终止本轮，不继续下降或开始扫描。**启动命令不会立即绕过确认执行返回，但输入 `START` 后会产生真实返回运动。** 此前该流程只通过离线设备替身验证，未验证真机返回路径。
 
 每段返回到达目标附近后，连续入口用异步 `stopL` 请求刹停，并在 `*_SETTLE` 阶段继续读力/TCP、检查时序和看门狗；实测速度连续低于原阈值、持续满足原停稳确认时间后，才允许进入下一段。不再用阻塞刹停占用整个采样周期，也没有放宽 30 ms 周期间隔或 50 ms 看门狗预算。未停稳、力异常、采样/日志超时或人工停止仍终止返回。
 
-本轮又修正了下降结束与扫描启动的衔接：最后下降按原扫描要求到达 P0 的 **0.2 mm** 范围再刹停，停稳后仍检查位置；其他返回段及原离散返回继续使用原 0.5 mm 容差。不会把尚差 0.433 mm 的位置当成扫描起点，也不会改写标定。
+此前控制修订曾修正下降结束与扫描启动的衔接：最后下降按原扫描要求到达 P0 的 **0.2 mm** 范围再刹停，停稳后仍检查位置；其他返回段及原离散返回继续使用原 0.5 mm 容差。不会把尚差 0.433 mm 的位置当成扫描起点，也不会改写标定。
 
 连续真机入口的采样、事件及返回结果通过有界队列交给独立磁盘线程，保持原 CSV/JSON 格式和顺序；该线程不读设备、不发送运动或喂狗。暂时的磁盘写入延迟不再直接占用采样周期。队列最多 64 条（含正在写的一条），最老记录等待不能超过现有 `confirmation_timeout_sec`（当前 1 秒）；写入错误、队列满或积压超时仍终止，随后尝试保存停止原因与日志。若操作系统写入永久卡住，会明确报告日志清理未完成，不会等待无限时长或假报保存成功。传感器/机器人读取及喂狗返回仍受原时序限制，超时后不能继续发运动命令。启动命令与 START 操作不变；此流程已用替身联调，未完成真机验证。
 
@@ -259,15 +220,11 @@ xdg-open "$CONTINUOUS_RUN_DIR/continuous_summary.png"
 
 两份标定、来源路径、完整四角快照和有效范围会进入本轮配置日志。采样新鲜度、watchdog、力/力矩、停稳、速度、方向重确认和恢复保护不变；缺省恢复仍关闭、丢边即停。若显式提供 `site_verification`，其内容及摘要仍须有效；摘要现在包含两份标定文件。没有把空记录伪造成 `true`，没有把沙箱元数据中的 `active_tcp_verified: false` 改成已验证。
 
-可选的只读检查（无需连接机器人或传感器，也不是额外启动步骤）：
+已有标定离线检查使用菜单 **17**（不连接机器人或传感器）。共用检查是 8 扫描标定、14 箱体四角；标定采集为 7 和 13，独立复位保存/返回为 10/11。
 
-```bash
-../.venv312/bin/python run_continuous_tracking.py --check-calibration
-```
+该命令打印实际读取的点位及来源，并执行离线配置/SDK 检查。它不是设备运动验收。此前报告只包含离线文件检查和设备替身回归，没有连接硬件。
 
-该命令打印实际读取的点位及来源，并执行离线配置/SDK 检查。它不是设备运动验收。本轮只做了离线文件检查和设备替身回归，没有连接硬件。
-
-**返回和跟踪期间，Q / ESC / Ctrl+C 均原地请求停止，不触发再次返回 P0。** 本次接入的是启动返回；停止后仍保持连续实验的原地停止行为。不要改用 `main.py --sensor real --execute`，后者运行的是离散策略。
+**返回和跟踪期间，Q / ESC / Ctrl+C 均原地请求停止，不触发再次返回 P0。** 本次接入的是启动返回；停止后仍保持连续实验的原地停止行为。不要把菜单 12 当作连续入口，它运行原离散策略，Q 的返回语义不同。
 
 ## 常见问题：先做一个明确动作
 
@@ -275,29 +232,53 @@ xdg-open "$CONTINUOUS_RUN_DIR/continuous_summary.png"
 |---|---|
 | `cd` 或 Python 路径不存在 | 在文件管理器核对项目与 `/home/user-linux/robotics_cs/.venv312` 的实际位置 |
 | 分支不对或改动来源不明 | 停止实验，查看 `git status` / `git diff` 并保留已有工作，先确认分支和修改归属 |
-| 无 GUI / `No interactive Matplotlib backend` | 使用上面的 `--dry-run` 与静态回放；要交互窗口则回到有可用 Matplotlib 图形后端的桌面终端 |
+| 无 GUI / `No interactive Matplotlib backend` | 选择菜单 16 与 19；要交互窗口则回到有可用 Matplotlib 图形后端的桌面终端 |
 | `Rejected / stopped` / 非法场景 | 看窗口中的具体字段；将目标放回容器内、避开 Start 接触包络，再开始 |
 | 找不到目标 / `STOP_SEARCH_LIMIT` | 看搜索线是否经过目标；仅修改仿真场景后重新开始 |
 | `STOP_TIME_LIMIT` 或恢复预算耗尽 | 打开本轮 `termination.json` 看原因和已走路径，不据此认定轮廓完成 |
 | 力、时序、边界等安全停止 | 查看 `termination.json` 与 `scan_stop_snapshot.json`，人工检查原因，不盲目增大阈值 |
+| `continuous measured speed exceeds experimental limit` | 查看本轮 `termination.json` 的 `speed_limit_observation`：实测 XYZ 速度（含 Z）、原门限和故障读取位姿；普通 `tcp_speed` 和停止快照可能属于另一次观测，旧日志缺故障字段时不能推算触发值 |
 | 真机前置检查拒绝 | 按错误项与《连续跟踪修复说明》核对现场记录或配置，保留拒绝，不跳过检查 |
 | 快捷键没有反应 | 点绘图区空白处退出路径输入焦点，再操作；也可直接点 Stop |
 
-核验证据范围：前一轮双力显示全量回归 **740 passed in 179.44s**；本轮不限时预演及底部布局的验收见当前修订报告。结果与截图见 [当前修订报告](CONTINUOUS_TRACKING.md)。修改前后原三角形 12,001 个周期的 raw/processed、TCP、状态和命令精确一致，显示开关不推进 RNG。无硬件 CLI、固定步长闭环一致性和可调用按钮/拖动回调已自动测试，静态 PNG 已实际查看；预演、无窗口及真机入口设备替身在同一观测流上逐条比对，真实控制主循环没有加入绘图。窗口缩放保持 XY 等比例。**未手动点击真实桌面窗口，未验证真机物理行为。**
+历史核验证据范围（非本轮菜单测试）：前一轮双力显示全量回归 **740 passed in 179.44s**；本轮不限时预演及底部布局的验收见当前修订报告。结果与截图见 [当前修订报告](CONTINUOUS_TRACKING.md)。修改前后原三角形 12,001 个周期的 raw/processed、TCP、状态和命令精确一致，显示开关不推进 RNG。无硬件 CLI、固定步长闭环一致性和可调用按钮/拖动回调已自动测试，静态 PNG 已实际查看；预演、无窗口及真机入口设备替身在同一观测流上逐条比对，真实控制主循环没有加入绘图。窗口缩放保持 XY 等比例。**未手动点击真实桌面窗口，未验证真机物理行为。**
 
-## 需要保存代码时：由你检查后手动提交
+## 本次菜单改造的边界
 
-以下仅为操作示例，Codex 本次没有执行 add、commit 或 push。先结束程序，在项目目录检查范围；仓库还含项目之外的文件，要核对完整清单：
+后续现场记录 `data/run_20260925_110044_430471` 显示启动返回 P0 完成，随后在 TARGET_SEARCH 阶段触发连续实测速度保护，尚未接触目标。本轮配置搜索指令为 1.0 mm/s，原实测 XYZ 门限约 1.342 mm/s。原 termination 中最后有效观测约 1.300 mm/s，触发的是下一次命令发送前的再次读取，旧日志没有保存该次完整值；不能据此确定物理原因。后续代码只补充故障读取诊断，保留原保护条件与原地停止行为，没有放宽门限或修复已证实的物理超速原因。新增字段的时间是主机读取起始时刻及之前的新鲜度检查设备时间，不承诺多个 SDK getter 来自同一个设备数据包。
+
+日常流程与完整菜单编号见主指南：已有环境 → `python run_project.py` → 编号 → 提示 → 实际结果目录。换探针先示教器针尖标定并启用 TCP，再菜单 9 读取并自动保存本地 TCP 配置（保留备份）、核对输出、重采相关 7/13/10 标定、8/14/17 离线检查，最后现场确认与真机验证。读取 active TCP 不能代替针尖标定。
+
+此前真机下降停稳阶段 **45.480 ms 超时**保留为独立问题，本次没有修改时序、看门狗、速度、力阈值、控制/日志线程或停止返回逻辑，也没有宣称已解决。上文的历史 μ=0.20 穿透失败、真机未验证及 GUI 人工验收限制继续有效。本轮菜单离线结果单独记录在 [MENU_OFFLINE_VALIDATION.md](MENU_OFFLINE_VALIDATION.md)。
+
+## 高级调试
+
+日常不需要以下命令；在工程目录使用已有环境，参数仍由原 argparse 处理。有限预演必须给 duration，其他模式保留原预算规则。视频为显式选择，不是菜单默认行为。回放命令中的变量须自行设置为实际目录。
 
 ```bash
-git branch --show-current
-git status --short
-git diff --stat
-git diff --check
-git diff
+CONTINUOUS_RUN_DIR="/实际运行目录"
+python run_continuous_tracking.py --dry-run --duration 12 --output simulation_outputs/continuous_preview
+python run_continuous_tracking.py --check-calibration
+python run_continuous_tracking.py --execute
+python tools/visualize_continuous_run.py "$CONTINUOUS_RUN_DIR" --format none
+python tools/visualize_continuous_run.py "$CONTINUOUS_RUN_DIR" --fps 10 --format auto
 ```
 
-确认要将前一轮控制修复与本次预演作为同一批分支工作保存后，逐项暂存下面代码/配置/测试/文档。若文件清单与现场不同，先核对；不要用 `git add .` 把数据或无关改动一起加入：
+```bash
+python run_continuous_tracking.py --preview --duration 180 --scene simulation/scene_direction_triangle.yaml --output simulation_outputs/continuous_preview
+```
+
+```bash
+python run_continuous_tracking.py --preview --scene simulation/scene_direction_triangle.yaml --output simulation_outputs/direction_preview
+```
+
+```bash
+python -m simulation.continuous_validation --directions --output simulation_outputs/direction_revision
+```
+
+```bash
+python tools/visualize_continuous_run.py "$CONTINUOUS_RUN_DIR" --format none --view target
+```
 
 ```bash
 git add -- CONTINUOUS_TRACKING.md BRANCH_continuous-tracking_傻瓜式操作指南.md config.yaml run_continuous_tracking.py experiment_logging/data_logger.py policy/continuous_tracking.py robot/rtde_controller.py simulation/simulated_robot.py simulation/continuous_validation.py simulation/continuous_session.py simulation/continuous_preview.py simulation/continuous_view.py simulation/scene_direction_triangle.yaml simulation/simulated_force_sensor.py experiment_logging/termination.py tools/visualize_continuous_run.py tests/test_continuous_run.py tests/test_continuous_tracking.py tests/test_continuous_execution.py tests/test_continuous_geometry.py tests/test_continuous_revision.py tests/test_continuous_preview.py tests/test_continuous_direction.py
@@ -305,12 +286,3 @@ git diff --cached --name-only
 git diff --cached --stat
 git diff --cached
 ```
-
-检查暂存区没有实验日志、独立场景记录、PNG、GIF、MP4 或无关文件，也没有漏掉依赖的前轮修复。确认之后才手动执行：
-
-```bash
-git commit -m "Fix continuous tracking guards and add offline interactive preview"
-git push -u origin experiment/continuous-tracking
-```
-
-推送被拒绝时先看原因并与协作者核对，不强推、不 reset，也不删除实验数据。

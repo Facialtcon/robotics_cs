@@ -13,6 +13,32 @@ class RobotError(RuntimeError):
     pass
 
 
+class ContinuousSpeedLimitError(RobotError):
+    """Keep the rejected read in memory; no device reads or I/O on this path."""
+
+    def __init__(self, pose, speed, limit, read_start, device_timestamp):
+        measured = float(np.linalg.norm(speed[:3]))
+        trip_limit = 1.2 * limit
+        self.speed_limit_observation = {
+            'source': 'rtde_state_read_rejected_by_continuous_speed_guard',
+            'tcp_pose': pose.tolist(),
+            'tcp_speed': speed.tolist(),
+            'tcp_pose_units': 'xyz_m_rotation_vector_rad',
+            'tcp_speed_units': 'xyz_mps_angular_radps',
+            'measured_xyz_speed_mps': measured,
+            'configured_speed_limit_mps': float(limit),
+            'tolerance_factor': 1.2,
+            'trip_limit_mps': float(trip_limit),
+            'host_read_start_monotonic_sec': read_start,
+            # Cached freshness check; SDK getters need not share one packet.
+            'last_checked_device_timestamp_sec': device_timestamp,
+        }
+        super().__init__(
+            'continuous measured speed exceeds experimental limit: '
+            f'measured_xyz={measured:.9g} m/s, trip_limit={trip_limit:.9g} m/s, '
+            f'actual_vxyz={speed[:3].tolist()} m/s')
+
+
 def check_continuous_xy(config, point):
     """Execution guard only; never supplies target geometry/directions to policy."""
     bounds = config.get('continuous_xy_limits')
@@ -310,7 +336,8 @@ class URRTDEController:
             if np.linalg.norm(speed[:3]) > float(self.config["max_tcp_speed"]) * 1.20:
                 raise RobotError("measured TCP speed exceeds maximum plus tolerance")
             if not self._return_mode and self.config.get('continuous_speed_limit') and np.linalg.norm(speed[:3]) > 1.2*self.config['continuous_speed_limit']:
-                raise RobotError('continuous measured speed exceeds experimental limit')
+                raise ContinuousSpeedLimitError(pose, speed, self.config['continuous_speed_limit'],
+                                                observed_start, self._packet_stamp)
             observed_end = time.monotonic()
             self.observation_timing.update(tcp_read_start=observed_start, tcp_read_end=observed_end)
             if getattr(self, 'stop_request_accepted', False):

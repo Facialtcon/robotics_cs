@@ -640,6 +640,11 @@ def run(args):
                                     tcp_pose=snapshot.get('tcp_pose'), tcp_speed=snapshot.get('tcp_speed'))
                 print('Robot connection failure snapshot (freshness not verified):\n'+
                       json.dumps(snapshot, ensure_ascii=False, indent=2), flush=True)
+        speed_limit_observation = getattr(exc, 'speed_limit_observation', None)
+        if speed_limit_observation is not None:
+            # Keep the rejected read separate from the last accepted state and
+            # the later post-stop observation. Stop has already been requested.
+            termination.observe(speed_limit_observation=speed_limit_observation)
         termination.set_stop_reason(detail=str(exc), exception=exc, source="continuous.runner")
         if policy is not None:
             policy.request_stop(now, np.zeros(6) if robot is None else robot.pose, str(exc))

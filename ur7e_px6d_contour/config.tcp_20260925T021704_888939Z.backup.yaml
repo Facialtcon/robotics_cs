@@ -113,7 +113,7 @@ workspace:
 
 tcp:
   # Replace with the active probe-tip TCP [x,y,z,rx,ry,rz] relative to flange.
-  offset: [-0.0032432415690885757, -6.266874371089332e-05, 0.25230436187631455, 0.0, 0.0, 0.0]
+  offset: [0.03214800018674602, 0.0001893598221758136, 0.26767310625506824, 0.0, 0.0, 0.0]
   offset_tolerance: 0.0001
   allow_unverified_active_tcp: false
 

@@ -76,6 +76,36 @@ def _write_incomplete_p0(
     )
 
 
+def _read_teaching_point(receiver, control_factory, robot_ip: str, name: str):
+    """One explicit SAVE request, one fresh TCP-read session; never retry here.
+
+    Pendant teaching can stop the SDK's script. Do not carry its control
+    interface across manual movement or operator input. The ordinary SDK
+    constructor loads its helper script, just as the standalone TCP reader does;
+    no motion, script-reupload recovery, or protective-stop unlocking is called.
+    """
+    _read_stationary_pose(receiver, f"{name} 读取前")
+    control = None
+    try:
+        control = control_factory(robot_ip)
+        active_tcp = read_active_tcp_offset(control)
+        # Use a fresh pose/speed after the potentially slow connection and read.
+        pose = _read_stationary_pose(receiver, name)
+        return pose, active_tcp
+    except RuntimeError as exc:
+        raise CalibrationError(
+            f"{name} active TCP 读取失败，本次点位未保存：{exc}。"
+            "请结束示教移动并核对 Remote Control/机器人状态；"
+            "程序不会自动重试，重新输入保存指令才会重新采样。"
+        ) from exc
+    finally:
+        if control is not None:
+            try:
+                control.disconnect()
+            except Exception:
+                pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(Path(__file__).with_name("config.yaml")))
@@ -100,28 +130,29 @@ def main() -> int:
         return 2
 
     receiver = None
-    control = None
     try:
         robot_ip = config["robot"]["robot_ip"]
         receiver = rtde_receive.RTDEReceiveInterface(robot_ip)
-        control = rtde_control.RTDEControlInterface(robot_ip)
-        active_tcp = read_active_tcp_offset(control)
         configured_tcp = config["tcp"]["offset"]
         tolerance = float(config["tcp"]["offset_tolerance"])
         print("本程序只读取 RTDE 状态和 active TCP，不会发送运动或 setTcp 命令。")
-        print(f"active TCP offset: {active_tcp}")
-        if not tcp_offsets_match(active_tcp, configured_tcp, tolerance):
-            raise CalibrationError(
-                "拒绝标定：active TCP 与 config.yaml 的 tcp.offset 不一致。"
-                f" active={active_tcp}, config={configured_tcp}。"
-                "先在示教器确认正确的探针 TCP；若当前 active TCP 正确，再把它写入 config.yaml。"
-            )
+        print("每次保存指令后才建立独立 TCP 读取会话，读完断开；不跨示教移动复用控制接口。")
+        print("请先在示教器启用正确 TCP；菜单 9 可读取并保存本地 TCP 配置。")
         print("请使用 UR7e 示教器将 TCP 移动到扫描起点 P0。")
         answer = input("就位并静止后请输入 SAVE_P0：").strip()
         if answer != "SAVE_P0":
             print("未输入 SAVE_P0，不保存。")
             return 0
-        point_0 = _read_stationary_pose(receiver, "P0")
+        point_0, active_tcp = _read_teaching_point(
+            receiver, rtde_control.RTDEControlInterface, robot_ip, "P0"
+        )
+        print(f"active TCP offset: {active_tcp}")
+        if not tcp_offsets_match(active_tcp, configured_tcp, tolerance):
+            raise CalibrationError(
+                "拒绝标定：active TCP 与 config.yaml 的 tcp.offset 不一致。"
+                f" active={active_tcp}, config={configured_tcp}。"
+                "先在示教器确认正确的探针 TCP；若当前 active TCP 正确，运行菜单 9 保存配置后重新标定。"
+            )
         _write_incomplete_p0(destination, point_0, robot_ip, active_tcp)
         print(f"P0 已保存为未完成标定：{destination}")
 
@@ -136,8 +167,9 @@ def main() -> int:
                 print("请输入 SAVE_DIRECTION，或输入 CANCEL 取消。")
                 continue
             try:
-                point_1 = _read_stationary_pose(receiver, "P1")
-                active_tcp_at_p1 = read_active_tcp_offset(control)
+                point_1, active_tcp_at_p1 = _read_teaching_point(
+                    receiver, rtde_control.RTDEControlInterface, robot_ip, "P1"
+                )
                 if not tcp_offsets_match(active_tcp, active_tcp_at_p1, tolerance):
                     raise CalibrationError("P0 与 P1 之间 active TCP 发生变化，请从 P0 重新标定。")
                 direction, xy_distance, z_difference = validate_direction_calibration(
@@ -161,14 +193,17 @@ def main() -> int:
             print(f"INITIAL SCAN DIRECTION: {direction.tolist()}")
             print(f"双点扫描标定完成：{destination}")
             print("注意：当前 TCP 仍位于 P1。")
-            print("执行正式扫描命令后，程序会先按三段安全路径自动返回 P0，再等待 START。")
+            print("原离散菜单 12 可能先返回 P0 再等待 START；连续菜单 18 保留 START 后启动返回的流程。")
             print(f"P0：{point_0}")
             return 0
+    except (KeyboardInterrupt, EOFError):
+        print("标定已取消；未完成的 P0/P1 不会标记为有效标定。")
+        return 130
     except (CalibrationError, OSError, RuntimeError, ValueError) as exc:
         print(f"扫描标定失败：{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:
-        for interface in (control, receiver):
+        for interface in (receiver,):
             if interface is not None and hasattr(interface, "disconnect"):
                 try:
                     interface.disconnect()

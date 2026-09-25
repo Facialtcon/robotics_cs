@@ -95,6 +95,7 @@ class SafeReturnExecutor:
         self.termination = getattr(logger, "termination", None) or getattr(policy, "termination", None)
         self.target_label = str(target_label)
         self.period = 1.0 / float(config["policy"]["control_rate_hz"])
+        self._segment_deadline = None
 
     def execute(self) -> ReturnResult:
         self._observe(phase="SAFE_RETURN_BEGIN", return_target=self.start_pose)
@@ -198,6 +199,7 @@ class SafeReturnExecutor:
             target, speed, float(self.settings["return_acceleration"])
         )
         deadline = time.monotonic() + float(self.settings["return_segment_timeout_sec"])
+        self._segment_deadline = deadline
         while True:
             cycle_started = time.monotonic()
             self._observe(timestamp=cycle_started, phase=f"{phase}_SENSOR_READ")
@@ -249,9 +251,38 @@ class SafeReturnExecutor:
         return float(self.settings["return_position_tolerance"])
 
     def _stop_at_segment_end(self, phase, target):
-        """Default discrete return behavior; continuous mode supervises braking."""
+        """Wait for the existing controller stop criterion within this segment's budget.
+
+        A returned stop command and an in-tolerance pose do not establish zero
+        measured speed. Keep observing force and motion during residual braking;
+        never clear the controller's pending-stop gate to permit the next move.
+        ContinuousStartupReturn retains its separate asynchronous override.
+        """
         self.controller.safe_stop_motion()
-        return self.controller.read_state()
+        speed_limit = float(getattr(self.controller, "config", {}).get(
+            "continuous_settle_speed_mps", 1e-4
+        ))  # Same measured XYZ speed criterion as URRTDEController.read_state.
+        if self._segment_deadline is None:
+            raise ReturnAborted(f"{phase} has no active segment deadline")
+        while True:
+            cycle_started = time.monotonic()
+            if cycle_started >= self._segment_deadline:
+                raise ReturnAborted(f"{phase} standstill confirmation timed out")
+            self._observe(phase=f"{phase}_SETTLE_SENSOR_READ", return_target=target)
+            raw = self.reader.read_wrench()
+            self._observe(raw=raw, phase=f"{phase}_SETTLE_PROCESSING")
+            processed = self.preprocessor.process(raw) if self.preprocessor is not None else raw
+            self._check_force(raw, processed)
+            state = self.controller.read_state()
+            self._observe(robot=state, processed=processed, phase=f"{phase}_SETTLE")
+            self._log_cycle(cycle_started, raw, processed, state, target, 0., f"{phase}_SETTLE")
+            if time.monotonic() >= self._segment_deadline:
+                raise ReturnAborted(f"{phase} standstill confirmation timed out")
+            if np.linalg.norm(state.tcp_speed[:3]) <= speed_limit:
+                return state
+            remaining = self.period - (time.monotonic() - cycle_started)
+            if remaining > 0.:
+                time.sleep(remaining)
 
     def _after_abort_stop(self):
         """Optional terminal cleanup; successful return keeps its controller."""
