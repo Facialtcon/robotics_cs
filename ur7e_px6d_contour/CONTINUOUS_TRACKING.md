@@ -2,7 +2,37 @@
 
 日常唯一主指南：[从这里开始.md](从这里开始.md)，入口 `python run_project.py`。
 
-## 当前修订：TARGET_SEARCH / FIRST_CONTACT / TRACKING 执行边界
+## 当前修订：力变化率保护按接触阶段启用
+
+实际基线为 `experiment/continuous-tracking`，HEAD `edf84944e96fcf6bbeeaa3ceb98a69024dfb6847`（`edf8494`，`9_27`），修改前工作区干净。本次运行逻辑只改 `policy/continuous_tracking.py` 中 force-rate 终止保护的适用阶段和一项 telemetry；原 18 mm/s 搜索、阶段速度保护、制动余量、控制律和配置全部保持。
+
+原问题是 `update()` 在接触判断之前无条件检查 `force_rate > 30 N/s`，导致 10 ms 内从 0.4 N 到 1.2 N 的正常接触（80 N/s）先永久停止，无法进入 FIRST_CONTACT；LOCAL_REACQUIRE 也受同一检查影响。现在仍逐帧计算/记录 force_rate，但只在 CONTINUOUS_TRACKING 的持续贴边阶段启用原 30 N/s 正向上升率终止保护。READY、TARGET_SEARCH、FIRST_CONTACT、DIRECTION_RECONFIRM、CONTACT_LOST、LOCAL_REACQUIRE 仅记录；CONTINUOUS_TRACKING 内已暂停运动的低力重确认 `_low_force_pending` 也仅记录，确认完下一周期恢复保护。STOP 继续保持终止和零命令，不消费新样本，日志保留最后有效 force_rate，不将其冒充新的测量。
+
+18 mm/s SEARCH 就是寻找首次接触：`Fxy >= 1 N` 当帧立即 FIRST_CONTACT、零命令并请求停止，不因超过贴边的 rate guard 抢先终止，也不等待 50 ms 才开始刹车。原 contact hold 50 ms、方向确认、实测 XYZ ≤0.1 mm/s 连续 80 ms 和确认期限不改；确认成功当帧仍零命令，下一周期才能贴边。LOCAL_REACQUIRE 再次接触同样立即停止并冻结搜索参考，确认成功后才恢复贴边，不改恢复几何或引入目标真值。
+
+所有非终止状态仍先执行原 `force_safety_reason`：processed force **12 N**、processed torque **1 Nm**、absolute raw force **60 N**、absolute raw torque **5 Nm**，达到硬阈值立即 STOP_FORCE_LIMIT，不能以接触触发放行。急停/保护停、RTDE/PX6D 故障、数据新鲜度、watchdog、30 ms 周期、边界、固定 Z/姿态、速度和人工停止均未改。原离散 force-rate 行为、菜单、返回、标定及日志线程均未改。
+
+CSV 只追加 `force_rate_guard_active`：0 表示本样本只记录变化率，1 表示本样本适用终止保护；它保存本次判定使用的阶段，不按更新后的状态倒推。因此确认成功进入 TRACKING 的零命令帧是 0，TRACKING rate 触发 STOP 的判定帧是 1；此后 STOP 更新为 0。跨阶段不清空变化率历史，下一贴边周期立即检查。旧字段不改，新日志和删去新增列的旧格式均测试回放。
+
+默认场景保持 18 mm/s 名义搜索，实际执行 `--dry-run --duration 15`：**2.02 s** 时 Fxy=**1.052911 N**、rate=**15.522407 N/s**、实际速度 **9.95 mm/s**，进入 FIRST_CONTACT 且 command=0、guard_active=0；**2.75 s** 时 processed force=**12.102659 N**，以 `STOP_FORCE_LIMIT / processed force safety threshold exceeded` 终止，实际速度仍 **6.5 mm/s**，尚未确认停稳或进入贴边。该场景的 rate 未超过 30 N/s；高变化率缺陷由独立 80 N/s 合成观测测试验证，不能声称默认仿真此前就是 rate 停止。没有修改模型、摩擦、减速度、预处理或阈值来取得通过。
+
+本次仿真日志：`/tmp/continuous-force-rate-simulation/run_20260927_193535_418198`。下一次真机应重点对齐 raw/processed F/T、force_rate/guard_active、FIRST_THRESHOLD_STOP_REQUEST、零命令与实测 XYZ 速度、stop_requested/confirmed、接触/停稳计时、cycle_dt、speed_guard 和最终 termination detail，检查首次接触峰值、制动距离、停止调用耗时及恢复贴边时机。没有连接 UR/PX6D，也没有证明 18 mm/s 真机成功；菜单 12/18、Q/Esc/Ctrl+C 连续原地停止和原标定复用保持。
+
+本次专项回归 **360 passed in 28.95s**；新增 42 项用例与加强后的默认仿真断言再次运行 **43 passed in 0.81s**。覆盖全部非终止阶段的硬 F/T、80 N/s 首次/再次接触、实测刹停和确认、贴边 rate 终止、低力暂停、跨阶段不重置历史、新旧 CSV 回放，并回归原离散、菜单、速度、执行与启动返回。旧测试将“所有阶段 rate 都必须终止”的断言替换为新的阶段断言，原硬保护断言保留。全部设备使用替身，测试夹具禁止构造真实 RTDE/serial 接口。
+
+全量 **1032 passed, 3 failed in 199.70s**。失败仍是 `test_continuous_direction.py::test_first_turn_closed_loop_geometry_and_failures` 的 circle-0、square-0、square-30 三个历史 μ=0.20 几何案例，最大穿透 **0.032198522884 / 0.032650524729 / 0.032761858063 mm**，与此前记录一致；未改断言、未 xfail、未调模型。不能宣称全绿或 18 mm/s 贴边成功。`git diff --check` 通过；没有 commit/push/reset/stash，没有改标定或删除日志。
+
+工程目录下复现命令（使用实际默认配置，未连接设备）：
+
+```bash
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MPLBACKEND=Agg MPLCONFIGDIR=/tmp/continuous-force-rate-mpl ../.venv312/bin/python -m pytest -q tests/test_continuous_force_rate.py tests/test_continuous_phase_speed.py tests/test_continuous_tracking.py tests/test_continuous_revision.py tests/test_continuous_execution.py tests/test_continuous_run.py tests/test_rule_policy.py tests/test_run_project.py tests/test_real_motion_speed_config.py tests/test_speed_limit_diagnostics.py tests/test_continuous_saved_calibration.py tests/test_continuous_startup_return.py
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MPLBACKEND=Agg MPLCONFIGDIR=/tmp/continuous-force-rate-mpl ../.venv312/bin/python -m pytest -q
+env -u PYTHONPATH MPLBACKEND=Agg MPLCONFIGDIR=/tmp/continuous-force-rate-mpl ../.venv312/bin/python run_continuous_tracking.py --dry-run --duration 15 --output /tmp/continuous-force-rate-simulation
+```
+
+控制台记录在 `/tmp/continuous-force-rate-targeted.txt`、`/tmp/continuous-force-rate-full.txt`。本次仅修改 policy、3 个测试文件和指定的 4 篇文档；下方章节的基线、改动清单和测试数字均为历史记录。
+
+## 历史修订：TARGET_SEARCH / FIRST_CONTACT / TRACKING 执行边界
 
 基线实际分支 `experiment/continuous-tracking`，短 SHA `f2b0ace`，修改前工作区干净。仅在原工程修改；没有连接 UR/PX6D、运动、覆盖标定、清理旧日志、commit/push/reset/stash。菜单 1～12 及其语义不变：12 原离散，15 预演，16 有限模拟，17 离线标定检查，18 连续真机（仍映射 `run_continuous_tracking.py --execute`），19/20 查看结果。直接 CLI 保留；连续 Q/Esc/Ctrl+C 原地停、不自动返回。
 
@@ -26,7 +56,7 @@
 
 只读核对本机 ur-rtde **1.6.5** 的类 docstring：存在 Receive `getTargetTCPSpeed()`、`getSpeedScaling()`。本次未加入它们：未测量本机调用开销及包一致性，不增加设备调用。UR target speed / speed scaling 未采集，不以 policy command 冒充；日志与后台写入架构不变，旧字段/回放继续支持。
 
-始终保留：UR 急停/保护停、RTDE/PX6D 故障、原协议/超时处理、数据新鲜度、20 Hz watchdog、30 ms cycle timeout、workspace/四角沙箱实际及预测边界、固定 Z/姿态、absolute raw F/T、processed F/T、force-rate、通用实际速度上限和人工停止。TCP、P0/P1、箱体四角、reset_pose 与原 data/run_* 复用，不重标定。
+始终保留：UR 急停/保护停、RTDE/PX6D 故障、原协议/超时处理、数据新鲜度、20 Hz watchdog、30 ms cycle timeout、workspace/四角沙箱实际及预测边界、固定 Z/姿态、absolute raw F/T、processed F/T、通用实际速度上限和人工停止。force-rate 的当前适用阶段见本文开头。TCP、P0/P1、箱体四角、reset_pose 与原 data/run_* 复用，不重标定。
 
 ### 本次离线验证与限制
 

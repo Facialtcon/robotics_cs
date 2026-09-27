@@ -148,9 +148,10 @@ def test_reacquire_timeout_and_distance_stop(config):
     assert tick(policy, 1.18, (0, 0), pose=[.004, 0, 0, 0, 0, 0]).state == "STOP"
 
 
+# Phase-specific rate assertions are covered in test_continuous_force_rate.py.
 @pytest.mark.parametrize("state", [State.TARGET_SEARCH, State.FIRST_CONTACT, State.CONTINUOUS_TRACKING,
                                    State.CONTACT_LOST, State.LOCAL_REACQUIRE])
-@pytest.mark.parametrize("kind", ["processed_force", "processed_torque", "raw_force", "raw_torque", "rate", "nan"])
+@pytest.mark.parametrize("kind", ["processed_force", "processed_torque", "raw_force", "raw_torque", "nan"])
 def test_safety_precedes_every_active_state(config, state, kind):
     policy = tracking(config)
     policy.state = state
@@ -164,8 +165,6 @@ def test_safety_precedes_every_active_state(config, state, kind):
         raw = Wrench(60, 0, 0, 0, 0, 0)
     elif kind == "raw_torque":
         raw = Wrench(1.5, 0, 0, 0, 0, 5)
-    elif kind == "rate":
-        processed = Wrench(2, 0, 0, 0, 0, 0)  # 50 N/s, below magnitude threshold
     else:
         raw = Wrench(float("nan"), 0, 0, 0, 0, 0)
     command = policy.update(1.01, raw, processed, RobotState(1.01, np.zeros(6), np.zeros(6)))

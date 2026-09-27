@@ -234,8 +234,18 @@ def test_unmodified_simulation_at_18_mm_s_preserves_force_stop(tmp_path):
     assert runner.run(args(tmp_path)) == 1
     summary=json.loads(next(tmp_path.glob('run_*/summary.json')).read_text())
     assert summary['termination_reason'] == 'STOP_FORCE_LIMIT'
+    assert summary['reason'] == 'processed force safety threshold exceeded'
+    assert summary['first_threshold_pose'] is not None
     # Existing low-deceleration simulator is not evidence of successful contact at 18 mm/s.
     assert summary['initial_contact'] is None
+    import csv
+    with next(tmp_path.glob('run_*/samples.csv')).open() as stream:
+        rows = list(csv.DictReader(stream))
+    contact = [row for row in rows if row['current_state'] == 'FIRST_CONTACT']
+    assert contact
+    assert all(float(row['command_speed']) == 0 and row['force_rate_guard_active'] == '0'
+               for row in contact)
+    assert all(row['current_state'] != 'CONTINUOUS_TRACKING' for row in rows)
 
 
 def test_first_contact_never_settling_times_out_without_tracking_motion():

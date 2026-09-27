@@ -155,6 +155,7 @@ DIRECTION_FIELDS = ('measurement_jump_deg', 'estimate_residual_deg', 'measuremen
                     'direction_reconfirm_count', 'direction_reconfirm_attempts', 'direction_resume_active',
                     'direction_resume_progress_m', 'direction_phase')
 EXTRA_SAMPLE_FIELDS += DIRECTION_FIELDS
+EXTRA_SAMPLE_FIELDS += ('force_rate_guard_active',)
 
 
 class ContinuousTrackingPolicy:
@@ -182,6 +183,7 @@ class ContinuousTrackingPolicy:
         self._previous_measurement = None
         self._velocity = np.zeros(2)
         self._rate = ForceRateGuard()
+        self.force_rate_guard_active = False
         self._last_time = self._started = self._lost = self._reacquire = None
         self._start_pose = None
         self._confirm_started = self._force_since = self._settle_since = None
@@ -542,6 +544,7 @@ class ContinuousTrackingPolicy:
         pose = robot.pose
         self.tracking_pose = pose.copy()
         self.v_t = self.v_n = 0.
+        self.force_rate_guard_active = False
         if self.state == State.STOP:
             return self._command(pose)
         if not np.all(np.isfinite(np.r_[now, robot.timestamp, raw.array(), processed.array(), pose, robot.tcp_speed])):
@@ -557,8 +560,11 @@ class ContinuousTrackingPolicy:
         self._last_time = now
         self.fxy = float(np.hypot(processed.fx, processed.fy))
         self.force_rate = self._rate.update(now, self.fxy)
+        # Snapshot the guard used for this sample, before any phase transition.
+        # Acquisition and stopped confirmation still run all hard F/T checks.
+        self.force_rate_guard_active = self.state == State.CONTINUOUS_TRACKING and not self._low_force_pending
         safety = force_safety_reason(raw, processed, self.p)
-        if safety is None and self.force_rate > float(self.p['force_rate_limit']):
+        if safety is None and self.force_rate_guard_active and self.force_rate > float(self.p['force_rate_limit']):
             safety = f'force rate exceeded: {self.force_rate:.3f} N/s'
         if safety:
             self.request_stop(now, pose, safety, code=TerminationReason.STOP_FORCE_LIMIT)
@@ -713,4 +719,5 @@ class ContinuousTrackingPolicy:
             self.direction_resume_progress_m, 'RECONFIRM' if self.state == State.DIRECTION_RECONFIRM else
             (self.state.value if self.state != State.CONTINUOUS_TRACKING else
              ('VERIFY_RESUME' if self._direction_resume_started is not None else ('LOW_FORCE_CONFIRM' if self._low_force_pending else 'TRACK'))))))
+        result['force_rate_guard_active'] = int(self.force_rate_guard_active)
         return result
