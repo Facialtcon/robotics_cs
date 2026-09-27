@@ -89,6 +89,7 @@ def test_direction_sign_hand_and_filter(config, sign, hand, rotation):
 
 def test_combined_velocity_is_capped(config):
     config["robot"]["max_tcp_speed"] = .001
+    config['continuous_tracking']['search_speed'] = .001  # keep this reduced-cap fixture valid
     policy = tracking(config)
     for i in range(101, 121):
         command = tick(policy, i*.01, (1.5+(i-100)*.125, 0))

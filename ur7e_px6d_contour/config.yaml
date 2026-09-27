@@ -167,7 +167,7 @@ continuous_tracking:
   normal_speed_limit: 0.0005      # m/s
   force_direction_sign: 1         # simulation inward convention; MUST CONFIRM ON SITE
   force_direction_filter_alpha: 0.8  # weight of PREVIOUS filtered XY vector
-  search_speed: 0.001             # m/s; initial P0 -> P1
+  search_speed: 0.018             # m/s; initial P0 -> P1 only, same as original search
   search_max_distance: 0.10       # m
   search_max_time_sec: 110.0
   contact_lost_threshold: 0.5     # N, below existing stable contact threshold

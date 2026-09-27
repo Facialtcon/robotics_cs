@@ -15,6 +15,7 @@ ROOT=Path(__file__).resolve().parents[1]
 @pytest.fixture
 def model(tmp_path):
     cfg=load_config(ROOT/'config.yaml');cfg['continuous_tracking']['max_runtime_sec']=12
+    cfg['continuous_tracking']['search_speed']=.001  # historical contact-memory fixture
     return PreviewRun(cfg,load_simulation_config(ROOT/'simulation/scene_continuous.yaml'),tmp_path)
 
 def test_default_is_continuous_only():

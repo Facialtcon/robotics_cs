@@ -72,6 +72,7 @@ def test_preview_replay_styles_truth_layout_and_control_independence(tmp_path,sh
     from tools.visualize_continuous_run import read_run,make_figure
     root=Path(__file__).resolve().parents[1]
     cfg=load_config(root/'config.yaml');cfg['continuous_tracking']['max_runtime_sec']=40
+    cfg['continuous_tracking']['search_speed']=.001  # historical moving-arrow fixture
     scene=load_simulation_config(root/'simulation/scene_continuous.yaml')
     if shape=='rotated_rectangle':scene.update(target_shape=shape,target_width=.08,target_height=.08,target_rotation_deg=30)
     original=deepcopy(scene)

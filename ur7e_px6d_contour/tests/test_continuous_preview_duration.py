@@ -31,6 +31,7 @@ def test_preview_cli_overrides_only_its_config_copy(tmp_path,monkeypatch,duratio
 
 def test_manual_preview_runs_past_120_with_bounded_cache_and_complete_logs(tmp_path):
     cfg=load_config(ROOT/'config.yaml');cfg['continuous_tracking']['max_runtime_sec']=None
+    cfg['continuous_tracking']['search_speed']=.001  # historical long-running triangle fixture
     m=PreviewRun(cfg,load_simulation_config(ROOT/'simulation/scene_direction_triangle.yaml'),tmp_path)
     m.start(0);m.set_speed(10,0)
     try:

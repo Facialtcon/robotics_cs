@@ -13,10 +13,23 @@ class RobotError(RuntimeError):
     pass
 
 
+# Engineering thresholds, not an RTDE noise model. Keep the original 20%
+# envelope; only its small overrun band gets two nominal 100 Hz cycles.
+CONTINUOUS_TRIP_FACTOR = 1.2
+CONTINUOUS_HARD_FACTOR = 1.5
+CONTINUOUS_DEBOUNCE_SEC = .020
+CONTINUOUS_DEBOUNCE_PACKETS = 3
+SPEED_GUARD_FIELDS = (
+    'speed_guard_phase', 'speed_guard_nominal_mps', 'speed_guard_trip_mps',
+    'speed_guard_hard_mps', 'speed_guard_state', 'speed_guard_elapsed_sec',
+    'speed_guard_count', 'speed_guard_device_timestamp',
+)
+
+
 class ContinuousSpeedLimitError(RobotError):
     """Keep the rejected read in memory; no device reads or I/O on this path."""
 
-    def __init__(self, pose, speed, limit, read_start, device_timestamp):
+    def __init__(self, pose, speed, limit, read_start, device_timestamp, diagnostics=None):
         measured = float(np.linalg.norm(speed[:3]))
         trip_limit = 1.2 * limit
         self.speed_limit_observation = {
@@ -32,11 +45,12 @@ class ContinuousSpeedLimitError(RobotError):
             'host_read_start_monotonic_sec': read_start,
             # Cached freshness check; SDK getters need not share one packet.
             'last_checked_device_timestamp_sec': device_timestamp,
+            **(diagnostics or {}),
         }
         super().__init__(
             'continuous measured speed exceeds experimental limit: '
             f'measured_xyz={measured:.9g} m/s, trip_limit={trip_limit:.9g} m/s, '
-            f'actual_vxyz={speed[:3].tolist()} m/s')
+            f'actual_vxyz={speed[:3].tolist()} m/s, guard={diagnostics or {}}')
 
 
 def check_continuous_xy(config, point):
@@ -225,6 +239,81 @@ class URRTDEController:
         self.connection_failed = False
         self.connection_diagnostics = {}
         self.control_script_stop_requested = False
+        self.continuous_phase = 'READY'
+        self._continuous_envelope = 'CONTINUOUS_TRACKING'
+        self._speed_guard_since = self._speed_guard_stamp = None
+        self._speed_guard_count = 0
+        self.speed_guard_diagnostics = {}
+
+    def set_continuous_phase(self, phase, *, stop_confirmed=False):
+        """Select execution limits; braking retains the preceding envelope.
+
+        The policy's held standstill and the controller's measured stop must
+        both agree before FIRST_CONTACT can authorize tracking motion.
+        """
+        limits = self.config.get('continuous_speed_limits')
+        if limits is None:
+            return
+        phase = str(phase)
+        if phase not in ('READY', 'TARGET_SEARCH', 'FIRST_CONTACT', 'CONTINUOUS_TRACKING',
+                         'DIRECTION_RECONFIRM', 'CONTACT_LOST', 'LOCAL_REACQUIRE', 'STOP'):
+            raise RobotError(f'unknown continuous execution phase: {phase}')
+        if phase == 'CONTINUOUS_TRACKING' and self.continuous_phase == 'FIRST_CONTACT':
+            if not (stop_confirmed and self.stop_request_accepted and self._stopped):
+                raise RobotError('FIRST_CONTACT requires measured standstill before tracking')
+        if phase in limits:
+            self._continuous_envelope = phase
+        self.continuous_phase = phase
+        self.config['continuous_boundary_margin'] = (
+            self.config['continuous_search_boundary_margin']
+            if self._continuous_envelope == 'TARGET_SEARCH'
+            else self.config['continuous_tracking_boundary_margin'])
+        # Do not reset a pending speed episode on state changes or stop requests.
+
+    def _check_continuous_speed(self, pose, speed, now):
+        limits = self.config.get('continuous_speed_limits')
+        if limits is None:
+            # Compatibility for older callers of this shared controller.
+            limit = self.config.get('continuous_speed_limit')
+            if limit and np.linalg.norm(speed[:3]) > CONTINUOUS_TRIP_FACTOR * limit:
+                raise ContinuousSpeedLimitError(pose, speed, limit, now, self._packet_stamp)
+            return
+        limit = float(limits[self._continuous_envelope])
+        measured = float(np.linalg.norm(speed[:3]))
+        trip = CONTINUOUS_TRIP_FACTOR * limit
+        hard = min(CONTINUOUS_HARD_FACTOR * limit, 1.2 * float(self.config['max_tcp_speed']))
+        fresh = self._packet_stamp is not None and self._packet_stamp != self._speed_guard_stamp
+        # Re-reading cached packets neither confirms nor clears an excursion.
+        # The host deadline still runs, even when no new packet is available.
+        elapsed = 0. if self._speed_guard_since is None else now-self._speed_guard_since
+        expired = self._speed_guard_since is not None and elapsed + 1e-12 >= CONTINUOUS_DEBOUNCE_SEC
+        if fresh:
+            self._speed_guard_stamp = self._packet_stamp
+            if measured > trip:
+                if self._speed_guard_since is None:
+                    self._speed_guard_since = now
+                self._speed_guard_count += 1
+            elif not expired:
+                self._speed_guard_since = None
+                self._speed_guard_count = 0
+        # Missing packet provenance cannot authorize a debounced overspeed.
+        severe = measured > hard or (measured > trip and self._packet_stamp is None)
+        sustained = expired or self._speed_guard_count >= CONTINUOUS_DEBOUNCE_PACKETS
+        elapsed = 0. if self._speed_guard_since is None else now-self._speed_guard_since
+        self.speed_guard_diagnostics = dict(zip(SPEED_GUARD_FIELDS, (
+            self.continuous_phase, limit, trip, hard,
+            'HARD_TRIP' if severe else ('SUSTAINED_TRIP' if sustained else
+                ('PENDING' if self._speed_guard_since is not None else 'OK')),
+            elapsed, self._speed_guard_count, self._packet_stamp)))
+        if severe or sustained:
+            error = ContinuousSpeedLimitError(pose, speed, limit, now, self._packet_stamp,
+                                              self.speed_guard_diagnostics)
+            self.motion_fault = str(error)
+            # A rejected moving observation revokes any earlier stop belief.
+            # Ensure the runner's stop attempts braking even before first speedL.
+            self._stopped = False
+            self.stop_request_accepted = False
+            raise error
 
     def connect(self, allow_start_away_from_fixed_pose: bool = False) -> None:
         self.connection_failed = False
@@ -335,9 +424,8 @@ class URRTDEController:
             check_continuous_xy(self.config, pose[:2])
             if np.linalg.norm(speed[:3]) > float(self.config["max_tcp_speed"]) * 1.20:
                 raise RobotError("measured TCP speed exceeds maximum plus tolerance")
-            if not self._return_mode and self.config.get('continuous_speed_limit') and np.linalg.norm(speed[:3]) > 1.2*self.config['continuous_speed_limit']:
-                raise ContinuousSpeedLimitError(pose, speed, self.config['continuous_speed_limit'],
-                                                observed_start, self._packet_stamp)
+            if not self._return_mode:
+                self._check_continuous_speed(pose, speed, observed_start)
             observed_end = time.monotonic()
             self.observation_timing.update(tcp_read_start=observed_start, tcp_read_end=observed_end)
             if getattr(self, 'stop_request_accepted', False):
@@ -367,6 +455,12 @@ class URRTDEController:
 
     def command_planar_velocity(self, direction_xy, speed: float, duration: float) -> None:
         self._check_motion_authorized()
+        limits = self.config.get('continuous_speed_limits')
+        if limits is not None:
+            if self.continuous_phase not in limits:
+                raise RobotError(f'new motion forbidden during {self.continuous_phase}')
+            if speed > float(limits[self.continuous_phase]) + 1e-12:
+                raise RobotError('command exceeds continuous phase speed envelope')
         self._check_connected()
         state = self.read_state()
         # A fresh read may revoke a previous standstill observation.

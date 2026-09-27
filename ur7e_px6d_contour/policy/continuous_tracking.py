@@ -587,7 +587,7 @@ class ContinuousTrackingPolicy:
                 return self._command(pose)
             else:
                 if (np.linalg.norm(pose[:2]-self._start_pose[:2])+float(self.c['search_speed'])*self.dt
-                        >= float(self.c['search_max_distance'])-float(self.c['boundary_margin'])
+                        >= float(self.c['search_max_distance'])-float(self.c.get('search_boundary_margin', self.c['boundary_margin']))
                         or now-self._started >= float(self.c['search_max_time_sec'])):
                     self.request_stop(now, pose, 'initial search budget exhausted', code=TerminationReason.STOP_SEARCH_LIMIT, event='BUDGET_STOP')
                     return self._command(pose)

@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def config():
     cfg = load_config(ROOT / 'config.yaml')
     cfg['continuous_tracking']['max_runtime_sec'] = 12
+    cfg['continuous_tracking']['search_speed'] = .001  # historical preview geometry fixture
     cfg['continuous_provenance'] = runner.git_provenance()
     return cfg
 
@@ -40,7 +41,8 @@ def rows(path):
 
 
 @pytest.mark.parametrize('fps,speed', [(10, 1), (20, 5), (5, 10)])
-def test_runner_preview_exact_closed_loop_parity(config, scene, tmp_path, fps, speed):
+def test_runner_preview_exact_closed_loop_parity(config, scene, tmp_path, fps, speed, monkeypatch):
+    monkeypatch.setattr(runner, "load_config", lambda _: deepcopy(config))
     args = argparse.Namespace(config=ROOT/'config.yaml', execute=False, duration=12,
                               scene=ROOT/'simulation/scene_continuous.yaml', output=tmp_path/'headless')
     assert runner.run(args) == 0

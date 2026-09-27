@@ -20,7 +20,12 @@ def args(tmp_path, execute=False):
 
 
 @pytest.fixture
-def offline_run(tmp_path):
+def offline_run(tmp_path, monkeypatch):
+    # Historical 1 mm/s geometry/replay fixture; current 18 mm/s safety behavior
+    # is independently tested in test_continuous_phase_speed.py.
+    cfg = load_config(ROOT / 'config.yaml')
+    cfg['continuous_tracking']['search_speed'] = .001
+    monkeypatch.setattr(runner, 'load_config', lambda _: cfg)
     assert runner.run(args(tmp_path)) == 0
     return next(tmp_path.glob("run_*"))
 
@@ -73,7 +78,10 @@ def test_control_does_not_call_plotting(tmp_path, monkeypatch):
     monkeypatch.setattr(plt, "subplots", forbidden)
     monkeypatch.setattr(plt, "plot", forbidden)
     monkeypatch.setattr(plt, "pause", forbidden)
-    assert runner.run(args(tmp_path)) == 0
+    # At 18 mm/s the unchanged low-deceleration model stops on force safety.
+    assert runner.run(args(tmp_path)) == 1
+    summary = json.loads(next(tmp_path.glob('run_*/summary.json')).read_text())
+    assert summary['termination_reason'] == 'STOP_FORCE_LIMIT'
 
 
 @pytest.fixture
@@ -84,7 +92,10 @@ def fake_real(tmp_path, monkeypatch):
     calls = []
     class Controller:
         observation_timing = {}
+        speed_guard_diagnostics = {}
         motion_fault = ''
+        def set_continuous_phase(self, phase, *, stop_confirmed=False):
+            self.phase = phase
         def enable_watchdog(self, frequency):
             calls.append('watchdog_enable')
         def kick_watchdog(self):
@@ -443,6 +454,8 @@ def test_identical_geometric_observation_stream_across_three_entry_adapters(tmp_
     clock=Clock();device_calls=[]
     class FakeRobot:
         observation_timing={};motion_fault=''
+        speed_guard_diagnostics={}
+        def set_continuous_phase(self, phase, *, stop_confirmed=False):pass
         def __init__(self,cfg):device_calls.append('fake_robot')
         def connect(self, allow_start_away_from_fixed_pose=False):
             assert allow_start_away_from_fixed_pose

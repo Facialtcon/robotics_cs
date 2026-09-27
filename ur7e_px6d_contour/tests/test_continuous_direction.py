@@ -96,7 +96,9 @@ def test_direction_pause_loss_uses_default_loss_route_and_stale_samples_stop():
 def test_synthetic_components_and_geometry_diagnostics_are_logged_separately():
     from simulation.continuous_session import SimulationSession
     from simulation.simulator import load_simulation_config
-    s=SimulationSession(load_config(ROOT/'config.yaml'),load_simulation_config(ROOT/'simulation/scene_continuous.yaml'))
+    cfg=load_config(ROOT/'config.yaml')
+    cfg['continuous_tracking']['search_speed']=.001  # historical geometric component fixture
+    s=SimulationSession(cfg,load_simulation_config(ROOT/'simulation/scene_continuous.yaml'))
     s.capture_bias()
     for _ in range(1100):
         sample=s.step();s.policy.events.clear()
@@ -141,7 +143,11 @@ def test_preview_magnitude_scales_velocity_panel_and_manual_views(tmp_path):
 
 
 @pytest.mark.parametrize('name,rotation,shift',[('circle',0,(0,0)),('square',0,(0,0)),('triangle',0,(0,0)),('square',30,(.01,.015)),('empty',0,(0,0))])
-def test_first_turn_closed_loop_geometry_and_failures(tmp_path,name,rotation,shift):
+def test_first_turn_closed_loop_geometry_and_failures(tmp_path,name,rotation,shift,monkeypatch):
+    import simulation.continuous_validation as validation
+    cfg=load_config(ROOT/'config.yaml')
+    cfg['continuous_tracking']['search_speed']=.001  # historical first-turn regression
+    monkeypatch.setattr(validation,'load_config',lambda _:cfg)
     from simulation.continuous_validation import run_direction_case
     report=run_direction_case(name,output_root=tmp_path,duration=180,rotation_deg=rotation,translation=shift)
     assert report['max_penetration_m']<=1e-9

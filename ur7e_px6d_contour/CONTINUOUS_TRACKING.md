@@ -1,8 +1,62 @@
 # 连续贴边跟踪：审查修复版
 
-新用户先看：[【分支 experiment/continuous-tracking】连续贴边：傻瓜式操作指南](BRANCH_continuous-tracking_傻瓜式操作指南.md)。
+日常唯一主指南：[从这里开始.md](从这里开始.md)，入口 `python run_project.py`。
 
-## 当前修订：下降停稳周期与扫描启动衔接
+## 当前修订：TARGET_SEARCH / FIRST_CONTACT / TRACKING 执行边界
+
+基线实际分支 `experiment/continuous-tracking`，短 SHA `f2b0ace`，修改前工作区干净。仅在原工程修改；没有连接 UR/PX6D、运动、覆盖标定、清理旧日志、commit/push/reset/stash。菜单 1～12 及其语义不变：12 原离散，15 预演，16 有限模拟，17 离线标定检查，18 连续真机（仍映射 `run_continuous_tracking.py --execute`），19/20 查看结果。直接 CLI 保留；连续 Q/Esc/Ctrl+C 原地停、不自动返回。
+
+### 阶段与限值
+
+- TARGET_SEARCH：连续 `search_speed` 从历史 0.001 改为 **0.018 m/s**，恢复原离散配置已有的搜索速度，方向仍来自保存的 P0→P1。保留 `command_acceleration=0.01 m/s²`，所以名义速度渐进达到；原 0.10 m / 110 s 搜索预算和 120 s 真机总预算不扩大。
+- FIRST_CONTACT：原接触阈值立即触发零命令和停止请求；刹停读取保留前一阶段速度范围，执行层拒绝所有新运动。原 `contact_hold_time=0.05 s`、方向确认、实测 XYZ ≤0.0001 m/s 连续 0.08 s、1 s 确认期限全部保留。切换贴边同时要求 policy 持续停稳确认、controller stop 已接受及实际停稳；成功确认当帧仍零运动。
+- CONTINUOUS_TRACKING：独立 `hypot(tangential_speed, normal_speed_limit)`，当前约 **0.001118034 m/s**，不含 search_speed。原力反馈、方向/重确认、过载减速、丢边与恢复算法不改。LOCAL_REACQUIRE 使用自己的 0.0005 m/s 上限；停止/重确认阶段沿用前一运动范围但不允许新增运动。
+
+每个运动阶段保留 1.2 × nominal 作为轻微超限门限；增加 1.5 × nominal 的立即停止门限，并同时保留原 `1.2 × robot.max_tcp_speed` 通用实际速度硬保护（当前 0.036 m/s，命令最大仍 0.030 m/s）。1.5 是独立严重超限的工程比例，不是放大原 1.2 门限，更不是 RTDE 噪声已标定的结论。
+
+轻微超限最多 **20 ms 或 3 个不同 RTDE 时间戳包**，先到者 fail-closed；20 ms 对应当前 100 Hz 两个名义周期。只在截止前取得新的低于门限包才清除；重复读取同一包既不计数也不清除；截止时即使刚恢复也终止，不能靠晚到数据重启窗口。阶段变化/stop 请求不会重置待决窗口。严重超速不等待确认。已有 RTDE 停滞/倒退/缺时间戳、host age、cycle timeout、watchdog 全部继续执行。不同 getter 仍不是原子包快照，不宣称严格同步。
+
+搜索 nominal / trip / hard 为 **18 / 21.6 / 27 mm/s**；贴边分别约 **1.118 / 1.342 / 1.677 mm/s**。异常一旦确认锁定 motion_fault，runner 在故障记录/磁盘写入前请求停止。
+
+### 边界与诊断
+
+18 mm/s 无法继续使用原 0.5 mm 搜索余量。只在搜索与首次接触刹停期间收紧执行范围：`search_margin = max(boundary_margin, v_hard*(20 ms + 1/watchdog_hz) + v_hard²/(2*stop_deceleration))`，当前 **3.7125 mm**。同一余量从搜索距离预算扣除；P0 在这个收紧范围外时仍拒绝执行。贴边/恢复保留原 0.5 mm，返回路径和参数不改。公式是待现场验证的预算，不能保证实际停车距离。
+
+新 CSV 仅追加 `speed_guard_phase / nominal_mps / trip_mps / hard_mps / state / elapsed_sec / count / device_timestamp`（各项都有 `speed_guard_` 前缀）。原 `current_state`、`command_speed / command_vx / command_vy` 是 policy 本周期输出；`tcp_vx/vy/vz` 与 `tcp_speed_mps` 是读到的 actual XYZ 速度，guard 字段对应同一次主循环状态读取，故过渡帧的 guard_phase 可以是旧阶段、current_state 是更新后的阶段。命令前二次读取若触发保护，完整拒绝观测另存 `termination.json.speed_limit_observation`，不能与上一有效状态或停止快照混用。发命令前也记录 policy command，使拒绝路径可诊断。
+
+只读核对本机 ur-rtde **1.6.5** 的类 docstring：存在 Receive `getTargetTCPSpeed()`、`getSpeedScaling()`。本次未加入它们：未测量本机调用开销及包一致性，不增加设备调用。UR target speed / speed scaling 未采集，不以 policy command 冒充；日志与后台写入架构不变，旧字段/回放继续支持。
+
+始终保留：UR 急停/保护停、RTDE/PX6D 故障、原协议/超时处理、数据新鲜度、20 Hz watchdog、30 ms cycle timeout、workspace/四角沙箱实际及预测边界、固定 Z/姿态、absolute raw F/T、processed F/T、force-rate、通用实际速度上限和人工停止。TCP、P0/P1、箱体四角、reset_pose 与原 data/run_* 复用，不重标定。
+
+### 本次离线验证与限制
+
+新增阶段速度、瞬态/持续/严重超速、新鲜包、重复包截止、接触触发、停稳门禁和边界预算测试；测试环境禁止真实 RTDE/serial 构造，设备仅替身。原几何、回放、预演长期测试显式保留其历史 **1 mm/s** 搜索配置，完整断言保留；新增默认 **18 mm/s** 仿真测试如实断言力保护停止。现有仿真减速度 0.005 m/s²，未改模型/摩擦/预处理/安全阈值，不把历史低速通过当作新速度接触成功。
+
+专项回归 **241 passed in 27.65s**（设备替身、菜单、离散速度、启动返回及本次阶段速度/日志测试），工程目录下实际命令：
+
+```bash
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MPLBACKEND=Agg MPLCONFIGDIR=/tmp/continuous-phase-mpl ../.venv312/bin/python -m pytest -q tests/test_continuous_phase_speed.py tests/test_speed_limit_diagnostics.py tests/test_continuous_execution.py tests/test_continuous_saved_calibration.py tests/test_continuous_startup_return.py tests/test_continuous_run.py tests/test_continuous_tracking.py tests/test_run_project.py tests/test_real_motion_speed_config.py
+```
+
+最终全量回归：**995 passed, 3 failed in 184.05s**。3 项失败均为下面已用 HEAD 原始代码对照复现的 μ=0.20 历史几何穿透，不能宣称全绿。本次阶段速度/停止、菜单、离散、返回、旧日志兼容测试均通过。
+
+```bash
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MPLBACKEND=Agg MPLCONFIGDIR=/tmp/continuous-phase-mpl ../.venv312/bin/python -m pytest -q
+```
+
+另实际执行 `env -u PYTHONPATH ../.venv312/bin/python run_continuous_tracking.py --check-calibration`：退出码 0，读取当前已保存的 P0/P1、四角和本机 SDK 合同，未构造设备；输出搜索 / 贴边上限 0.018 / 0.001118033989 m/s、搜索余量 0.0037125 m。`git diff --check` 通过。以下各历史章节的测试数不属于本次结果。
+
+历史缺陷对照：从 `git show f2b0ace:...` 读取原始 config、policy 和方向测试到 `/tmp`，替换仅用于测试的导入，再执行原三个几何断言（`/tmp/check_continuous_head.py`，无设备构造）。**3 failed, 14 deselected in 20.20s**：圆形、方形、旋转方形最大穿透分别为 **0.032198522884 / 0.032650524729 / 0.032761858063 mm**，与本次显式历史 1 mm/s 测试完全相同；保留原断言，不删断言、不用 xfail 掩盖，未改 μ=0.20 或模型。
+
+改动文件（均在原 `ur7e_px6d_contour/`）：
+- 运行逻辑/参数：`config.yaml`、`run_continuous_tracking.py`、`policy/continuous_tracking.py`、`robot/rtde_controller.py`。
+- 文档：`从这里开始.md`、`操作文档.md`、`BRANCH_continuous-tracking_傻瓜式操作指南.md`、`CONTINUOUS_TRACKING.md`。
+- 测试：`tests/conftest.py`、新增 `tests/test_continuous_phase_speed.py`、`tests/test_speed_limit_diagnostics.py`、`tests/test_continuous_run.py`、`tests/test_continuous_saved_calibration.py`、`tests/test_continuous_tracking.py`、`tests/test_continuous_geometry.py`、`tests/test_continuous_direction.py`、`tests/test_continuous_preview.py`、`tests/test_continuous_preview_duration.py`、`tests/test_continuous_debug_display.py`、`tests/test_continuous_friction_settings.py`。其中显示/几何测试只显式标记历史低速配置；旧离线标定测试改为比较实际已保存 P0，不再硬编码过期现场坐标。
+
+
+下一次真机仍须验证：18 mm/s 的加速与实测波动、触发后的制动尾段/峰值力、实测停稳后低速恢复、guard 误报/持续超速响应、边界实际停车余量，以及原 `speedStop` 调用在较高搜索速度下是否能满足原 30 ms 周期。停止 API、返回路径和此前 45.480 ms 下降问题本轮不重新设计；若停止调用超时仍终止，不放宽周期或 watchdog。
+
+## 历史修订：下降停稳周期与扫描启动衔接
 
 核对 `run_20260921_132757_660403`：返回已进入 `DESCEND_TO_START_SETTLE`，失败周期 45.480 ms；从周期开始到 TCP 时间戳约 3.129 ms，额外约 42.35 ms 出现在此后的处理/写日志/调度期间。现有记录不能将这部分耗时全部归因于磁盘，但同步双 CSV 写入位于该路径，已用阻塞写入替身复现其占用控制预算的问题。此前 `13:27` 的连接快照确实记录 protective_stopped=true；这不等于 `13:28` 的下降超时也是同一种连接故障。
 
@@ -20,7 +74,7 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 
 `git diff --check` 通过；保存标定文件、连续策略源码、原离散入口及共享日志类无差异。保留此前本地修改及实验数据，未 commit/push。
 
-## 当前修订：现场总线报警相关的退出看门狗生命周期
+## 历史修订：现场总线报警相关的退出看门狗生命周期
 
 最新两次 `13:13` 日志在 RTDEControlInterface 构造期间报告控制脚本 5 秒启动超时，尚未进入返回逻辑；用户随后报告示教器提示“检查现场总线连接”，尚未提供精确报警号。UR 官方 [C207 说明](https://www.universal-robots.com/manuals/EN/HTML/SW10_7/Content/prod-err-codes/topics/CODE_207.html) 明确列出 RTDE 看门狗；不能仅凭终端超时判定具体保护原因，也不能断言任何现场总线报警都来自本程序。
 
@@ -30,7 +84,7 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 
 验证使用 SDK/时钟/状态替身与原有有限仿真，覆盖正常收尾先结束脚本再等待、移动/不可读状态保留保护、脚本结束失败仍关闭接口、幂等、原离散关闭行为，以及连接失败快照和原始原因保留。最终十文件回归 **163 passed in 18.18s**：`tests/test_continuous_connection_cleanup.py tests/test_continuous_run.py tests/test_continuous_startup_return.py tests/test_continuous_execution.py tests/test_controller.py tests/test_app_termination.py tests/test_safe_return_termination.py tests/test_safe_return.py tests/test_real_policy_parity.py tests/test_continuous_revision.py`，沿用前述 pytest 环境前缀。另补充/强化终止 I/O 前结束脚本的两项专项测试，**2 passed / 65 deselected in 0.50s**（与上一批重叠一项）。包含角速度非零、设备包停滞及诊断 getter 不可用的拒绝/保留原异常测试。没有连接硬件，没有复位当前报警；现场根因及恢复效果仍需与示教器具体报警核对。未 commit/push。
 
-## 当前修订：分段返回的非阻塞刹停与连续停稳确认
+## 历史修订：分段返回的非阻塞刹停与连续停稳确认
 
 `run_20260921_130905_900053` 最后一个 `VERTICAL_RETREAT` 周期到下一段 `MOVE_ABOVE_START_PRECHECK` 相隔约 40.87 ms；原分段执行器调用阻塞 `stopL`，连续适配器因此触发原 30 ms 周期间隔限制。先用 40 ms 阻塞停机替身复现同一错误，并复现未停稳时直接尝试下一段的问题。
 
@@ -40,7 +94,7 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 
 实际测试：十文件回归 **163 passed in 15.55s**：`tests/test_continuous_startup_return.py tests/test_continuous_execution.py tests/test_continuous_run.py tests/test_safe_return.py tests/test_safe_return_termination.py tests/test_controller.py tests/test_real_policy_parity.py tests/test_app_termination.py tests/test_continuous_saved_calibration.py tests/test_continuous_revision.py`；随后新增停稳确认中断重置测试单独 **1 passed / 39 deselected in 0.53s**。均使用离线替身或原有有限仿真，未调用设备构造连接；`git diff --check` 通过。未做真机验证或全量/长期几何测试，未 commit/push。
 
-## 当前修订：启动返回零偏采集的有限超时恢复
+## 历史修订：启动返回零偏采集的有限超时恢复
 
 针对 `run_20260921_130152_573202` 在 `STARTUP_RETURN_BIAS` 的 PX6D 50 ms 超时，新增 `PX6DTimeout`（继承原 `PX6DError`），仅在连续入口返回前已确认停稳的临时零偏窗口捕获该类型。再次请求停止并检查新鲜 TCP、位置/姿态和速度后，清除残留缓存并用现有版本查询响应重新同步；不重连串口、不触发硬件清零。丢弃恢复后的首帧，清空此前零偏样本及滤波状态，重新取得全部有效样本后才允许返回。
 
@@ -50,7 +104,7 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 
 本次为软件恢复行为修复，所有新增串口/机器人交互均使用替身验证；未连接硬件，未验证现场 USB 链路稳定性，未运行全量测试或长期几何验收。未 commit/push，旧实验日志保留。
 
-## 当前修订：连续入口复用原工程启动安全返回
+## 历史修订：连续入口复用原工程启动安全返回
 
 后续输入修复：启动返回确认原先位于 `OperatorKeyboard` 的 cbreak 上下文内，`tty.setcbreak()` 关闭 ECHO，导致输入没有可见回显。新增 `read_line()` 在确认期间临时启用行输入/回显，支持退格和回车；正常返回、Ctrl+C、EOF 后均恢复逐键监听，外层退出恢复原终端。连续入口使用该方法，原离散调用不变。真实伪终端子进程测试验证输入在回车前可见、退格、取消、EOF、后续无需回车的 Q 以及最终终端恢复；不是硬件测试。相关四文件回归 **61 passed in 11.56s**：`tests/test_operator_input.py tests/test_continuous_startup_return.py tests/test_continuous_run.py tests/test_app_termination.py`，使用相同 pytest 环境前缀；`git diff --check` 通过。未连接硬件。
 
@@ -66,7 +120,7 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 
 未连接机器人或传感器，未验证真机路径、碰撞余量或机械停稳效果；未改变旧标定、离散策略、连续控制公式和配置数值。本节替代下文历史版本中“连续入口不自动返回 P0”的说明。
 
-## 当前修订：连续入口复用已有扫描点和沙箱标定
+## 历史修订：连续入口复用已有扫描点和沙箱标定
 
 按本轮用户明确要求，连续真机入口直接沿用旧工程的 `scan_calibration.yaml` 和 `workspace/config/workspace_calibration.yaml`，不再要求默认为空的 `site_verification` 作为第二份启动记录。以下旧章节关于“缺省记录为空即拒绝连接”的描述为历史行为，以本节及操作指南为准。没有生成虚构核对人/时间/通过标记；显式提供的额外记录仍校验完整性和配置摘要，实验性恢复仍需独立记录、默认关闭。
 
@@ -84,7 +138,7 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 
 这些是文件校验、隔离及设备替身测试；本轮未运行真机或全量测试，也未重做长期闭环几何验收。此前 μ=0.20 的几何穿透问题未在本次修改中处理。未连接硬件、未 commit/push/reset、未改写旧标定或删除实验数据。
 
-## 当前修订：fix5 后统一 Debug 样式、图例和真实切向对照
+## 历史修订：fix5 后统一 Debug 样式、图例和真实切向对照
 
 起点为 `experiment/continuous-tracking`、HEAD `c6f8fc7`（fix5），工作区干净，与该基准无后续差异。生产修改仅 `simulation/continuous_view.py`、`simulation/continuous_preview.py`、`tools/visualize_continuous_run.py`；控制策略、方向估计、传感器/摩擦模型、仿真及真机配置未变。
 
@@ -102,7 +156,7 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 
 没有连接硬件或实机绘图，未手动点验真实桌面；检查使用离屏 GUI 回调、截图、有限仿真和设备替身。未 commit/push/reset，没有删除或覆盖旧实验数据。
 
-## 当前修订：蓝色只显示法向反力
+## 历史修订：蓝色只显示法向反力
 
 本轮从 `experiment/continuous-tracking`、HEAD `51f855f`、干净工作区开始。生产修改仅涉及 `simulation/continuous_view.py`、`simulation/continuous_preview.py` 和 `tools/visualize_continuous_run.py`；模型、策略、传感器、配置和摩擦参数均未修改。
 
@@ -117,7 +171,7 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 本轮未重跑全量及 180 秒几何验收；前轮 μ=0.20 的三项几何失败仍未修复，截图不能作为几何验收通过的证据。未点验真实桌面或连接真机，未 commit/push；离屏 GUI 回调与闭环演示不等价于实机验证。
 
 
-## 当前修订：表面摩擦图形设置及默认 μ=0.20
+## 历史修订：表面摩擦图形设置及默认 μ=0.20
 
 在当前 experiment/continuous-tracking 工作区保留前轮未提交修改。本轮生产改动仅 `simulation/continuous_preview.py` 与 `simulation/scene_continuous.yaml`：连续场景独立覆盖表面 friction_coefficient=0.20，公共 `simulation/simulation_config.yaml`、真实配置和控制策略没有修改。新建默认预演及无窗口入口读取同一场景；显式用户场景尊重其 μ，原三角形复现场景继续为 0.03。
 
@@ -141,7 +195,7 @@ MPLCONFIGDIR=/tmp/continuous-mpl PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../.venv312/bi
 
 未连接真机、未手动点验真实桌面；图像和 GUI 回调是离屏检查，μ 不是实机标定值。未 commit、push、reset 或删除实验数据。
 
-## 当前修订：预演默认手动停止及底部排版
+## 历史修订：预演默认手动停止及底部排版
 
 保留上一轮双力演示的未提交修改。`--preview` 在深复制的本次仿真配置中将 `continuous_tracking.max_runtime_sec` 设为 **None**，配置快照为 YAML **null**。共享策略允许 None 且只跳过总运行时限比较；原文件 `config.yaml` 的 120 秒和所有控制/保护参数不变。没有增加绕圈完成判定；正常跟踪持续到用户停止或保护触发，不以“过圈”作为退出条件。
 
@@ -159,7 +213,7 @@ Q / Esc（包括路径框有焦点时）、Stop、关闭窗口和 Ctrl+C 都按�
 
 本次没有真机连接或真实桌面手动点验；离屏截图/回调及合成闭环不等价于设备物理验证。没有 commit、push、reset 或删除实验数据。
 
-## 当前修订：18ef729 fix3 之后的简洁双力演示
+## 历史修订：18ef729 fix3 之后的简洁双力演示
 
 本轮从 `experiment/continuous-tracking`、HEAD `18ef729`、干净工作区开始。控制策略、配置阈值、方向重确认、低力暂停、恢复开关、speedL 及原离散策略未改；共同传感器只追加诊断字段，旧 raw/processed 和随机样本保持不变。以下旧版方向修复的可视化说明是历史记录，当前界面以本节及分支傻瓜式指南为准。
 
@@ -185,7 +239,7 @@ Q / Esc（包括路径框有焦点时）、Stop、关闭窗口和 Ctrl+C 都按�
 
 未连接真实 UR7e/PX6D，没有执行真机 CLI、commit、push、reset 或删除数据。实际桌面交互、真实动态驱动力和真机物理行为未经验证；自动 GUI 回调、离屏截图与设备替身不等价于现场验证。
 
-## 当前修订：403e9e9 fix2 之后的方向重确认
+## 历史修订：403e9e9 fix2 之后的方向重确认
 
 本轮开始于 `experiment/continuous-tracking`、HEAD `403e9e9`，工作区干净。原三角形 run 为 `simulation_outputs/continuous_preview/run_20260920_235436_498310/`；读取 config_snapshot、samples 和事件后，用同一场景/seed 精确复现了 102.02 s 的停止位置。
 
@@ -328,7 +382,7 @@ O 来自实测停稳位置；历史可信接触记录包括位置、时间、nor
 
 ## 新参数
 
-以下新增实验数值全部 **MUST CONFIRM ON SITE**。原 F_ref=1.5 N、Kf=0.0005 (m/s)/N、切向 0.001 m/s、法向上限 0.0005 m/s、搜索 0.001 m/s、恢复 0.0005 m/s 及硬安全阈值均未提高。
+以下新增实验数值全部 **MUST CONFIRM ON SITE**。原 F_ref=1.5 N、Kf=0.0005 (m/s)/N、切向 0.001 m/s、法向上限 0.0005 m/s、搜索历史值 0.001 m/s（当前初始搜索为 0.018 m/s）、恢复 0.0005 m/s 及原硬安全阈值见当前修订；本段其余为历史记录。
 
 | 参数 | 默认值/单位 | 作用与约束 |
 |---|---|---|

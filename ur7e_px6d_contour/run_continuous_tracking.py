@@ -20,9 +20,11 @@ from config.loader import load_config, runtime_robot_config
 from experiment_logging.data_logger import ExperimentLogger
 from experiment_logging.continuous_writer import ContinuousLogWriter
 from experiment_logging.termination import TerminationReason, TerminationRecorder
-from policy.continuous_tracking import ContinuousTrackingPolicy, EXTRA_SAMPLE_FIELDS, State
+from policy.continuous_tracking import ContinuousTrackingPolicy, EXTRA_SAMPLE_FIELDS, State, validate_config
 from robot.rtde_controller import (URRTDEController, RobotError, validate_execution_configuration,
-                                   check_continuous_xy, _orientation_distance)
+                                   check_continuous_xy, _orientation_distance, SPEED_GUARD_FIELDS,
+                                   CONTINUOUS_TRIP_FACTOR, CONTINUOUS_HARD_FACTOR, CONTINUOUS_DEBOUNCE_SEC,
+                                   CONTINUOUS_DEBOUNCE_PACKETS)
 from robot.tcp_identity import tcp_offsets_match
 from safety.force_guard import force_safety_reason
 from safety.safe_return import SafeReturnExecutor, validate_return_configuration
@@ -44,7 +46,8 @@ def workspace_calibration_path(config, config_path):
 
 
 def site_configuration_digest(config, config_path=ROOT / "config.yaml"):
-    c = {k:v for k,v in config['continuous_tracking'].items() if k != 'site_verification'}
+    c = {k:v for k,v in config['continuous_tracking'].items()
+         if k not in ('site_verification', 'search_boundary_margin')}  # derived execution clearance
     payload = dict(tcp=config['tcp'], preprocessing=config['preprocessing'], continuous=c,
                    robot=config['robot'], workspace=config['workspace'], policy=config['policy'],
                    safe_return=config['safe_return'],
@@ -305,6 +308,7 @@ def prepare_real(config, config_path):
     if budget is None or isinstance(budget, bool) or not np.isfinite(float(budget)) or float(budget) <= 0:
         raise RobotError('real continuous_tracking.max_runtime_sec must be finite and positive')
     validate_execution_configuration(config)
+    validate_config(config)
     c = config['continuous_tracking']
     scan_path = resolve_calibration_path(config_path, config['calibration']['file'])
     sandbox_path = workspace_calibration_path(config, config_path)
@@ -367,11 +371,26 @@ def prepare_real(config, config_path):
         if not np.isfinite([low, high]).all() or high-low <= 2*margin:
             raise RobotError('invalid continuous site XY bounds')
     watchdog_contract = URRTDEController.verified_watchdog_contract()
-    max_command = max(float(c['search_speed']), float(c['reacquire_speed']),
-                      np.hypot(float(c['tangential_speed']), float(c['normal_speed_limit'])))
-    required_margin = max_command / float(c['watchdog_frequency_hz']) + max_command**2 / (2*float(config['robot']['stop_deceleration']))
+    speed_limits = dict(TARGET_SEARCH=float(c['search_speed']),
+                        CONTINUOUS_TRACKING=float(np.hypot(c['tangential_speed'], c['normal_speed_limit'])),
+                        LOCAL_REACQUIRE=float(c['reacquire_speed']))
+    deceleration = float(config['robot']['stop_deceleration'])
+    if not np.isfinite(deceleration) or deceleration <= 0:
+        raise RobotError('stop_deceleration must be finite and positive')
+    def stopping_margin(nominal):
+        hard = min(CONTINUOUS_HARD_FACTOR * nominal, 1.2 * float(config['robot']['max_tcp_speed']))
+        return hard * (CONTINUOUS_DEBOUNCE_SEC + 1/float(c['watchdog_frequency_hz'])) + hard**2/(2*deceleration)
+    max_tracking = max(speed_limits['CONTINUOUS_TRACKING'], speed_limits['LOCAL_REACQUIRE'])
+    required_margin = stopping_margin(max_tracking)
     if margin < required_margin or 1/float(c['watchdog_frequency_hz']) <= float(c['cycle_timeout_sec']):
         raise RobotError('stop margin/watchdog deadline incompatible with execution budgets')
+    # Search alone needs more clearance. Include the entire allowed transient
+    # band, its finite confirmation delay, watchdog interval and ideal braking.
+    # This is an engineering budget to validate on site, not a stopping guarantee.
+    search_margin = max(margin, stopping_margin(speed_limits['TARGET_SEARCH']))
+    if search_margin >= float(c['search_max_distance']):
+        raise RobotError('search stopping margin consumes search distance budget')
+    c['search_boundary_margin'] = search_margin  # runtime snapshot only; saved calibration is unchanged
     config['continuous_sdk_contract'] = watchdog_contract
     config['continuous_loaded_configuration_sha256'] = digest
     config['policy']['search_direction_xy'] = list(calibration['scan_direction_xy'])
@@ -379,13 +398,17 @@ def prepare_real(config, config_path):
     robot_config.update(fixed_z=calibration['fixed_z'], fixed_orientation=calibration['fixed_orientation'],
                         continuous_require_watchdog=True, continuous_sample_age_sec=float(c['max_observation_age_sec']),
                         continuous_settle_speed_mps=float(c['settle_speed_mps']), continuous_xy_limits=dict(bounds),
-                        continuous_xy_polygon=polygon.tolist(), continuous_speed_limit=max_command,
+                        continuous_xy_polygon=polygon.tolist(), continuous_speed_limits=speed_limits,
+                        continuous_tracking_boundary_margin=margin, continuous_search_boundary_margin=search_margin,
                         continuous_boundary_margin=margin)
-    check_continuous_xy(robot_config, calibration['start_tcp_pose'][:2])
+    check_continuous_xy({**robot_config, 'continuous_boundary_margin': search_margin}, calibration['start_tcp_pose'][:2])
     config['continuous_calibration'] = calibration
     config['continuous_workspace_calibration'] = sandbox
     config['continuous_calibration_sources'] = dict(scan=str(scan_path.resolve()), workspace=str(sandbox_path.resolve()))
-    config['continuous_execution_envelope'] = dict(raw_xy_polygon=polygon.tolist(), xy_limits=dict(bounds), margin_m=margin)
+    config['continuous_execution_envelope'] = dict(raw_xy_polygon=polygon.tolist(), xy_limits=dict(bounds), margin_m=margin,
+        search_margin_m=search_margin, nominal_speed_limits_mps=speed_limits,
+        trip_factor=CONTINUOUS_TRIP_FACTOR, hard_factor=CONTINUOUS_HARD_FACTOR,
+        debounce_sec=CONTINUOUS_DEBOUNCE_SEC, debounce_packets=CONTINUOUS_DEBOUNCE_PACKETS)
     return robot_config, np.asarray(calibration['start_tcp_pose'])
 
 
@@ -470,7 +493,7 @@ def run(args):
         output = args.output or resolve_calibration_path(args.config, config["logging"]["output_root"])
         # Existing optional workspace exporter renders on close and assumes
         # real Base coordinates; use only our explicit offline replay here.
-        logger = ExperimentLogger(output, config, extra_sample_fields=EXTRA_SAMPLE_FIELDS + TIMING_FIELDS + SIMULATION_SAMPLE_FIELDS,
+        logger = ExperimentLogger(output, config, extra_sample_fields=EXTRA_SAMPLE_FIELDS + TIMING_FIELDS + SIMULATION_SAMPLE_FIELDS + SPEED_GUARD_FIELDS,
                                   workspace_logging=False)
         logger.termination = termination.bind(logger.run_dir)
         if args.execute:
@@ -562,6 +585,7 @@ def run(args):
                     # acquisition intervals are kept; this is not hard sync.
                     tcp_start = time.monotonic()
                     robot = controller.read_state()
+                    speed_diagnostics = dict(controller.speed_guard_diagnostics)
                     tcp_end = time.monotonic()
                     now = tcp_end
                     validate_cycle_timing(policy.c, cycle_start, now, serial_start, previous_cycle_start)
@@ -584,6 +608,8 @@ def run(args):
                     processed = preprocessor.process(raw)
                     termination.observe(processed=processed, timestamp=now, phase="POLICY_UPDATE")
                     command = policy.update(now, raw, processed, robot)
+                    termination.observe(command=command, phase='COMMAND_EXECUTION')
+                    controller.set_continuous_phase(policy.state.value, stop_confirmed=policy.stop_confirmed)
                 if args.execute:
                     # Device freshness and bounded writer health are both required.
                     logger.check_health()
@@ -611,6 +637,7 @@ def run(args):
                 # Real runs enqueue snapshots; the disk worker never calls devices.
                 logger.log_sample(now, raw, processed, robot, command, policy.contact_direction,
                                   policy.tangent, extra={**policy.telemetry(command), **timing,
+                                      **(speed_diagnostics if args.execute else {}),
                                       **({'sim_components_available': 0, 'physical_force_available': 0} if args.execute else sample.simulation_telemetry)})
                 while policy.events:
                     logger.log_waypoint(policy.events[0])

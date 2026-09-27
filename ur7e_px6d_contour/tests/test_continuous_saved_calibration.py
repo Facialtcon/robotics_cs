@@ -77,7 +77,8 @@ def test_read_only_cli_never_constructs_devices(saved,monkeypatch,capsys):
     assert runner.main()==0
     output=capsys.readouterr().out
     assert str(scan) in output and str(sandbox) in output
-    assert '0.6211867726148192' in output and 'no device connection' in output
+    assert str(load_scan_calibration(scan)['start_tcp_pose'][0]) in output
+    assert 'no device connection' in output
 
 
 def test_rotated_raw_corners_not_only_axis_aligned_box():

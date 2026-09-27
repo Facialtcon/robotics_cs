@@ -4,6 +4,19 @@ import pytest
 from simulation.continuous_validation import run_case
 
 
+@pytest.fixture(autouse=True)
+def historical_search_speed(monkeypatch):
+    # Keep the original geometry/lag regression at its historical 1 mm/s.
+    # New default 18 mm/s is covered separately, including its force stop.
+    import simulation.continuous_validation as module
+    original = module.load_config
+    def load(path):
+        cfg = original(path)
+        cfg['continuous_tracking']['search_speed'] = .001
+        return cfg
+    monkeypatch.setattr(module, 'load_config', load)
+
+
 @pytest.mark.parametrize('scene',['track_straight','track_circle'])
 def test_contact_tracking_from_search(scene):
     report, trajectory, _=run_case(scene)

@@ -16,9 +16,12 @@ TRIP_LIMIT = 1.2 * BASE_LIMIT
 
 def fault_observation():
     device = controller()
-    device.config['continuous_speed_limit'] = BASE_LIMIT
+    device.config.update(continuous_speed_limits=dict(TARGET_SEARCH=.018,
+        CONTINUOUS_TRACKING=BASE_LIMIT, LOCAL_REACQUIRE=.0005),
+        continuous_search_boundary_margin=.004, continuous_tracking_boundary_margin=.0005)
+    device.set_continuous_phase('CONTINUOUS_TRACKING')
     pose = [.01, .02, 0, 0, 0, 0]
-    speed = [0, -.001, .001, 0, 0, 0]
+    speed = [0, -.002, .001, 0, 0, 0]  # severe tracking overrun: immediate stop
     reads = []
     device.receive.getActualTCPPose = lambda: (reads.append('pose') or pose)
     device.receive.getActualTCPSpeed = lambda: (reads.append('speed') or speed)
@@ -34,7 +37,9 @@ def test_fault_captures_rejected_read_before_stop_can_replace_it():
     observation = error.speed_limit_observation
     assert observation['tcp_pose'] == pose
     assert observation['tcp_speed'] == speed
-    assert observation['measured_xyz_speed_mps'] == pytest.approx(np.sqrt(2) * .001)
+    assert observation['measured_xyz_speed_mps'] == pytest.approx(np.sqrt(5) * .001)
+    assert observation['speed_guard_state'] == 'HARD_TRIP'
+    assert observation['speed_guard_phase'] == 'CONTINUOUS_TRACKING'
     assert observation['configured_speed_limit_mps'] == BASE_LIMIT
     assert observation['trip_limit_mps'] == TRIP_LIMIT
     assert observation['tolerance_factor'] == 1.2
@@ -53,7 +58,7 @@ def test_fault_captures_rejected_read_before_stop_can_replace_it():
     (TRIP_LIMIT, False),
     (np.nextafter(TRIP_LIMIT, np.inf), True),
 ])
-def test_existing_strict_speed_boundary_is_unchanged(value, rejected):
+def test_legacy_unphased_controller_callers_keep_strict_boundary(value, rejected):
     device = controller()
     device.config['continuous_speed_limit'] = BASE_LIMIT
     device.receive.getActualTCPSpeed = lambda: [0, 0, value, 0, 0, 0]
