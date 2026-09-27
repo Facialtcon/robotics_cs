@@ -1,0 +1,94 @@
+# Base configuration for the independent 2D algorithm simulator.
+scene_name: axis_aligned_rectangle
+container:
+  x_min: -0.18
+  x_max: 0.18
+  y_min: -0.13
+  y_max: 0.13
+
+target_shape: rectangle
+target_center: [0.0, 0.0]
+target_width: 0.12
+target_height: 0.08
+target_rotation_deg: 0.0
+target_radius: 0.055
+
+# Same two-point format intended for later real scan-direction calibration.
+calibration_point_0: [-0.14, -0.02]
+calibration_point_1: [-0.10, -0.02]
+start_point: [-0.14, -0.02]
+
+simulation:
+  dt: 0.02
+  max_steps_headless: 12000
+
+force_model:
+  random_seed: 7
+  granular_drag_force: 0.03
+  noise_std: 0.004
+  contact_stiffness: 1800.0
+  probe_tip_radius: 0.001  # compliant 1 mm sensing envelope; TCP is never snapped/clipped
+  friction_coefficient: 0.03
+
+preprocessing:
+  filter_alpha: 0.15
+  gravity_wrench_sensor: [0, 0, 0, 0, 0, 0]
+  coordinate_transform:
+    rotation_sensor_to_base:
+      - [1, 0, 0]
+      - [0, 1, 0]
+      - [0, 0, 1]
+    sensor_origin_in_base_m: [0, 0, 0]
+  granular_baseline_output: [0, 0, 0, 0, 0, 0]
+
+policy:
+  control_rate_hz: 50.0
+  search_direction_xy: [1, 0]  # overwritten from calibration_point_0 -> point_1
+  contact_threshold: 0.65
+  contact_hold_time: 0.04
+  safety_force_threshold: 15.0
+  safety_torque_threshold: 2.0
+  absolute_raw_force_threshold: 20.0
+  absolute_raw_torque_threshold: 5.0
+  search_speed: 0.030
+  probe_speed: 0.020
+  tangent_speed: 0.030
+  retract_speed: 0.030
+  retract_distance: 0.004
+  tangent_step: 0.008
+  max_probe_distance: 0.012
+  max_search_distance: 0.20
+  position_tolerance: 0.00035
+  follow_hand: CLOCKWISE
+  minimum_boundary_point_spacing: 0.001
+  boundary_recovery_enabled: true
+  initialization_clearance: 0.012
+  initialization_lateral_offset: 0.003
+  initialization_probe_distance: 0.024
+  initialization_max_retries: 3
+  initialization_timeout_sec: 120.0
+  local_fit_window: 3
+  local_fit_max_residual: 0.0006
+  recovery_sector_extents_deg: [20, 50, 90, 130, 170]
+  recovery_angular_resolution_deg: 10
+  confirmation_contact_count: 3
+  recovery_ray_length: 0.022
+  recovery_probe_speed: 0.020
+  confirm_step: 0.006
+  force_rate_limit: 100.0
+  loop_closure_enabled: true
+  loop_closure_distance: 0.012
+  loop_closure_tangent_tolerance_deg: 45.0
+  loop_closure_min_boundary_points: 24
+  loop_closure_min_path_length: 0.25
+  max_boundary_points: 10000
+  max_runtime_sec: 600.0
+
+visualization:
+  interval_ms: 20
+  vector_display_length: 0.018
+  force_arrow_scale_m_per_n: 0.010
+  trail_max_points: 50000
+  save_animation: false
+  animation_fps: 30
+  animation_stride: 2

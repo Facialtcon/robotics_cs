@@ -8,6 +8,10 @@
 !/ur7e_px6d_contour/
 !/ur7e_px6d_contour/**
 
+# clean 工程的源码、配置和标定纳入 Git；实验数据由其 .gitignore 排除
+!/ur7e_px6d_contour_clean/
+!/ur7e_px6d_contour_clean/**
+
 # contour 里面常见的自动生成文件不要管
 build/
 install/
