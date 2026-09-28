@@ -18,7 +18,7 @@ from experiment_logging.termination import TerminationReason, TerminationRecorde
 from policy.continuous_tracking import ContinuousTrackingPolicy, EXTRA_SAMPLE_FIELDS, State
 from robot.rtde_controller import URRTDEController, RobotError, SearchLimitReached, SPEED_GUARD_FIELDS, check_continuous_xy
 from sensor.force_preprocess import WrenchPreprocessor
-from safety.force_guard import force_safety_reason
+from safety.force_guard import continuous_force_reason, raw_safety_reason
 from sensor.px6d_reader import PX6DReader
 from simulation.continuous_session import SIMULATION_SAMPLE_FIELDS
 
@@ -27,23 +27,29 @@ TIMING_FIELDS = ('serial_read_start', 'serial_read_end', 'tcp_read_start', 'tcp_
                  'rtde_device_timestamp', 'rtde_packet_stagnation_sec', 'wrench_host_age_sec',
                  'tcp_host_age_sec', 'command_send_time', 'command_return_time', 'timing_source',
                  'cycle_start_time', 'loop_start_interval_sec', 'runtime_stop_state',
-                 'actual_xyz_speed_mps', 'stop_api_anomaly')
+                 'actual_xyz_speed_mps', 'stop_api_anomaly', 'software_warnings')
 
 
 from app.configuration import prepare_real, calibration_summary, site_configuration_digest
 from app.scan_startup import startup_scan, capture_stationary_bias
 from experiment_logging.paths import git_provenance
 
-def validate_cycle_timing(c, start, now, oldest_observation, previous_start=None):
+def validate_cycle_timing(c, start, now, oldest_observation, previous_start=None, *, diagnostics=None):
     values = [start, now, oldest_observation] + ([] if previous_start is None else [previous_start])
-    if not np.all(np.isfinite(values)) or now < start or oldest_observation > now:
+    if not np.all(np.isfinite(values)):
         raise RobotError('invalid host observation time')
+    def report(key, message):
+        if diagnostics is None:
+            raise RobotError(message)
+        diagnostics[key] = f'WARNING: {message}'
+    if now < start or oldest_observation > now:
+        report('host_clock', 'invalid host observation time')
     if previous_start is not None and not 0 < start-previous_start <= float(c['max_sample_gap_sec']):
-        raise RobotError('control cycle gap exceeded')
+        report('sample_gap', f'control cycle gap {start-previous_start:g} s')
     if now-start > float(c['cycle_timeout_sec']):
-        raise RobotError(f'control cycle timeout: {now-start:.6f} s (including device/log latency)')
+        report('cycle_timing', f'control cycle {now-start:.6f} s (including device/log latency)')
     if now-oldest_observation > float(c['max_observation_age_sec']):
-        raise RobotError('stale host observation; no new motion permitted')
+        report('observation_age', f'host observation age {now-oldest_observation:g} s')
 
 
 
@@ -88,6 +94,10 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
     previous_cycle_start = None
     last_wrench_observed = None
     timing = dict.fromkeys(TIMING_FIELDS, '')
+    diagnostics = {}
+    def software_warnings():
+        return dict(runtime=dict(diagnostics), controller=dict(getattr(controller, 'diagnostics', {})),
+                    policy=dict(getattr(policy, 'diagnostics', {})), logging=getattr(logger, 'diagnostics', {}))
     try:
         config = deepcopy(load_config(args.config))
         config['continuous_provenance'] = git_provenance()
@@ -141,10 +151,10 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                                   workspace_logging=False)
         logger.termination = termination.bind(logger.run_dir)
         if args.execute:
-            # Disk work stays off the device thread, with bounded snapshots and
-            # explicit failure/backlog checks before every healthy-cycle kick.
+            # Disk work stays off the device thread. Backlog/write diagnostics
+            # cannot end motion; the bounded queue records any dropped samples.
             logger = ContinuousLogWriter(logger, max_pending_sec=float(
-                config['continuous_tracking']['confirmation_timeout_sec']))
+                config['continuous_tracking']['confirmation_timeout_sec']), diagnostic_only=True)
         termination.observe(policy=policy, processed_force_frame="Base")
         print(f"Continuous run: {logger.run_dir}", flush=True)
         if args.execute:
@@ -164,7 +174,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             elif baseline.get("capture_on_start", True):
                 capture_stationary_bias(config, reader, preprocessor, controller,
                     baseline['sample_count'], poll=keyboard.poll, logger=logger)
-        if args.execute and not startup_return_done:
+        if args.execute and not startup_return_done and controller.config.get('continuous_require_watchdog'):
             controller.enable_watchdog(float(policy.c['watchdog_frequency_hz']))
         with OperatorKeyboard() as keyboard:
             while policy.state != State.STOP or (args.execute and controller.stop_state != 'STOPPED'):
@@ -179,9 +189,13 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 termination.observe(phase="SENSOR_READ")
                 if args.execute:
                     logger.check_health()
-                    validate_cycle_timing(policy.c, cycle_start, time.monotonic(), cycle_start, previous_cycle_start)
+                    validate_cycle_timing(policy.c, cycle_start, time.monotonic(), cycle_start, previous_cycle_start, diagnostics=diagnostics)
                     serial_start = time.monotonic()
                     raw = reader.read_wrench()
+                    termination.observe(raw=raw)
+                    raw_error = raw_safety_reason(raw, config['policy'])
+                    if raw_error:
+                        raise RobotError(raw_error)
                     serial_end = time.monotonic()
                     # Read TCP AFTER potentially blocking serial I/O. Both host
                     # acquisition intervals are kept; this is not hard sync.
@@ -191,7 +205,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     speed_diagnostics = dict(controller.speed_guard_diagnostics)
                     tcp_end = time.monotonic()
                     now = tcp_end
-                    validate_cycle_timing(policy.c, cycle_start, now, serial_start, previous_cycle_start)
+                    validate_cycle_timing(policy.c, cycle_start, now, serial_start, previous_cycle_start, diagnostics=diagnostics)
                     timing.update(serial_read_start=serial_start, serial_read_end=serial_end,
                                   tcp_read_start=tcp_start, tcp_read_end=tcp_end,
                                   wrench_host_age_sec=now-serial_start, tcp_host_age_sec=now-robot.timestamp,
@@ -215,7 +229,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     if policy.state == State.STOP:
                         if not np.isfinite(np.r_[raw.array(), processed.array()]).all():
                             raise RobotError('nonfinite stopping wrench')
-                        force_error = force_safety_reason(raw, processed, config['policy'])
+                        force_error = continuous_force_reason(raw, processed, config['policy'], diagnostics)
                         if force_error:
                             raise RobotError(force_error)
                     command = policy.update(now, raw, processed, robot,
@@ -233,16 +247,15 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     termination.observe(command=command, phase='COMMAND_EXECUTION')
                     controller.set_continuous_phase(policy.state.value, stop_confirmed=policy.stop_confirmed)
                 if args.execute:
-                    # Device freshness and bounded writer health are both required.
+                    # Keep timing and writer observations as diagnostics.
                     logger.check_health()
-                    validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start)
-                    # DIRECTION_RECONFIRM is nonterminal: keep the watchdog
-                    # armed while issuing stop and collecting fresh feedback.
-                    if controller.watchdog_active:
+                    validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start, diagnostics=diagnostics)
+                    # Only an explicitly enabled watchdog participates here.
+                    if controller.config.get('continuous_require_watchdog') and controller.watchdog_active:
                         if controller._watchdog_last_kick is not None:
                             controller._check_watchdog_health()
                         controller.kick_watchdog()
-                        validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start)
+                        validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start, diagnostics=diagnostics)
                         logger.check_health()
                     timing['command_send_time'] = time.monotonic()
                     if command.move:
@@ -260,10 +273,11 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                           policy.state in (State.STOP, State.FIRST_CONTACT, State.DIRECTION_RECONFIRM, State.CONTACT_LOST)):
                         controller.request_stop(nonblocking=True)
                     timing['command_return_time'] = time.monotonic()
-                    validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start)
+                    validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start, diagnostics=diagnostics)
                     timing.update(runtime_stop_state=controller.stop_state,
                                   actual_xyz_speed_mps=float(np.linalg.norm(robot.tcp_speed[:3])),
-                                  stop_api_anomaly=bool(controller.stop_report and controller.stop_report['api_anomaly']))
+                                  stop_api_anomaly=bool(controller.stop_report and controller.stop_report['api_anomaly']),
+                                  software_warnings=json.dumps(software_warnings(), ensure_ascii=False))
                 else:
                     timing['command_send_time'] = now
                     timing['command_return_time'] = controller.time
@@ -279,7 +293,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     del policy.events[0]
                 if args.execute:
                     logger.check_health()
-                    validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start)
+                    validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start, diagnostics=diagnostics)
                     previous_cycle_start = cycle_start
                     time.sleep(max(0, dt - (time.monotonic() - cycle_start)))
     except KeyboardInterrupt as exc:
@@ -327,23 +341,25 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     monitoring = True
                     def observe_terminal_stop():
                         nonlocal monitoring, result
-                        # Healthy observations keep the existing watchdog alive during
-                        # the 80 ms hold. A failed sensor/log/guard never earns a kick.
-                        if monitoring and controller.watchdog_active and not controller.motion_fault:
+                        # Continue device observations through the existing hold.
+                        # The optional watchdog is separate from software warnings.
+                        if monitoring and controller.control is not None and not controller.motion_fault:
                             try:
                                 started = time.monotonic()
                                 sample = reader.read_wrench()
                                 wrench = preprocessor.process(sample)
                                 if not np.isfinite(np.r_[sample.array(), wrench.array()]).all():
                                     raise RobotError('nonfinite stopping wrench')
-                                force_error = force_safety_reason(sample, wrench, config['policy'])
+                                force_error = continuous_force_reason(sample, wrench, config['policy'], diagnostics)
                                 if force_error:
                                     raise RobotError(force_error)
                                 state = controller.read_state()
                                 logger.check_health()
-                                validate_cycle_timing(config['continuous_tracking'], started, time.monotonic(), started)
-                                controller._check_watchdog_health()
-                                controller.kick_watchdog()
+                                validate_cycle_timing(config['continuous_tracking'], started, time.monotonic(), started,
+                                                      diagnostics=diagnostics)
+                                if controller.config.get('continuous_require_watchdog') and controller.watchdog_active:
+                                    controller._check_watchdog_health()
+                                    controller.kick_watchdog()
                                 return state
                             except Exception as exc:
                                 monitoring, result = False, 1
@@ -412,7 +428,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                             last_contact_pose=None if policy.last_contact_pose is None else policy.last_contact_pose.tolist(),
                             mode="real" if args.execute else "simulation", stop_observation=stop_snapshot_info,
                             first_threshold_pose=None if policy.first_threshold_pose is None else policy.first_threshold_pose.tolist(),
-                            provenance=config.get('continuous_provenance'))))
+                            provenance=config.get('continuous_provenance'), software_warnings=software_warnings())))
                     for write, positional, keywords in final_writes:
                         try:
                             write(*positional, **keywords)
@@ -428,6 +444,11 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 except Exception as exc:
                     result = 1
                     termination.set_stop_reason(detail=str(exc), exception=exc, source="continuous.logger_close")
+        if args.execute:
+            warnings = software_warnings()
+            termination.observe(software_warnings=warnings)
+            if any(any(component.values()) for component in warnings.values()):
+                print('WARNING / diagnostics: '+json.dumps(warnings, ensure_ascii=False), flush=True)
         termination.flush(emit=True)
     return result
 

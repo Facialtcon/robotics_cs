@@ -160,6 +160,7 @@ execution:
 # ALL values below: MUST CONFIRM ON SITE. No change to discrete-policy limits.
 continuous_tracking:
   enabled: true
+  continuous_require_watchdog: false  # custom RTDE watchdog is opt-in
   tangential_speed: 0.001          # m/s
   force_reference: 1.5            # N; interaction magnitude, not pure target force
   force_gain: 0.0005              # (m/s)/N
@@ -180,9 +181,9 @@ continuous_tracking:
   max_runtime_sec: 120.0
   visualization_fps: 10
   # Revision: all new physical values MUST CONFIRM ON SITE.
-  max_sample_gap_sec: 0.03          # s; larger gaps fail closed, never confirm contact
-  max_observation_age_sec: 0.02     # s; host observation age (not device sample age)
-  cycle_timeout_sec: 0.03          # s; includes serial, RTDE, command, logging
+  max_sample_gap_sec: 0.03          # s; diagnostic only in real continuous execution
+  max_observation_age_sec: 0.02     # s; real host-age diagnostic, not device sample age
+  cycle_timeout_sec: 0.03          # s; real cycle diagnostic, includes I/O and logging
   settle_speed_mps: 0.0001         # m/s; norm of actual XYZ velocity
   settle_hold_sec: 0.08            # s; fresh continuous low-speed observations
   confirmation_timeout_sec: 1.0   # s; bounded wait after threshold/stop request
@@ -195,7 +196,7 @@ continuous_tracking:
   direction_slow_residual_deg: 10.0
   direction_reconfirm_residual_deg: 30.0
   direction_reconfirm_rate_deg_s: 360.0
-  direction_reversal_deg: 150.0   # ambiguous near-opposite measurement: terminal stop
+  direction_reversal_deg: 150.0   # real: warning; simulation retains the original stop
   direction_confirm_hold_sec: 0.15
   direction_confirm_spread_deg: 8.0
   direction_reconfirm_max_attempts: 3 # bounded retries without 2 mm net progress

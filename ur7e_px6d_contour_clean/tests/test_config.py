@@ -18,7 +18,7 @@ def test_saved_calibrations_resolve_inside_clean(config):
     robot,start=prepare_real(config,PROJECT_ROOT/'config.yaml')
     for path in config['continuous_calibration_sources'].values():
         assert Path(path).is_relative_to(PROJECT_ROOT)
-    assert len(start)==6 and robot['continuous_require_watchdog']
+    assert len(start)==6 and robot['continuous_require_watchdog'] is False
 
 
 def test_missing_config_fails(tmp_path):

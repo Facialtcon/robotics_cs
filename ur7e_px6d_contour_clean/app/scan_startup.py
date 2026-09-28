@@ -3,7 +3,7 @@ import time
 import numpy as np
 
 from robot.rtde_controller import RobotError, _orientation_distance
-from safety.force_guard import force_safety_reason
+from safety.force_guard import raw_safety_reason
 from safety.safe_return import SafeReturnExecutor, PX6DForceMonitor, return_trajectory
 from sensor.force_preprocess import WrenchPreprocessor
 
@@ -16,10 +16,7 @@ def capture_stationary_bias(config, reader, preprocessor, controller, count, *, 
         if poll() in ('Q', 'ESC'):
             raise KeyboardInterrupt('operator stopped bias acquisition')
         raw = reader.read_wrench()
-        processed = preprocessor.process(raw)
-        if not np.isfinite(raw.array()).all():
-            raise RobotError('nonfinite bias wrench')
-        reason = force_safety_reason(raw, processed, config['policy'])
+        reason = raw_safety_reason(raw, config['policy'])
         if reason:
             raise RobotError(reason)
         state = controller.read_diagnostic_state()
@@ -28,11 +25,14 @@ def capture_stationary_bias(config, reader, preprocessor, controller, count, *, 
             np.linalg.norm(state.pose[:3]-anchor[:3]) > config['policy']['position_tolerance'] or
             _orientation_distance(state.pose[3:], anchor[3:]) > config['safe_return']['return_orientation_tolerance']):
             raise RobotError('robot moved during stationary bias capture')
-        if controller.watchdog_active:
-            if logger is not None and hasattr(logger, 'check_health'):
-                logger.check_health()
-            if time.monotonic()-started > config['continuous_tracking']['cycle_timeout_sec']:
+        if logger is not None and hasattr(logger, 'check_health'):
+            logger.check_health()
+        if time.monotonic()-started > config['continuous_tracking']['cycle_timeout_sec']:
+            if config.get('continuous_real_execution'):
+                controller.diagnostics['bias_timing'] = 'WARNING: bias cycle timing jitter'
+            elif controller.watchdog_active:
                 raise RobotError('bias cycle timed out')
+        if controller.config.get('continuous_require_watchdog') and controller.watchdog_active:
             controller._check_watchdog_health()
             controller.kick_watchdog()
         samples.append(raw)

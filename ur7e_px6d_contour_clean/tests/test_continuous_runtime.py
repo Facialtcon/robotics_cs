@@ -1,5 +1,6 @@
 from argparse import Namespace
 import json
+import time
 import numpy as np
 import pytest
 from app import continuous_runtime as runtime
@@ -9,20 +10,40 @@ from doubles import Devices, Sensor, Keyboard
 
 
 def args(tmp_path, execute=True):
-    return Namespace(config=PROJECT_ROOT/'config.yaml', scene=PROJECT_ROOT/'simulation/scene_continuous.yaml',
+    settings = Namespace(config=PROJECT_ROOT/'config.yaml', scene=PROJECT_ROOT/'simulation/scene_continuous.yaml',
         preview=False,execute=execute,enable_reacquire=False,duration=.08,output=tmp_path)
+    Keyboard.test_args = settings
+    return settings
 
 
-def prepare(config, monkeypatch):
+def prepare(config, monkeypatch, *, watchdog=False):
     original = runtime.load_config
     def load(path):
         c=original(path)
         c['preprocessing']['baseline']['sample_count']=2
         c['safe_return']['startup_bias_sample_count']=2
+        c['continuous_tracking']['continuous_require_watchdog']=watchdog
         return c
     monkeypatch.setattr(runtime,'load_config',load)
     monkeypatch.setattr(runtime,'OperatorKeyboard',Keyboard)
     monkeypatch.setattr(Keyboard,'answer','START')
+    # Real SEARCH no longer ends on a software time budget. These fixtures use
+    # an explicit operator Q after the requested test interval, after startup.
+    contexts = 0
+    def enter(self):
+        nonlocal contexts
+        contexts += 1
+        self.main_loop = contexts > 1
+        self.entered = time.monotonic()
+        return self
+    def poll(self):
+        if self.key:
+            return self.key
+        if self.main_loop and time.monotonic()-self.entered >= Keyboard.test_args.duration:
+            return 'Q'
+        return None
+    monkeypatch.setattr(Keyboard, '__enter__', enter)
+    monkeypatch.setattr(Keyboard, 'poll', poll)
     target=load_scan_calibration(PROJECT_ROOT/'scan_calibration.yaml')['start_tcp_pose']
     return target
 
@@ -101,7 +122,7 @@ def test_fake_contact_brakes_confirms_and_enters_tracking(config,monkeypatch,tmp
 
 def test_terminal_hold_keeps_healthy_watchdog_alive(config,monkeypatch,tmp_path):
     import time
-    target=prepare(config,monkeypatch);d=Devices(config,target)
+    target=prepare(config,monkeypatch,watchdog=True);d=Devices(config,target)
     kicked=[]
     def kick(): kicked.append(time.monotonic());return True
     def finish():
@@ -112,12 +133,15 @@ def test_terminal_hold_keeps_healthy_watchdog_alive(config,monkeypatch,tmp_path)
     assert len(kicked)>10
 
 
-def test_async_disk_failure_stops_motion_and_releases_devices(config,monkeypatch,tmp_path):
+def test_async_disk_failure_warns_without_ending_search(config,monkeypatch,tmp_path):
     target=prepare(config,monkeypatch);d=Devices(config,target);sensor=Sensor()
     def fail(*args,**kwargs): raise OSError('injected disk full')
     monkeypatch.setattr(runtime.ExperimentLogger,'log_sample',fail)
-    assert runtime.run(args(tmp_path),controller_factory=d.controller,reader_factory=lambda *a:sensor)==1
+    assert runtime.run(args(tmp_path),controller_factory=d.controller,reader_factory=lambda *a:sensor)==0
     assert not d.receive.connected and not d.control.connected and not sensor.connected
     path,=(tmp_path/'real/continuous').glob('run_*')
     assert (path/'metadata.json').exists() and (path/'termination.json').exists()
+    summary=json.loads((path/'summary.json').read_text())
+    assert 'injected disk full' in summary['software_warnings']['logging']['write_error']
+    assert json.loads((path/'termination.json').read_text())['reason']=='STOP_USER_REQUEST'
     assert any(x[0]=='speedStop' for x in d.control.calls)

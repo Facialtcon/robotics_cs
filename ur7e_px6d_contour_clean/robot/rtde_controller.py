@@ -227,6 +227,7 @@ class URRTDEController:
 
     def __init__(self, config: dict, *, receive_factory=None, control_factory=None):
         self.config = dict(config)
+        self.diagnostics = {}
         self._receive_factory = receive_factory
         self._control_factory = control_factory
         self._control_created = False
@@ -290,7 +291,11 @@ class URRTDEController:
             # Compatibility for older callers of this shared controller.
             limit = self.config.get('continuous_speed_limit')
             if limit and np.linalg.norm(speed[:3]) > CONTINUOUS_TRIP_FACTOR * limit:
-                raise ContinuousSpeedLimitError(pose, speed, limit, now, self._packet_stamp)
+                error = ContinuousSpeedLimitError(pose, speed, limit, now, self._packet_stamp)
+                if self.config.get('continuous_real_execution'):
+                    self.diagnostics['phase_speed'] = f'WARNING: {error}'
+                else:
+                    raise error
             return
         limit = float(limits[self._continuous_envelope])
         measured = float(np.linalg.norm(speed[:3]))
@@ -322,6 +327,10 @@ class URRTDEController:
         if severe or sustained:
             error = ContinuousSpeedLimitError(pose, speed, limit, now, self._packet_stamp,
                                               self.speed_guard_diagnostics)
+            if self.config.get('continuous_real_execution'):
+                self.diagnostics['phase_speed'] = f'WARNING: {error}'
+                self.speed_guard_diagnostics['speed_guard_state'] = 'WARNING'
+                return
             self.motion_fault = str(error)
             # A rejected moving observation revokes any earlier stop belief.
             # Ensure the runner's stop attempts braking even before first speedL.
@@ -435,15 +444,22 @@ class URRTDEController:
             pose = _finite_six(self.receive.getActualTCPPose(), "actual TCP pose")
             speed = _finite_six(self.receive.getActualTCPSpeed(), "actual TCP speed")
             assert self.guard is not None
+            searching = self.config.get('continuous_real_execution') and self.continuous_phase in ('READY', 'TARGET_SEARCH')
             if self._return_mode:
                 self.guard.check_workspace(pose)
+            elif searching:
+                try:
+                    self.guard.check_pose(pose)
+                except RobotError as exc:
+                    self.diagnostics['search_pose'] = f'WARNING: {exc}'
             else:
                 self.guard.check_pose(pose)
             # Braking may consume the reserved clearance, never the raw boundary.
             boundary_config = ({**self.config, 'continuous_boundary_margin': 0.}
                                if self._stop_pending or self.continuous_phase == 'TARGET_SEARCH' else self.config)
             check_continuous_xy(boundary_config, pose[:2])
-            if np.linalg.norm(speed[:3]) > float(self.config["max_tcp_speed"]) * 1.20:
+            tolerance = 1. if self.config.get('continuous_real_execution') else 1.20
+            if np.linalg.norm(speed[:3]) > float(self.config["max_tcp_speed"]) * tolerance:
                 raise RobotError("measured TCP speed exceeds maximum plus tolerance")
             if not self._return_mode:
                 self._check_continuous_speed(pose, speed, observed_start)
@@ -481,7 +497,10 @@ class URRTDEController:
             if self.continuous_phase not in limits:
                 raise RobotError(f'new motion forbidden during {self.continuous_phase}')
             if speed > float(limits[self.continuous_phase]) + 1e-12:
-                raise RobotError('command exceeds continuous phase speed envelope')
+                if self.config.get('continuous_real_execution'):
+                    self.diagnostics['phase_command_speed'] = 'WARNING: command exceeds continuous phase speed envelope'
+                else:
+                    raise RobotError('command exceeds continuous phase speed envelope')
         self._check_connected()
         state = self.read_state()
         # A fresh read may revoke a previous standstill observation.
@@ -500,7 +519,13 @@ class URRTDEController:
             if self.continuous_phase == 'TARGET_SEARCH':
                 raise SearchLimitReached(str(exc)) from exc
             raise
-        self.guard.check_predicted_pose(state.pose, direction, float(speed), float(duration))
+        try:
+            self.guard.check_predicted_pose(state.pose, direction, float(speed), float(duration))
+        except RobotError as exc:
+            if self.config.get('continuous_real_execution') and self.continuous_phase == 'TARGET_SEARCH':
+                self.diagnostics['search_pose'] = f'WARNING: {exc}'
+            else:
+                raise
         if self.config.get('continuous_require_watchdog') and not self._packet_advanced:
             raise RobotError('RTDE packet progress not established')
         velocity = [direction[0] * speed, direction[1] * speed, 0.0, 0.0, 0.0, 0.0]
@@ -574,20 +599,31 @@ class URRTDEController:
         if not hasattr(self.receive, 'getTimestamp'):
             raise RobotError('RTDE package timestamp unavailable')
         stamp = float(self.receive.getTimestamp())
-        if not np.isfinite(stamp) or (self._packet_stamp is not None and stamp < self._packet_stamp):
+        if not np.isfinite(stamp):
             raise RobotError('invalid/backwards RTDE package timestamp')
+        if self._packet_stamp is not None and stamp < self._packet_stamp:
+            if self.config.get('continuous_real_execution'):
+                self.diagnostics['rtde_timestamp'] = 'WARNING: backwards RTDE package timestamp'
+            else:
+                raise RobotError('invalid/backwards RTDE package timestamp')
         if self._packet_stamp is None or stamp > self._packet_stamp:
             self._packet_advanced = self._packet_stamp is not None
             self._packet_stamp, self._packet_seen_at = stamp, now
         age = now-self._packet_seen_at
         self.observation_timing.update(rtde_device_timestamp=stamp, rtde_packet_stagnation_sec=age)
         if age > float(self.config.get('continuous_sample_age_sec', .02)):
-            raise RobotError('stale RTDE package: host reads do not refresh device data')
+            if self.config.get('continuous_real_execution'):
+                self.diagnostics['rtde_stagnation'] = f'WARNING: RTDE packet stagnation {age:g} s'
+            else:
+                raise RobotError('stale RTDE package: host reads do not refresh device data')
 
     def _check_observation_latency(self, started, ended):
         limit = float(self.config.get('continuous_sample_age_sec', .02))
         if ended-started > limit or ended-self._packet_seen_at > limit:
-            raise RobotError('stale RTDE observation: read latency exceeded')
+            if self.config.get('continuous_real_execution'):
+                self.diagnostics['rtde_observation_age'] = f'WARNING: RTDE observation latency {ended-started:g} s'
+            else:
+                raise RobotError('stale RTDE observation: read latency exceeded')
 
     @staticmethod
     def verified_watchdog_contract():
@@ -619,10 +655,13 @@ class URRTDEController:
             raise RobotError(f'motion fault latched: {self.motion_fault}')
         if self._stop_pending and not self.standstill_confirmed:
             raise RobotError('stop request pending measured standstill')
-        self._check_watchdog_health()
+        if self.config.get('continuous_require_watchdog'):
+            self._check_watchdog_health()
 
     def _check_watchdog_health(self):
         """Monitoring during braking does not authorize a new motion."""
+        if self.config.get('continuous_require_watchdog') is False:
+            return
         if self.motion_fault:
             raise RobotError(f'motion fault latched: {self.motion_fault}')
         if self.config.get('continuous_require_watchdog'):
@@ -636,6 +675,8 @@ class URRTDEController:
         return self.request_stop()
 
     def enable_watchdog(self, frequency):
+        if self.config.get('continuous_require_watchdog') is False:
+            return
         self._check_connected()
         if self.motion_fault:
             raise RobotError(self.motion_fault)
@@ -649,6 +690,8 @@ class URRTDEController:
             raise RobotError(self.motion_fault) from exc
 
     def kick_watchdog(self):
+        if self.config.get('continuous_require_watchdog') is False:
+            return
         if not self.watchdog_active or self.motion_fault:
             raise RobotError('watchdog inactive or faulted')
         try:
@@ -683,7 +726,8 @@ class URRTDEController:
         self.stop_report = report
         self.stop_history.append(report)
         if nonblocking is None:
-            nonblocking = self._return_mode or self.config.get('continuous_require_watchdog', False)
+            nonblocking = (self._return_mode or self.config.get('continuous_real_execution', False)
+                           or self.config.get('continuous_require_watchdog', False))
         if nonblocking and self._stop_method == 'speedStop':
             report['braking_method'] = 'speedL_zero'
             try:

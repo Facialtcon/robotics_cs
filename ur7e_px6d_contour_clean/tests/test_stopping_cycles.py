@@ -49,7 +49,8 @@ def braking_device(devices, *, stop_value=True, stuck=False):
         return True
     def finish():
         assert devices.owner.standstill_confirmed
-        assert time.monotonic()-record['kicks'][-1] < .05
+        if devices.owner.config.get('continuous_require_watchdog'):
+            assert time.monotonic()-record['kicks'][-1] < .05
         record['script_stop'] = time.monotonic()
         return True
     control.speedL, receive.getActualTCPSpeed = speed_l, speed
@@ -59,7 +60,7 @@ def braking_device(devices, *, stop_value=True, stuck=False):
 
 @pytest.mark.parametrize('stop_value', [True, False])
 def test_search_limit_brakes_across_logged_cycles(config, monkeypatch, tmp_path, stop_value):
-    target = prepare(config, monkeypatch)
+    target = prepare(config, monkeypatch, watchdog=True)
     devices = Devices(config, target)
     record = braking_device(devices, stop_value=stop_value)
     original_prepare = runtime.prepare_real

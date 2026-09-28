@@ -23,7 +23,7 @@ MPLBACKEND=Agg python run_simulation.py --no-gui
 
 默认连续场景与当前 18 mm/s SEARCH 参数组合会在约 2.75 秒触发原有力上限停止。它验证了停止和日志路径，不代表完成连续轮廓；本次保留原行为。离散正方形场景使用其独立、原样继承的仿真参数，可完成整圈。
 
-现场 `config.yaml`、`scan_calibration.yaml`、`workspace/config/workspace_calibration.yaml`、`requirements.txt` 按字节复制；本地原先没有 `reset_pose.yaml`，不生成替代标定。连续 policy 仅增加真实沙箱几何搜索预算和执行层停稳确认门槛；传感器预处理及导纳、方向、force-rate、reacquire 算法保持原代码。连续 SEARCH 18 mm/s、接触阈值 1 N、切向 1 mm/s、法向上限 0.5 mm/s、参考力 1.5 N 均未调整。
+现场标定、TCP、P0/P1 与沙箱几何未修改；本地原先没有 `reset_pose.yaml`，不生成替代标定。连续真实模式使用 polygon 搜索预算，并把指定的软件限制改为 warning，默认 `continuous_require_watchdog: false`。零偏采集先检查 raw，设置 bias 后才使用 processed force。导纳和方向估计公式、SEARCH 18 mm/s、接触阈值 1 N、切向 1 mm/s、法向上限 0.5 mm/s、参考力 1.5 N 与停车状态机保留。仿真继续使用原终止规则。
 
 数据从空目录开始。新实验由 `experiment_logging/paths.py` 分配到 `data/{real|simulation}/{continuous|discrete|return}/run_*`；每个 run 先写 `metadata.json`。默认相对路径不受启动时的工作目录影响。数据、Python 缓存和 pytest 缓存由本目录 `.gitignore` 排除；现场配置和标定正常受版本管理。
 

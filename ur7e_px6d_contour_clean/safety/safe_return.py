@@ -155,20 +155,27 @@ class SafeReturnExecutor:
                                        state, command, None, None)
             if hasattr(self.logger, 'check_health'):
                 self.logger.check_health()
-        if self.controller.watchdog_active:
+        if self.controller.watchdog_active or self.config.get('continuous_real_execution'):
             c = self.config['continuous_tracking']
             now = time.monotonic()
             if now-started > float(c['cycle_timeout_sec']) or now-state.timestamp > float(c['max_observation_age_sec']):
-                raise RobotError('return cycle/observation timeout')
+                self._timing_diagnostic('return cycle/observation timeout')
             if self.previous_cycle is not None and started-self.previous_cycle > float(c['max_sample_gap_sec']):
-                raise RobotError('return sample gap exceeded')
+                self._timing_diagnostic('return sample gap exceeded')
+        if self.controller.config.get('continuous_require_watchdog') and self.controller.watchdog_active:
             if self.controller._watchdog_last_kick is not None:
                 self.controller._check_watchdog_health()
             self.controller.kick_watchdog()
             if time.monotonic()-started > float(c['cycle_timeout_sec']):
-                raise RobotError('return watchdog call exceeded cycle budget')
+                self._timing_diagnostic('return watchdog call exceeded cycle budget')
         self.previous_cycle = started
         return state
+
+    def _timing_diagnostic(self, message):
+        if self.config.get('continuous_real_execution'):
+            self.controller.diagnostics['return_timing'] = f'WARNING: {message}'
+        else:
+            raise RobotError(message)
 
     def _at_target(self, state):
         tolerance = float(self.settings['return_position_tolerance'])
@@ -189,7 +196,7 @@ class SafeReturnExecutor:
             state = self.controller.read_diagnostic_state() if diagnostic else self.observe()
             stopped = self.controller.poll_stop()
             if time.monotonic()-started > float(self.config['continuous_tracking']['cycle_timeout_sec']):
-                raise RobotError('return stopping cycle timeout')
+                self._timing_diagnostic('return stopping cycle timeout')
             if stopped:
                 return state
             time.sleep(max(0., self.period-(time.monotonic()-started)))

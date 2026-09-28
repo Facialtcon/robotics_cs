@@ -35,21 +35,29 @@ Receive 负责 TCP pose/speed、设备 timestamp、机器人/安全状态。当�
 
 ur-rtde 1.6.5 的 `speedStop(a)` 没有异步参数，其控制脚本同步执行 `stopl(a)`。因此速度模式先发送一次 `speedL([0]*6, stop_deceleration, 0.01)`，使用原停车减速度把持续速度目标设为零；跨周期确认停稳后，才调用一次 `speedStop` 退出速度模式。返回 moveL 使用 SDK 原有异步 `stopL(a, True)`。所有 Control 调用仍在同一线程，没有以并发喂狗绕过 SDK 的线程安全约束。报告另记 `braking_method` / `braking_return_value`，区分零速度制动与速度模式退出的结果。
 
-接口依据：[SDU Robotics 接口说明](https://sdurobotics.gitlab.io/ur_rtde/introduction/introduction.html)、[控制脚本](https://gitlab.com/sdurobotics/ur_rtde/-/blob/master/scripts/rtde_control.script)。停稳后的 SDK 模式退出仍有通信往返开销，计入原周期预算；不把设备/网络异常解释为周期可以无限等待，也未放宽 30 ms 限制。
+接口依据：[SDU Robotics 接口说明](https://sdurobotics.gitlab.io/ur_rtde/introduction/introduction.html)、[控制脚本](https://gitlab.com/sdurobotics/ur_rtde/-/blob/master/scripts/rtde_control.script)。停稳后的 SDK 模式退出仍有通信往返开销，继续记录周期时长；真实 continuous 的 30 ms 现在是诊断阈值，单次超过不触发 STOP。
 
 `poll_stop()` 与启动预检的 `wait_for_standstill()` 共享同一停稳判据：设备 timestamp 必须向前更新，实际线速度低于阈值且角速度足够低，持续配置的 hold 时间。扫描循环与返回段末尾不调用阻塞等待。重复读取同一缓存包不能累计“静止”时间；缺包、倒退 timestamp、非有限数据、持续运动均不能证明停稳。默认线速度阈值 0.1 mm/s、hold 80 ms，角速度上限 0.005 rad/s。
 
 `speedStop == False` 或 SDK 异常只产生 API anomaly。若新鲜速度证明已停稳，记录 `physical_stop=confirmed`；若持续运动超时则报 `STOP_MOTION_ERROR`，若观测失效则记录观测错误。API 返回值不替代物理结论。下一次运动不会改写前一次 stop 报告。
 
-连续模式在健康的制动观测期间仍监控 PX6D、日志和时间预算，并喂已有 watchdog；确认持续停稳后结束自己上传的脚本，再断开。异常力、传感器/日志故障或 watchdog 已失效时不继续喂狗，但仍尝试用 Receive 确认实际停稳。Control close 幂等，断开失败不会跳过其他资源释放。
+连续模式在制动观测期间继续读取 PX6D、TCP 并记录诊断；确认持续停稳后结束自己上传的脚本，再断开。默认 `continuous_tracking.continuous_require_watchdog: false`，启动、bias、返回、扫描、停车均不调用 setWatchdog / kickWatchdog / watchdog health check。显式开启时保留原 watchdog 路径。UR 自带 emergency/protective stop 仍终止运动。Control close 幂等，断开失败不会跳过其他资源释放。
 
 ## 真实搜索范围
 
 `safety/search_geometry.py` 从扫描 P0 沿已保存的 `scan_direction_xy`，对原始沙箱四角的真实边逐条求交，取前方最近交点。它支持顺/逆时针凸四边形，拒绝无效顺序、非有限数据、零方向、起点不在内部或没有前方交点；不使用 AABB 或 P1 距离作为搜索预算。
 
-真实预算为几何距离减去原有 `search_boundary_margin`，保存在运行快照 `continuous_search_geometry`，启动连接设备前打印三项距离。YAML 的 `search_max_distance: 0.10` 保留供仿真使用；真实分支不再用它封顶。搜索预测从标定 P0 起算，下一步进入停车余量前正常触发 `STOP_SEARCH_LIMIT`。原有时间预算继续生效。
+真实预算为几何距离减去原有 `search_boundary_margin`，保存在运行快照 `continuous_search_geometry`，启动连接设备前打印三项距离。YAML 的 `search_max_distance: 0.10` 保留供仿真使用；真实分支不再用它封顶。搜索预测从标定 P0 起算，下一步进入停车余量前正常触发 `STOP_SEARCH_LIMIT`。真实初始搜索的 search_max_time / max_runtime 仅记录 warning；接触后的运行时间预算与仿真预算保留。过去的周期抖动不扩大下一条 10 ms 命令的几何预测步长。
 
 斜边的垂直净距或更严格的工作空间仍可让搜索提前结束；这些执行边界也按 SEARCH_LIMIT 正常停车。实际制动允许消耗停车余量，原始 polygon / 工作空间外边界仍为硬限制。力安全、速度阶段限制与停车减速度保持原值。
+
+## 真实 continuous 的 warning 与 STOP
+
+初始搜索不运行 tracking / direction / reacquire 的规则。运动只因操作者停止、UR emergency/protective stop、设备通信/API 错误、NaN/Inf、全局 TCP 超速、标定 polygon 搜索终点、raw force >= 60 N 或 raw torque >= 5 Nm 停止。Fxy >= 1 N 是正常 FIRST_CONTACT 转移，共用原停车状态机。
+
+processed force 12 N / torque 1 Nm、force-rate、方向跳变/反转/相干度/置信度、阶段 1.2x/1.5x 速度检查、30 ms 周期、sample gap、observation age、RTDE stagnation、日志延迟/积压以及 startup/bias 抖动，在真实模式只记录 WARNING / diagnostic。搜索中的固定 Z/姿态偏差也只诊断；仍命令原 XY 速度，未修改目标 Z/TCP 或标定。方向估计、导纳和切向/法向速度公式保留。方向质量仍参与原接触确认计算，但不因其超时直接结束实验。停车状态机的物理停稳判据和有限停车超时不变。
+
+`capture_stationary_bias()` 在建立零偏前仅采集 raw，检查 finite、60 N/5 Nm 原始上限和基本静止；完成 `set_zero_bias(samples)` 后才开始 process/processed/contact/force-rate。15 N 恒定原始载荷可完成零偏采集。
 
 ## return
 
@@ -65,7 +73,7 @@ ur-rtde 1.6.5 的 `speedStop(a)` 没有异步参数，其控制脚本同步执�
 
 `create_run(mode, strategy, config_source)` 在采样前创建带身份的 run。metadata 包含模式、策略、UTC 时间、Git branch/commit/dirty、配置绝对路径；混合模式“真实 PX6D + 模拟机器人”另记 devices。
 
-CSV 按有记录才建立，保留 samples/full_log、有效 policy waypoints、边界/探测记录、配置快照、停止快照、summary 和 termination。手动返回只记录其实际 TCP、目标、停止请求和返回结果。连续写盘线程不调用设备；磁盘异常/积压能阻止下一次健康周期和运动。
+CSV 按有记录才建立，保留 samples/full_log、有效 policy waypoints、边界/探测记录、配置快照、停止快照、summary 和 termination。手动返回只记录其实际 TCP、目标、停止请求和返回结果。连续写盘线程不调用设备；真实模式的积压/写盘异常只记 warning。队列仍有固定容量，满时丢弃新记录并累计 dropped_records，不阻塞设备线程或转成 STOP。software_warnings 同时写入样本、summary、独立 termination 和结束时的终端输出。
 
 连续样本增加 `runtime_stop_state`、`actual_xyz_speed_mps`、`stop_api_anomaly`。policy 已输出 STOP 时，runtime 的 STOPPING 样本仍逐周期写入，直到物理停稳；正常耗尽搜索预算的退出码为 0，真实停车失败为 1，并记录 STOP_MOTION_ERROR。
 
@@ -87,14 +95,15 @@ CSV 按有记录才建立，保留 samples/full_log、有效 policy waypoints、
 - `experiment_logging/`：`__init__.py`。
 - `app/`：`__init__.py`, `operator_input.py`。
 - `robot/`：`__init__.py`。
-- `safety/`：`__init__.py`, `force_guard.py`。
+- `safety/`：`__init__.py`。
 - `./`：`run_simulation.py`, `calibrate_workspace.py`, `visualize_workspace.py`, `config.yaml`, `scan_calibration.yaml`, `requirements.txt`。
 - `workspace/config/`：`workspace_calibration.yaml`。
 - `tools/`：`check_px6d.py`, `check_workspace_calibration.py`, `check_rtde.py`, `run_mock_visualized.py`。
 
 ### 复制后按 clean 职责改造的文件
 
-- `policy/`：`continuous_tracking.py`，仅新增真实几何搜索预算与执行层停稳确认门槛。
+- `policy/`：`continuous_tracking.py`，真实几何搜索预算、执行层停稳确认与真实模式软件诊断。
+- `safety/`：`force_guard.py`，零偏前 raw 检查和真实模式 processed 诊断。
 - `config/`：`loader.py`。
 - `workspace/`：`workspace_logger.py`。
 - `simulation/`：`continuous_preview.py`, `simulator.py`, `simulation_config.yaml`。

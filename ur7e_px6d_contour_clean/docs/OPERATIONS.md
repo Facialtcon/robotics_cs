@@ -50,18 +50,21 @@
 
 ## 扫描
 
-12 和 18 共用 START 前的 Receive 预检与路径展示。PX6D 已连接，若离开 P0，则在静止处采临时偏置，并用带力监控的同一三段返回执行器回 P0。运动确认只发生一次，Control 不重建。连续启动返回保留 watchdog、采样时效、日志健康和速度/工作空间边界；正式扫描仍使用原 policy。
+12 和 18 共用 START 前的 Receive 预检与路径展示。PX6D 已连接，若离开 P0，则在静止处采临时偏置，并用带力监控的同一三段返回执行器回 P0。运动确认只发生一次，Control 不重建。18 默认关闭自定义 watchdog，周期/时效/日志检查只记 warning；UR 自带停止状态、设备错误和全局速度/沙箱边界仍有效。
 
 18 的 Q/Esc/Ctrl+C 均原地停止，不自动返回。12 的 Q 正常停止按 `safe_return.auto_return_after_normal_stop` 返回，Esc/Ctrl+C 和异常不返回。停止是否成功看日志中的新鲜速度确认，不只看 SDK 返回值或进程退出码。
 
-18 连接设备前打印 `Search geometric distance to sandbox boundary`、`Search stopping margin`、`Effective TARGET_SEARCH distance`，单位 mm。它们来自扫描 P0、搜索方向和原始沙箱四边形，不再受历史 100 mm 字段限制。当前已保存数据计算为 766.0762 / 3.7125 / 762.3637 mm；工作空间与斜边垂直净距可以更早限制运动，时间预算仍有效。
+18 连接设备前打印 `Search geometric distance to sandbox boundary`、`Search stopping margin`、`Effective TARGET_SEARCH distance`，单位 mm。它们来自扫描 P0、搜索方向和原始沙箱四边形，不再受历史 100 mm 字段限制。当前已保存数据计算为 766.0762 / 3.7125 / 762.3637 mm；现有边界/停车余量未变。第一次接触前，search_max_time / max_runtime（包括 --duration 缩短的预算）仅诊断，不自动结束搜索。
 
-到达搜索终点且无接触时，原因是正常 `STOP_SEARCH_LIMIT`。samples 中可看到 STOPPING 的新鲜速度下降及连续静止确认，随后才结束脚本。FIRST_CONTACT 与返回每段也按周期观察停稳。API anomaly 和物理停稳分开记录；超时未停稳为 STOP_MOTION_ERROR。没有增加现场标定步骤，也没有改 YAML 参数。
+到达搜索终点且无接触时，原因是正常 `STOP_SEARCH_LIMIT`。samples 中可看到 STOPPING 的新鲜速度下降及连续静止确认，随后才结束脚本。FIRST_CONTACT 与返回每段也按周期观察停稳。API anomaly 和物理停稳分开记录；超时未停稳为 STOP_MOTION_ERROR。仅新增默认关闭 watchdog 的配置，未修改原速度/力参数或标定。
+
+真实 SEARCH：先检查 raw finite、60 N / 5 Nm 原始上限、设备状态、全局速度和 polygon，再用已建立零偏的 Fxy 判断接触。processed 12 N / 1 Nm、force-rate、方向质量、阶段速度、周期/时效/日志抖动仅记录 software_warnings。零偏建立前不调用 process(raw)；例如恒定 raw=15 N 可以采集并置零。
 
 离线预演窗口需要图形桌面/可交互 Matplotlib backend；无桌面使用菜单 16。测试覆盖预演模型和 Agg 静态绘制，未声称实测桌面拖拽事件或硬件。
 
 ## 已执行的迁移验证
 
+- 本轮软件限制简化：完整离线 pytest **140 项通过**。覆盖 35/60 ms 周期抖动、低接触力高 force-rate、processed 超阈值、默认 watchdog 零调用、raw=15 N bias、raw 60/65 N 与 torque 5 Nm、polygon 边界、全局超速、UR 停止状态、PX6D/RTDE 异常、日志积压及 FIRST_CONTACT；同时对照导纳输出与原算法一致。原配置数值、标定文件及停车状态机已检查保持不变。
 - 本轮搜索范围 / STOPPING 修复：完整离线 pytest **113 项通过**。新增覆盖斜四边形射线、130 mm P1、预测步及执行前新鲜位姿复查、超过 100 ms 的逐周期刹停、watchdog、FIRST_CONTACT、API False、有限停车超时、停止期间力/数据故障和返回段停稳。测试构造真实设备接口会直接失败；未执行真机验收。
 - 核心 pytest：94 项通过（12.21 秒）；菜单 1 子进程测试入口也已验证。覆盖唯一 Control、确认前零 Control、TCP 不匹配、取消、传感器/写盘故障、真实分支设备替身、API False/异常与物理停稳分离、冻结 timestamp、慢 SDK 读取、持续运动超时、force-rate 阶段、方向和 reacquire。
 - 连续/离散仿真及 fake real continuous/discrete/manual return 均验证分类路径与 metadata。

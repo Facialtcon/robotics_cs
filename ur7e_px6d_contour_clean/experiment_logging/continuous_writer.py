@@ -18,7 +18,7 @@ class ContinuousLogError(OSError):
 
 
 class ContinuousLogWriter:
-    def __init__(self, logger, *, capacity=64, max_pending_sec=1.0):
+    def __init__(self, logger, *, capacity=64, max_pending_sec=1.0, diagnostic_only=False):
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
             raise ValueError("log capacity must be a positive integer")
         if not math.isfinite(max_pending_sec) or max_pending_sec <= 0:
@@ -31,6 +31,9 @@ class ContinuousLogWriter:
         self._pending = deque()
         self._condition = Condition()
         self._error = None
+        self._diagnostic_only = diagnostic_only
+        self._diagnostics = {}
+        self._dropped_records = 0
         self._closing = False
         self._closed = False
         # An older queued sample must not replace the latest control observation.
@@ -43,6 +46,7 @@ class ContinuousLogWriter:
             raise
 
     def _remember_error(self, message, cause=None):
+        self._diagnostics['write_error'] = f'WARNING: {message}'
         if self._error is None:
             self._error = ContinuousLogError(message)
             self._error.__cause__ = cause
@@ -50,13 +54,22 @@ class ContinuousLogWriter:
 
     def _check_locked(self):
         if self._error is not None:
-            raise self._error
+            if not self._diagnostic_only:
+                raise self._error
         if self._pending and time.monotonic() - self._pending[0][0] > self._max_pending_sec:
-            raise self._remember_error(
-                f"continuous log record pending longer than {self._max_pending_sec:g} s")
+            message = f"continuous log record pending longer than {self._max_pending_sec:g} s"
+            if self._diagnostic_only:
+                self._diagnostics['backlog'] = f'WARNING: {message}'
+            else:
+                raise self._remember_error(message)
+
+    @property
+    def diagnostics(self):
+        with self._condition:
+            return {**self._diagnostics, 'dropped_records': self._dropped_records}
 
     def check_health(self):
-        """Fail before the next motion/watchdog command if logging is unhealthy."""
+        """Observe writer health; real continuous runs keep it diagnostic only."""
         with self._condition:
             self._check_locked()
 
@@ -67,6 +80,10 @@ class ContinuousLogWriter:
                 raise ContinuousLogError("continuous log writer is closed")
             # Includes the in-flight item: at most capacity snapshots are owned.
             if len(self._pending) >= self._capacity:
+                if self._diagnostic_only:
+                    self._dropped_records += 1
+                    self._diagnostics['backlog'] = f'WARNING: log queue full; {self._dropped_records} records dropped'
+                    return
                 raise self._remember_error(f"continuous log queue reached capacity {self._capacity}")
             timestamp = time.monotonic()
             copied_args, copied_kwargs = deepcopy((args, kwargs))
@@ -150,7 +167,10 @@ class ContinuousLogWriter:
             while self._pending:
                 remaining = min(deadline, self._pending[0][0] + self._max_pending_sec) - time.monotonic()
                 if remaining <= 0:
-                    raise self._remember_error("continuous log records still pending at drain deadline")
+                    error = self._remember_error("continuous log records still pending at drain deadline")
+                    if self._diagnostic_only:
+                        return
+                    raise error
                 self._condition.wait(remaining)
             self._logger.termination = self.termination
             try:
@@ -167,7 +187,9 @@ class ContinuousLogWriter:
                 else:
                     getattr(self._logger, method)(*args, **kwargs)
             except Exception as exc:
-                raise self._remember_error(f"continuous log final write failed: {exc}", exc)
+                error = self._remember_error(f"continuous log final write failed: {exc}", exc)
+                if not self._diagnostic_only:
+                    raise error
             finally:
                 self._logger.termination = None
             self._check_locked()
@@ -194,6 +216,7 @@ class ContinuousLogWriter:
         self._thread.join(self._max_pending_sec)
         with self._condition:
             if self._thread.is_alive():
-                raise self._remember_error(
-                    "continuous log records still pending; cleanup deferred to disk writer")
+                error = self._remember_error("continuous log records still pending; cleanup deferred to disk writer")
+                if not self._diagnostic_only:
+                    raise error
             self._check_locked()

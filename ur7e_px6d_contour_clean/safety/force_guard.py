@@ -24,6 +24,28 @@ def force_safety_reason(raw: Wrench, processed: Wrench, config: dict) -> str | N
     return next((reason for value, limit, reason in checks if value >= float(limit)), None)
 
 
+def raw_safety_reason(raw: Wrench, config: dict) -> str | None:
+    """Existing raw backstops, usable before zero bias has been established."""
+    if not np.isfinite(raw.array()).all():
+        return 'nonfinite raw wrench'
+    if np.linalg.norm(raw.force) >= float(config['absolute_raw_force_threshold']):
+        return 'absolute raw force safety threshold exceeded'
+    if np.linalg.norm(raw.torque) >= float(config['absolute_raw_torque_threshold']):
+        return 'absolute raw torque safety threshold exceeded'
+    return None
+
+
+def continuous_force_reason(raw, processed, config, diagnostics):
+    """Real continuous mode: processed limits are diagnostics, raw limits stop."""
+    for value, limit, key in (
+        (np.linalg.norm(processed.force), config['safety_force_threshold'], 'processed_force'),
+        (np.linalg.norm(processed.torque), config['safety_torque_threshold'], 'processed_torque'),
+    ):
+        if value >= float(limit):
+            diagnostics[key] = f'WARNING: {value:g} >= {limit:g}; diagnostic only'
+    return raw_safety_reason(raw, config)
+
+
 @dataclass
 class ForceRateGuard:
     previous: tuple[float, float] | None = None

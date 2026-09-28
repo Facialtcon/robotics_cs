@@ -12,7 +12,7 @@ import numpy as np
 from core.models import PolicyCommand, PolicyWaypoint
 from experiment_logging.termination import TerminationReason, classify_stop_reason
 from policy.boundary_estimation import handed_tangent, unit
-from safety.force_guard import ForceRateGuard, force_safety_reason
+from safety.force_guard import ForceRateGuard, force_safety_reason, continuous_force_reason
 
 
 class State(str, Enum):
@@ -162,6 +162,8 @@ class ContinuousTrackingPolicy:
     def __init__(self, config):
         validate_config(config)
         self.c, self.p = dict(config['continuous_tracking']), dict(config['policy'])
+        self.real_execution = bool(config.get('continuous_real_execution'))
+        self.diagnostics = {}
         self.search_geometry = config.get('continuous_search_geometry')
         self.execution_settled = None
         self.max_speed = float(config['robot']['max_tcp_speed'])
@@ -218,6 +220,10 @@ class ContinuousTrackingPolicy:
                            target_direction_xy=self.contact_direction.copy(), tangent_xy=self.tangent.copy()))
 
     def request_stop(self, now, pose, reason, *, event='SAFETY_STOP', code=None):
+        if self.real_execution and code in (TerminationReason.STOP_DIRECTION_REVERSAL,
+                TerminationReason.STOP_DIRECTION_UNCONFIRMED, TerminationReason.STOP_DIRECTION_NO_PROGRESS):
+            self.diagnostics[code.value] = f'WARNING: {reason}'
+            return
         if self.state != State.STOP:
             self.state, self.reason, self.stop_reason = State.STOP, reason, code
             self._event(now, pose, event)
@@ -314,8 +320,11 @@ class ContinuousTrackingPolicy:
                 return True
         if now-self._confirm_started >= float(self.c['confirmation_timeout_sec']):
             direction = self.state == State.DIRECTION_RECONFIRM
-            self.request_stop(now, robot.pose, 'direction reconfirmation timeout' if direction else 'contact/standstill confirmation timeout',
-                              code=TerminationReason.STOP_DIRECTION_UNCONFIRMED if direction else None)
+            if self.real_execution:
+                self.diagnostics['contact_direction_confirmation'] = 'WARNING: contact/direction confirmation taking longer than configured interval'
+            else:
+                self.request_stop(now, robot.pose, 'direction reconfirmation timeout' if direction else 'contact/standstill confirmation timeout',
+                                  code=TerminationReason.STOP_DIRECTION_UNCONFIRMED if direction else None)
         return False
 
     def _remember(self, now, pose):
@@ -337,7 +346,8 @@ class ContinuousTrackingPolicy:
                 self.estimate_residual_deg > float(self.c['direction_reconfirm_residual_deg']) or
                 self.direction_rate_filtered_deg_s > float(self.c['direction_reconfirm_rate_deg_s'])):
             self._begin_direction_reconfirm(now, pose, 'measurement change / estimate lag')
-            return False
+            if not self.real_execution:
+                return False
         alpha = float(self.c['force_direction_filter_alpha']) ** (self.dt / self.nominal_dt)
         self._filtered = vector.copy() if self._filtered is None else alpha*self._filtered+(1-alpha)*vector
         self._filtered_magnitude = alpha*self._filtered_magnitude+(1-alpha)*self.fxy
@@ -346,7 +356,8 @@ class ContinuousTrackingPolicy:
         if (self.filtered_fxy < float(self.c['direction_min_filtered_force'])
                 or self.direction_confidence < float(self.c['direction_min_coherence'])):
             self._begin_direction_reconfirm(now, pose, 'low filtered magnitude / direction coherence')
-            return False
+            if not self.real_execution or self.filtered_fxy == 0:
+                return False
         candidate = float(self.c['force_direction_sign']) * self._filtered / self.filtered_fxy
         angle = angle_between(self.contact_direction, candidate)
         self.direction_delta_deg = float(np.rad2deg(angle))
@@ -390,6 +401,9 @@ class ContinuousTrackingPolicy:
                               code=TerminationReason.STOP_DIRECTION_REVERSAL)
 
     def _begin_direction_reconfirm(self, now, pose, cause):
+        if self.real_execution:
+            self.diagnostics['direction_quality'] = f'WARNING: {cause}'
+            return
         if self._direction_attempt_pose is None or np.linalg.norm(pose[:2]-self._direction_attempt_pose) >= float(self.c['direction_min_progress']):
             self.direction_reconfirm_attempts = 0
             self._direction_attempt_pose = pose[:2].copy()
@@ -463,10 +477,15 @@ class ContinuousTrackingPolicy:
             self.request_stop(now, pose, 'contact lost; experimental recovery disabled', code=TerminationReason.STOP_NO_CONTACT)
             return
         memory = self.last_reliable_contact
-        if (memory is None or now-memory['timestamp'] > float(self.c['memory_max_age_sec'])
-                or memory['confidence'] < float(self.c['direction_min_coherence'])):
+        if memory is None or now-memory['timestamp'] > float(self.c['memory_max_age_sec']):
             self.request_stop(now, pose, 'recovery memory stale or unreliable')
             return
+        if memory['confidence'] < float(self.c['direction_min_coherence']):
+            if self.real_execution:
+                self.diagnostics['recovery_confidence'] = 'WARNING: recovery memory confidence below configured threshold'
+            else:
+                self.request_stop(now, pose, 'recovery memory stale or unreliable')
+                return
         if (self._last_recovery_origin is not None
                 and np.linalg.norm(pose[:2]-self._last_recovery_origin[:2]) < float(self.c['reacquire_min_progress'])):
             self.request_stop(now, pose, 'repeated contact loss without spatial progress')
@@ -558,23 +577,36 @@ class ContinuousTrackingPolicy:
         age = now-robot.timestamp  # RobotState timestamp is HOST observation time only.
         if (self.dt <= 0 or self.dt > float(self.c['max_sample_gap_sec'])
                 or age < -1e-6 or age > float(self.c['max_observation_age_sec'])):
-            self._reset_confirmation(now)
-            self.request_stop(now, pose, 'stale sample / invalid control interval', code=TerminationReason.STOP_STALE_DATA)
-            return self._command(pose)
+            if self.real_execution:
+                self.diagnostics['sample_timing'] = f'WARNING: sample interval={self.dt:g} s, observation age={age:g} s'
+                if self.dt <= 0:
+                    self.dt = self.nominal_dt
+            else:
+                self._reset_confirmation(now)
+                self.request_stop(now, pose, 'stale sample / invalid control interval', code=TerminationReason.STOP_STALE_DATA)
+                return self._command(pose)
         self._last_time = now
         self.fxy = float(np.hypot(processed.fx, processed.fy))
         self.force_rate = self._rate.update(now, self.fxy)
         # Snapshot the guard used for this sample, before any phase transition.
         # Acquisition and stopped confirmation still run all hard F/T checks.
         self.force_rate_guard_active = self.state == State.CONTINUOUS_TRACKING and not self._low_force_pending
-        safety = force_safety_reason(raw, processed, self.p)
-        if safety is None and self.force_rate_guard_active and self.force_rate > float(self.p['force_rate_limit']):
-            safety = f'force rate exceeded: {self.force_rate:.3f} N/s'
+        safety = (continuous_force_reason(raw, processed, self.p, self.diagnostics) if self.real_execution
+                  else force_safety_reason(raw, processed, self.p))
+        if self.force_rate > float(self.p['force_rate_limit']):
+            if self.real_execution:
+                self.diagnostics['force_rate'] = f'WARNING: force rate {self.force_rate:g} N/s'
+            elif safety is None and self.force_rate_guard_active:
+                safety = f'force rate exceeded: {self.force_rate:.3f} N/s'
+        if self.real_execution:
+            self.force_rate_guard_active = False
         if safety:
             self.request_stop(now, pose, safety, code=TerminationReason.STOP_FORCE_LIMIT)
             return self._command(pose)
         vector = np.array([processed.fx, processed.fy])
-        self._measure_direction(now, vector)
+        searching = self.state in (State.READY, State.TARGET_SEARCH)
+        if not (self.real_execution and searching):
+            self._measure_direction(now, vector)
         if self.state == State.STOP:
             return self._command(pose)
         self.contact_flag = self.fxy >= float(self.p['contact_threshold'])
@@ -584,8 +616,11 @@ class ContinuousTrackingPolicy:
             self._started, self._start_pose = now, pose.copy()
         budget = self.c['max_runtime_sec']
         if budget is not None and now-self._started >= float(budget):
-            self.request_stop(now, pose, 'maximum experiment duration reached', event='BUDGET_STOP', code=TerminationReason.STOP_TIME_LIMIT)
-            return self._command(pose)
+            if self.real_execution and searching:
+                self.diagnostics['search_runtime'] = 'WARNING: runtime budget exceeded during initial search'
+            else:
+                self.request_stop(now, pose, 'maximum experiment duration reached', event='BUDGET_STOP', code=TerminationReason.STOP_TIME_LIMIT)
+                return self._command(pose)
         if self.state in (State.READY, State.TARGET_SEARCH):
             if self.contact_flag:
                 self.state = State.FIRST_CONTACT
@@ -601,9 +636,15 @@ class ContinuousTrackingPolicy:
                 limit = (float(self.c['search_max_distance'])-float(self.c.get('search_boundary_margin', self.c['boundary_margin']))
                          if geometry is None else float(geometry['usable_distance_m']))
                 prediction_dt = self.dt if geometry is None else max(self.dt, self.nominal_dt)
+                if self.real_execution:
+                    # The next command lasts one nominal tick. Past jitter is
+                    # diagnostic and must not enlarge the geometric lookahead.
+                    prediction_dt = self.nominal_dt
+                time_exhausted = now-self._started >= float(self.c['search_max_time_sec'])
+                if time_exhausted and self.real_execution:
+                    self.diagnostics['search_time'] = 'WARNING: initial search time budget exceeded'
                 if (np.linalg.norm(pose[:2]-origin)+float(self.c['search_speed'])*prediction_dt
-                        >= limit
-                        or now-self._started >= float(self.c['search_max_time_sec'])):
+                        >= limit or (time_exhausted and not self.real_execution)):
                     self.request_stop(now, pose, 'initial search budget exhausted', code=TerminationReason.STOP_SEARCH_LIMIT, event='BUDGET_STOP')
                     return self._command(pose)
                 self.stop_requested = False

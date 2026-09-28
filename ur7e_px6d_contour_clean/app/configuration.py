@@ -39,9 +39,6 @@ def site_configuration_digest(config, config_path=ROOT / "config.yaml"):
 
 def prepare_real(config, config_path):
     """Read the project's saved scan and sandbox calibrations before devices exist."""
-    budget = config['continuous_tracking']['max_runtime_sec']
-    if budget is None or isinstance(budget, bool) or not np.isfinite(float(budget)) or float(budget) <= 0:
-        raise RobotError('real continuous_tracking.max_runtime_sec must be finite and positive')
     validate_execution_configuration(config)
     validate_config(config)
     c = config['continuous_tracking']
@@ -105,7 +102,9 @@ def prepare_real(config, config_path):
         low, high = float(bounds[f'{axis}_min']), float(bounds[f'{axis}_max'])
         if not np.isfinite([low, high]).all() or high-low <= 2*margin:
             raise RobotError('invalid continuous site XY bounds')
-    watchdog_contract = URRTDEController.verified_watchdog_contract()
+    require_watchdog = bool(c.get('continuous_require_watchdog', False))
+    watchdog_contract = (URRTDEController.verified_watchdog_contract() if require_watchdog
+                         else dict(watchdog='disabled'))
     speed_limits = dict(TARGET_SEARCH=float(c['search_speed']),
                         CONTINUOUS_TRACKING=float(np.hypot(c['tangential_speed'], c['normal_speed_limit'])),
                         LOCAL_REACQUIRE=float(c['reacquire_speed']))
@@ -117,11 +116,11 @@ def prepare_real(config, config_path):
         return hard * (CONTINUOUS_DEBOUNCE_SEC + 1/float(c['watchdog_frequency_hz'])) + hard**2/(2*deceleration)
     max_tracking = max(speed_limits['CONTINUOUS_TRACKING'], speed_limits['LOCAL_REACQUIRE'])
     required_margin = stopping_margin(max_tracking)
-    if margin < required_margin or 1/float(c['watchdog_frequency_hz']) <= float(c['cycle_timeout_sec']):
+    if require_watchdog and (margin < required_margin or 1/float(c['watchdog_frequency_hz']) <= float(c['cycle_timeout_sec'])):
         raise RobotError('stop margin/watchdog deadline incompatible with execution budgets')
-    # Search alone needs more clearance. Include the entire allowed transient
-    # band, its finite confirmation delay, watchdog interval and ideal braking.
-    # This is an engineering budget to validate on site, not a stopping guarantee.
+    # Preserve the existing polygon stopping clearance exactly. The historical
+    # 20 Hz / speed-band terms remain geometric inputs even with watchdog off;
+    # they no longer activate a watchdog or a phase-specific terminal speed trip.
     search_margin = max(margin, stopping_margin(speed_limits['TARGET_SEARCH']))
     geometric_distance = ray_polygon_distance(calibration['start_tcp_pose'][:2],
                                                calibration['scan_direction_xy'], polygon)
@@ -135,11 +134,13 @@ def prepare_real(config, config_path):
         geometric_distance_m=geometric_distance, stopping_margin_m=search_margin,
         usable_distance_m=geometric_distance-search_margin)
     config['continuous_sdk_contract'] = watchdog_contract
+    config['continuous_real_execution'] = True
     config['continuous_loaded_configuration_sha256'] = digest
     config['policy']['search_direction_xy'] = list(calibration['scan_direction_xy'])
     robot_config = runtime_robot_config(config)
     robot_config.update(fixed_z=calibration['fixed_z'], fixed_orientation=calibration['fixed_orientation'],
-                        continuous_require_watchdog=True, continuous_sample_age_sec=float(c['max_observation_age_sec']),
+                        continuous_real_execution=True, continuous_require_watchdog=require_watchdog,
+                        continuous_sample_age_sec=float(c['max_observation_age_sec']),
                         continuous_settle_speed_mps=float(c['settle_speed_mps']), continuous_xy_limits=dict(bounds),
                         continuous_xy_polygon=polygon.tolist(), continuous_speed_limits=speed_limits,
                         continuous_tracking_boundary_margin=margin, continuous_search_boundary_margin=search_margin,
