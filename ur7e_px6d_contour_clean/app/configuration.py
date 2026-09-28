@@ -15,6 +15,7 @@ from policy.continuous_tracking import validate_config
 from robot.rtde_controller import URRTDEController, RobotError, validate_execution_configuration, check_continuous_xy, CONTINUOUS_TRIP_FACTOR, CONTINUOUS_HARD_FACTOR, CONTINUOUS_DEBOUNCE_SEC, CONTINUOUS_DEBOUNCE_PACKETS
 from robot.tcp_identity import tcp_offsets_match
 from safety.safe_return import validate_return_configuration
+from safety.search_geometry import ray_polygon_distance
 from workspace.workspace_transform import load_calibration as load_workspace_calibration
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,9 +123,17 @@ def prepare_real(config, config_path):
     # band, its finite confirmation delay, watchdog interval and ideal braking.
     # This is an engineering budget to validate on site, not a stopping guarantee.
     search_margin = max(margin, stopping_margin(speed_limits['TARGET_SEARCH']))
-    if search_margin >= float(c['search_max_distance']):
+    geometric_distance = ray_polygon_distance(calibration['start_tcp_pose'][:2],
+                                               calibration['scan_direction_xy'], polygon)
+    if search_margin >= geometric_distance:
         raise RobotError('search stopping margin consumes search distance budget')
     c['search_boundary_margin'] = search_margin  # runtime snapshot only; saved calibration is unchanged
+    # Keep the historical config key for simulation. Real execution takes its
+    # budget and origin exclusively from the loaded scan + raw sandbox geometry.
+    config['continuous_search_geometry'] = dict(
+        origin_xy=list(calibration['start_tcp_pose'][:2]),
+        geometric_distance_m=geometric_distance, stopping_margin_m=search_margin,
+        usable_distance_m=geometric_distance-search_margin)
     config['continuous_sdk_contract'] = watchdog_contract
     config['continuous_loaded_configuration_sha256'] = digest
     config['policy']['search_direction_xy'] = list(calibration['scan_direction_xy'])
@@ -134,13 +143,15 @@ def prepare_real(config, config_path):
                         continuous_settle_speed_mps=float(c['settle_speed_mps']), continuous_xy_limits=dict(bounds),
                         continuous_xy_polygon=polygon.tolist(), continuous_speed_limits=speed_limits,
                         continuous_tracking_boundary_margin=margin, continuous_search_boundary_margin=search_margin,
+                        continuous_search_geometry=config['continuous_search_geometry'],
                         continuous_boundary_margin=margin)
     check_continuous_xy({**robot_config, 'continuous_boundary_margin': search_margin}, calibration['start_tcp_pose'][:2])
     config['continuous_calibration'] = calibration
     config['continuous_workspace_calibration'] = sandbox
     config['continuous_calibration_sources'] = dict(scan=str(scan_path.resolve()), workspace=str(sandbox_path.resolve()))
     config['continuous_execution_envelope'] = dict(raw_xy_polygon=polygon.tolist(), xy_limits=dict(bounds), margin_m=margin,
-        search_margin_m=search_margin, nominal_speed_limits_mps=speed_limits,
+        search_margin_m=search_margin, search_geometry=config['continuous_search_geometry'],
+        nominal_speed_limits_mps=speed_limits,
         trip_factor=CONTINUOUS_TRIP_FACTOR, hard_factor=CONTINUOUS_HARD_FACTOR,
         debounce_sec=CONTINUOUS_DEBOUNCE_SEC, debounce_packets=CONTINUOUS_DEBOUNCE_PACKETS)
     return robot_config, np.asarray(calibration['start_tcp_pose'])

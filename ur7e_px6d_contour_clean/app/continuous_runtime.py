@@ -16,7 +16,7 @@ from experiment_logging.data_logger import ExperimentLogger
 from experiment_logging.continuous_writer import ContinuousLogWriter
 from experiment_logging.termination import TerminationReason, TerminationRecorder
 from policy.continuous_tracking import ContinuousTrackingPolicy, EXTRA_SAMPLE_FIELDS, State
-from robot.rtde_controller import URRTDEController, RobotError, SPEED_GUARD_FIELDS
+from robot.rtde_controller import URRTDEController, RobotError, SearchLimitReached, SPEED_GUARD_FIELDS, check_continuous_xy
 from sensor.force_preprocess import WrenchPreprocessor
 from safety.force_guard import force_safety_reason
 from sensor.px6d_reader import PX6DReader
@@ -26,7 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 TIMING_FIELDS = ('serial_read_start', 'serial_read_end', 'tcp_read_start', 'tcp_read_end',
                  'rtde_device_timestamp', 'rtde_packet_stagnation_sec', 'wrench_host_age_sec',
                  'tcp_host_age_sec', 'command_send_time', 'command_return_time', 'timing_source',
-                 'cycle_start_time', 'loop_start_interval_sec')
+                 'cycle_start_time', 'loop_start_interval_sec', 'runtime_stop_state',
+                 'actual_xyz_speed_mps', 'stop_api_anomaly')
 
 
 from app.configuration import prepare_real, calibration_summary, site_configuration_digest
@@ -58,10 +59,7 @@ def check_start(controller, start, config):
 def stop_after_exception(controller, termination):
     """A failed stop attempt must not skip disconnect/diagnostic cleanup."""
     try:
-        controller.request_stop()
-        finish_script = getattr(controller, 'finish_control_script_if_stopped', None)
-        if finish_script is not None:
-            finish_script()
+        controller.request_stop(nonblocking=True)
     except Exception as exc:
         termination.set_stop_reason(detail=str(exc), exception=exc,
                                     source="continuous.stop_failure", terminal=False)
@@ -99,6 +97,10 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             if getattr(args, 'enable_reacquire', False):
                 raise RobotError('--enable-reacquire is offline only')
             robot_config, start = prepare_real(config, args.config)
+            geometry = config['continuous_search_geometry']
+            print(f"Search geometric distance to sandbox boundary: {geometry['geometric_distance_m']*1000:.4f} mm\n"
+                  f"Search stopping margin: {geometry['stopping_margin_m']*1000:.4f} mm\n"
+                  f"Effective TARGET_SEARCH distance: {geometry['usable_distance_m']*1000:.4f} mm", flush=True)
             if 'continuous_calibration_sources' in config:
                 print("Using saved scan / sandbox calibration:\n"+
                       json.dumps(calibration_summary(config),ensure_ascii=False,indent=2),flush=True)
@@ -165,14 +167,15 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         if args.execute and not startup_return_done:
             controller.enable_watchdog(float(policy.c['watchdog_frequency_hz']))
         with OperatorKeyboard() as keyboard:
-            while policy.state != State.STOP:
+            while policy.state != State.STOP or (args.execute and controller.stop_state != 'STOPPED'):
                 cycle_start = time.monotonic()
                 now = cycle_start if args.execute else controller.time
                 key = keyboard.poll()
                 if key in ("Q", "ESC"):
                     policy.request_stop(now, robot.pose, f"{key} operator stop", event="USER_STOP",
                                         code=TerminationReason.STOP_USER_REQUEST)
-                    break
+                    if not args.execute:
+                        break
                 termination.observe(phase="SENSOR_READ")
                 if args.execute:
                     logger.check_health()
@@ -184,6 +187,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     # acquisition intervals are kept; this is not hard sync.
                     tcp_start = time.monotonic()
                     robot = controller.read_state()
+                    controller.poll_stop()
                     speed_diagnostics = dict(controller.speed_guard_diagnostics)
                     tcp_end = time.monotonic()
                     now = tcp_end
@@ -206,7 +210,26 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 if args.execute:
                     processed = preprocessor.process(raw)
                     termination.observe(processed=processed, timestamp=now, phase="POLICY_UPDATE")
-                    command = policy.update(now, raw, processed, robot)
+                    # Policy STOP is terminal for its algorithm, but the runtime
+                    # keeps all hard force checks alive throughout braking.
+                    if policy.state == State.STOP:
+                        if not np.isfinite(np.r_[raw.array(), processed.array()]).all():
+                            raise RobotError('nonfinite stopping wrench')
+                        force_error = force_safety_reason(raw, processed, config['policy'])
+                        if force_error:
+                            raise RobotError(force_error)
+                    command = policy.update(now, raw, processed, robot,
+                                            execution_settled=controller.standstill_confirmed)
+                    if command.move and policy.state == State.TARGET_SEARCH:
+                        predicted = robot.pose[:2] + command.direction_xy*command.speed*dt
+                        try:
+                            check_continuous_xy(controller.config, predicted)
+                        except RobotError:
+                            # An oblique edge or a tighter workspace can exhaust
+                            # perpendicular clearance before the ray budget.
+                            policy.request_stop(now, robot.pose, 'search execution boundary reached',
+                                code=TerminationReason.STOP_SEARCH_LIMIT, event='BUDGET_STOP')
+                            command = policy.update(now, raw, processed, robot)
                     termination.observe(command=command, phase='COMMAND_EXECUTION')
                     controller.set_continuous_phase(policy.state.value, stop_confirmed=policy.stop_confirmed)
                 if args.execute:
@@ -215,21 +238,32 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start)
                     # DIRECTION_RECONFIRM is nonterminal: keep the watchdog
                     # armed while issuing stop and collecting fresh feedback.
-                    if policy.state != State.STOP:
+                    if controller.watchdog_active:
+                        if controller._watchdog_last_kick is not None:
+                            controller._check_watchdog_health()
                         controller.kick_watchdog()
                         validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start)
                         logger.check_health()
                     timing['command_send_time'] = time.monotonic()
                     if command.move:
-                        controller.command_planar_velocity(command.direction_xy, command.speed, dt)
-                    elif not controller.standstill_confirmed:
-                        controller.request_stop()
+                        try:
+                            controller.command_planar_velocity(command.direction_xy, command.speed, dt)
+                        except SearchLimitReached as exc:
+                            # The execution read is newer than the policy sample.
+                            # Exhaustion between those reads is still a normal stop.
+                            policy.request_stop(now, robot.pose, str(exc),
+                                code=TerminationReason.STOP_SEARCH_LIMIT, event='BUDGET_STOP')
+                            command = policy.update(now, raw, processed, robot)
+                            controller.set_continuous_phase(policy.state.value)
+                            controller.request_stop(nonblocking=True)
+                    elif (not controller.standstill_confirmed or
+                          policy.state in (State.STOP, State.FIRST_CONTACT, State.DIRECTION_RECONFIRM, State.CONTACT_LOST)):
+                        controller.request_stop(nonblocking=True)
                     timing['command_return_time'] = time.monotonic()
                     validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start)
-                    if policy.state == State.STOP:
-                        finish_script = getattr(controller, 'finish_control_script_if_stopped', None)
-                        if finish_script is not None:
-                            finish_script()
+                    timing.update(runtime_stop_state=controller.stop_state,
+                                  actual_xyz_speed_mps=float(np.linalg.norm(robot.tcp_speed[:3])),
+                                  stop_api_anomaly=bool(controller.stop_report and controller.stop_report['api_anomaly']))
                 else:
                     timing['command_send_time'] = now
                     timing['command_return_time'] = controller.time
@@ -274,6 +308,8 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         termination.set_stop_reason(detail=str(exc), exception=exc, source="continuous.runner")
         if policy is not None:
             policy.request_stop(now, np.zeros(6) if robot is None else robot.pose, str(exc))
+            if getattr(controller, 'stop_state', None) == 'FAILED':
+                policy.stop_reason, policy.reason = TerminationReason.STOP_MOTION_ERROR, str(exc)
         print(f"Continuous tracking stopped: {type(exc).__name__}: {exc}", flush=True)
         result = 1
     finally:
@@ -287,7 +323,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         elif controller is not None:
             try:
                 if args.execute:
-                    controller.request_stop()
+                    controller.request_stop(nonblocking=True)
                     monitoring = True
                     def observe_terminal_stop():
                         nonlocal monitoring, result
@@ -298,10 +334,12 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                                 started = time.monotonic()
                                 sample = reader.read_wrench()
                                 wrench = preprocessor.process(sample)
+                                if not np.isfinite(np.r_[sample.array(), wrench.array()]).all():
+                                    raise RobotError('nonfinite stopping wrench')
                                 force_error = force_safety_reason(sample, wrench, config['policy'])
                                 if force_error:
                                     raise RobotError(force_error)
-                                state = controller.read_diagnostic_state()
+                                state = controller.read_state()
                                 logger.check_health()
                                 validate_cycle_timing(config['continuous_tracking'], started, time.monotonic(), started)
                                 controller._check_watchdog_health()
@@ -312,9 +350,18 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                                 termination.set_stop_reason(detail=str(exc), exception=exc,
                                     source='continuous.stop_monitor', terminal=False)
                         return controller.read_diagnostic_state()
-                    robot = controller.wait_for_standstill(observe=observe_terminal_stop)
+                    # Normal terminal stops already completed in the main loop.
+                    # Exceptional cleanup drives the same one-tick monitor with
+                    # independent observation cycles, never inside a scan tick.
+                    while controller.stop_state != 'STOPPED':
+                        started = time.monotonic()
+                        robot = observe_terminal_stop()
+                        if controller.poll_stop():
+                            break
+                        time.sleep(max(0., dt-(time.monotonic()-started)))
                     controller.finish_control_script_if_stopped()
                     stop_snapshot_info = dict(source='fresh_rtde_actual_speed', standstill_confirmed=True,
+                        runtime_stop_state=controller.stop_state,
                         stop_requests=controller.stop_history, **controller.observation_timing)
                 else:
                     # Integrate the execution adapter's actual braking tail.
@@ -329,10 +376,14 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 result = 1
                 stop_snapshot_info.update(source='last_valid_sample', standstill_confirmed=False,
                                           read_error=str(exc), host_age_sec=None if robot is None else max(0., time.monotonic()-robot.timestamp))
+                if args.execute:
+                    stop_snapshot_info.update(runtime_stop_state=controller.stop_state,
+                                              stop_requests=controller.stop_history)
                 termination.set_stop_reason(detail=str(exc), exception=exc, source='continuous.stop_observation', terminal=False)
         if policy is not None and policy.state == State.STOP:
             termination.set_stop_reason(policy.stop_reason, policy.reason, source="continuous.policy")
-            if policy.stop_reason not in (TerminationReason.STOP_USER_REQUEST, TerminationReason.STOP_TIME_LIMIT):
+            if policy.stop_reason not in (TerminationReason.STOP_USER_REQUEST, TerminationReason.STOP_TIME_LIMIT,
+                                          TerminationReason.STOP_SEARCH_LIMIT):
                 result = 1
         for resource in (controller, reader):
             if resource is not None and hasattr(resource, "close"):

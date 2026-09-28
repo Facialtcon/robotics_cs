@@ -13,6 +13,10 @@ class RobotError(RuntimeError):
     pass
 
 
+class SearchLimitReached(RobotError):
+    """No motion sent: a fresh execution read exhausted search clearance."""
+
+
 # Engineering thresholds, not an RTDE noise model. Keep the original 20%
 # envelope; only its small overrun band gets two nominal 100 Hz cycles.
 CONTINUOUS_TRIP_FACTOR = 1.2
@@ -238,6 +242,9 @@ class URRTDEController:
         self._return_mode = False
         self.motion_fault = ''
         self._stop_pending = False
+        self._stop_started = None
+        self._stop_primitive_called = False
+        self.stop_state = 'RUNNING'
         self.watchdog_active = False
         self._watchdog_last_kick = None
         self._packet_stamp = self._packet_seen_at = None
@@ -432,7 +439,10 @@ class URRTDEController:
                 self.guard.check_workspace(pose)
             else:
                 self.guard.check_pose(pose)
-            check_continuous_xy(self.config, pose[:2])
+            # Braking may consume the reserved clearance, never the raw boundary.
+            boundary_config = ({**self.config, 'continuous_boundary_margin': 0.}
+                               if self._stop_pending or self.continuous_phase == 'TARGET_SEARCH' else self.config)
+            check_continuous_xy(boundary_config, pose[:2])
             if np.linalg.norm(speed[:3]) > float(self.config["max_tcp_speed"]) * 1.20:
                 raise RobotError("measured TCP speed exceeds maximum plus tolerance")
             if not self._return_mode:
@@ -478,9 +488,19 @@ class URRTDEController:
         self._check_motion_authorized()
         assert self.guard is not None
         direction = self.guard.check_velocity(direction_xy, float(speed))
+        predicted = state.pose[:2]+direction*speed*duration
+        try:
+            for point in (state.pose[:2], predicted):
+                check_continuous_xy(self.config, point)
+            geometry = self.config.get('continuous_search_geometry')
+            if self.continuous_phase == 'TARGET_SEARCH' and geometry is not None:
+                if np.linalg.norm(predicted-np.asarray(geometry['origin_xy'])) >= geometry['usable_distance_m']:
+                    raise SearchLimitReached('search geometric budget reached before command')
+        except RobotError as exc:
+            if self.continuous_phase == 'TARGET_SEARCH':
+                raise SearchLimitReached(str(exc)) from exc
+            raise
         self.guard.check_predicted_pose(state.pose, direction, float(speed), float(duration))
-        for point in (state.pose[:2], state.pose[:2]+direction*speed*duration):
-            check_continuous_xy(self.config, point)
         if self.config.get('continuous_require_watchdog') and not self._packet_advanced:
             raise RobotError('RTDE packet progress not established')
         velocity = [direction[0] * speed, direction[1] * speed, 0.0, 0.0, 0.0, 0.0]
@@ -490,6 +510,7 @@ class URRTDEController:
             self.standstill_confirmed = False
             self._settled_since = self._settled_stamp = None
             self._stop_pending = False
+            self.stop_state = 'RUNNING'
             self._stop_method = "speedStop"
             accepted = self.control.speedL(
                 velocity,
@@ -533,6 +554,7 @@ class URRTDEController:
             self.standstill_confirmed = False
             self._settled_since = self._settled_stamp = None
             self._stop_pending = False
+            self.stop_state = 'RUNNING'
             self._stop_method = "stopL"
             accepted = self.control.moveL(
                 target.tolist(), float(speed), float(acceleration), True
@@ -585,7 +607,8 @@ class URRTDEController:
         if 'asynchronous: bool = False' not in (cls.stopL.__doc__ or ''):
             raise RobotError('asynchronous stopL contract unavailable')
         return dict(version=installed, speedL_time='function return time, NOT motion expiry',
-                    speedStop='bool acceptance; measured speed confirms standstill',
+                    speedStop='synchronous; real-time stop uses speedL zero with stop_deceleration, '
+                              'then speedStop once after held standstill; bool is API evidence only',
                     stopL='void/None; asynchronous=True requests braking without waiting for standstill',
                     watchdog='setWatchdog/kickWatchdog bool; default action shuts down control')
 
@@ -636,19 +659,47 @@ class URRTDEController:
             self.motion_fault = f'watchdog kick failed: {exc}'
             raise RobotError(self.motion_fault) from exc
 
-    def request_stop(self):
-        """Issue one primitive; API acceptance never establishes physical standstill."""
+    def request_stop(self, *, nonblocking=None):
+        """Request braking once; real-time callers poll actual speed each cycle.
+
+        ur-rtde 1.6.5 speedStop has no async flag and waits for stopl to finish.
+        In a control loop, first set speedL's persistent target to zero using
+        the SAME stop deceleration. Only after held standstill do we exit speed
+        mode with speedStop. stopL for return moves already supports async.
+        All SDK calls stay on one thread; there is no concurrent watchdog call.
+        """
         if self.control is None:
             return None
         if self._stop_pending:
             return self.stop_report
         self._stop_pending = True
+        self._stop_started = time.monotonic()
+        self._stop_primitive_called = False
+        self.stop_state = 'STOPPING'
         self.standstill_confirmed = False
         self._settled_since = self._settled_stamp = None
         report = dict(method=self._stop_method, return_value=None, exception=None,
                       api_anomaly=False, physical_stop='unconfirmed')
         self.stop_report = report
         self.stop_history.append(report)
+        if nonblocking is None:
+            nonblocking = self._return_mode or self.config.get('continuous_require_watchdog', False)
+        if nonblocking and self._stop_method == 'speedStop':
+            report['braking_method'] = 'speedL_zero'
+            try:
+                value = self.control.speedL([0.] * 6, float(self.config['stop_deceleration']),
+                                            float(self.config.get('observation_period_sec', .01)))
+                report['braking_return_value'] = value
+                report['api_anomaly'] = value is not True
+            except Exception as exc:
+                report.update(braking_exception=f'{type(exc).__name__}: {exc}', api_anomaly=True)
+        else:
+            self._call_stop_primitive()
+        return report
+
+    def _call_stop_primitive(self):
+        self._stop_primitive_called = True
+        report = self.stop_report
         try:
             primitive = getattr(self.control, self._stop_method)
             args = (float(self.config['stop_deceleration']),)
@@ -656,10 +707,33 @@ class URRTDEController:
                 args += (True,)
             value = primitive(*args)
             report['return_value'] = value
-            report['api_anomaly'] = not (value is True or (value is None and self._stop_method == 'stopL'))
+            report['api_anomaly'] |= not (value is True or (value is None and self._stop_method == 'stopL'))
         except Exception as exc:
             report.update(exception=f'{type(exc).__name__}: {exc}', api_anomaly=True)
-        return report
+
+    def poll_stop(self):
+        """One tick after a fresh state read. Never sleeps or waits for motion."""
+        if not self._stop_pending:
+            return self.standstill_confirmed
+        if self.stop_state == 'FAILED':
+            raise RobotError('STOP_MOTION_ERROR: fresh actual TCP speed did not settle')
+        if self.stop_state == 'STOPPED' and self.standstill_confirmed:
+            return True
+        if time.monotonic()-self._stop_started >= float(self.config.get('confirmation_timeout_sec', 1.0)):
+            self.stop_state = 'FAILED'
+            self.motion_fault = 'STOP_MOTION_ERROR: fresh actual TCP speed did not settle'
+            self.stop_report['physical_stop'] = 'failed'
+            raise RobotError(self.motion_fault)
+        if self.standstill_confirmed:
+            if not self._stop_primitive_called:
+                self._call_stop_primitive()
+                # A False/exception is evidence about the API, not the robot.
+                # Re-observe speed after the mode-exit call before accepting it.
+                self.read_diagnostic_state()
+            if self.standstill_confirmed:
+                self.stop_state = 'STOPPED'
+                return True
+        return False
 
     def _observe_standstill(self, speed, now):
         stamp = self._packet_stamp
@@ -671,7 +745,7 @@ class URRTDEController:
         self._settled_since = (now if self._settled_since is None else self._settled_since) if low else None
         self.standstill_confirmed = bool(self._settled_since is not None and
             now-self._settled_since >= float(self.config.get('settle_hold_sec', .08)))
-        if self.stop_report is not None and self._stop_pending:
+        if self.stop_report is not None and self._stop_pending and self.stop_state != 'FAILED':
             self.stop_report['physical_stop'] = 'confirmed' if self.standstill_confirmed else 'unconfirmed'
 
     def wait_for_standstill(self, *, observe=None, timeout=None):
@@ -682,13 +756,13 @@ class URRTDEController:
         try:
             while time.monotonic() < deadline:
                 state = observe() if observe else self.read_diagnostic_state()
-                if self.standstill_confirmed:
+                if self.poll_stop():
                     return state
                 time.sleep(float(self.config.get('observation_period_sec', .01)))
             raise RobotError('STOP_MOTION_ERROR: fresh actual TCP speed did not settle')
         except BaseException:
             self.standstill_confirmed = False
-            if self.stop_report is not None:
+            if self.stop_report is not None and self.stop_state != 'FAILED':
                 self.stop_report['physical_stop'] = 'unconfirmed'
             raise
 
@@ -700,6 +774,8 @@ class URRTDEController:
             return False
         self.read_diagnostic_state()
         if not self.standstill_confirmed:
+            return False
+        if not self.poll_stop():
             return False
         value = self.control.stopScript()
         if value is not True and value is not None:
@@ -714,6 +790,8 @@ class URRTDEController:
             return
         try:
             if self.control is not None:
+                if self.stop_state == 'FAILED':
+                    raise RobotError(self.motion_fault)
                 if not self.standstill_confirmed:
                     self.request_stop()
                     self.wait_for_standstill()

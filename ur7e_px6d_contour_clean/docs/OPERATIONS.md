@@ -54,10 +54,15 @@
 
 18 的 Q/Esc/Ctrl+C 均原地停止，不自动返回。12 的 Q 正常停止按 `safe_return.auto_return_after_normal_stop` 返回，Esc/Ctrl+C 和异常不返回。停止是否成功看日志中的新鲜速度确认，不只看 SDK 返回值或进程退出码。
 
+18 连接设备前打印 `Search geometric distance to sandbox boundary`、`Search stopping margin`、`Effective TARGET_SEARCH distance`，单位 mm。它们来自扫描 P0、搜索方向和原始沙箱四边形，不再受历史 100 mm 字段限制。当前已保存数据计算为 766.0762 / 3.7125 / 762.3637 mm；工作空间与斜边垂直净距可以更早限制运动，时间预算仍有效。
+
+到达搜索终点且无接触时，原因是正常 `STOP_SEARCH_LIMIT`。samples 中可看到 STOPPING 的新鲜速度下降及连续静止确认，随后才结束脚本。FIRST_CONTACT 与返回每段也按周期观察停稳。API anomaly 和物理停稳分开记录；超时未停稳为 STOP_MOTION_ERROR。没有增加现场标定步骤，也没有改 YAML 参数。
+
 离线预演窗口需要图形桌面/可交互 Matplotlib backend；无桌面使用菜单 16。测试覆盖预演模型和 Agg 静态绘制，未声称实测桌面拖拽事件或硬件。
 
 ## 已执行的迁移验证
 
+- 本轮搜索范围 / STOPPING 修复：完整离线 pytest **113 项通过**。新增覆盖斜四边形射线、130 mm P1、预测步及执行前新鲜位姿复查、超过 100 ms 的逐周期刹停、watchdog、FIRST_CONTACT、API False、有限停车超时、停止期间力/数据故障和返回段停稳。测试构造真实设备接口会直接失败；未执行真机验收。
 - 核心 pytest：94 项通过（12.21 秒）；菜单 1 子进程测试入口也已验证。覆盖唯一 Control、确认前零 Control、TCP 不匹配、取消、传感器/写盘故障、真实分支设备替身、API False/异常与物理停稳分离、冻结 timestamp、慢 SDK 读取、持续运动超时、force-rate 阶段、方向和 reacquire。
 - 连续/离散仿真及 fake real continuous/discrete/manual return 均验证分类路径与 metadata。
 - 连续 0.2 秒模拟按时间预算正常停止；默认场景 12 秒预算在约 2.75 秒触发原有力安全停止。与旧工程对照的 276 条关键力、位姿、速度、状态及停止原因完全一致。离散正方形整圈完成，52 个边界点、4 次边界恢复、72 个探测全部返回锚点。

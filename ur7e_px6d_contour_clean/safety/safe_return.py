@@ -177,11 +177,28 @@ class SafeReturnExecutor:
         return (np.linalg.norm(state.pose[:3]-self.target[:3]) <= tolerance and
                 _orientation_distance(state.pose[3:], self.target[3:]) <= float(self.settings['return_orientation_tolerance']))
 
+    def _settle(self, *, diagnostic=False):
+        """Drive the shared stop monitor, one observation/guard/log cycle at a time."""
+        self.command_speed = 0.
+        requested = False
+        while True:
+            started = time.monotonic()
+            if not requested:
+                self.controller.request_stop(nonblocking=True)
+                requested = True
+            state = self.controller.read_diagnostic_state() if diagnostic else self.observe()
+            stopped = self.controller.poll_stop()
+            if time.monotonic()-started > float(self.config['continuous_tracking']['cycle_timeout_sec']):
+                raise RobotError('return stopping cycle timeout')
+            if stopped:
+                return state
+            time.sleep(max(0., self.period-(time.monotonic()-started)))
+
     def execute(self):
         self.controller.begin_return_mode()
         initial = final = self.start_pose.copy()
         try:
-            self.controller.wait_for_standstill(observe=self.observe)
+            self._settle()
             initial = self.observe().pose.copy()
             segments = return_trajectory(self.config, initial, self.start_pose)
             # Validate every endpoint against execution-specific guards before moving.
@@ -205,19 +222,18 @@ class SafeReturnExecutor:
                     if self._at_target(state):
                         break
                     time.sleep(max(0., self.period-(time.monotonic()-started)))
-                self.controller.request_stop()
-                self.command_speed = 0.
-                state = self.controller.wait_for_standstill(observe=self.observe)
+                self.phase += '_STOPPING'
+                state = self._settle()
                 if not self._at_target(state):
                     raise ReturnAborted(f'{self.phase} settled pose outside tolerance')
-            final = self.controller.wait_for_standstill(observe=self.observe).pose
+            final = self._settle().pose
             result = ReturnResult('complete', '', initial.tolist(), final.tolist())
         except BaseException as exc:
-            self.controller.request_stop()
+            self.controller.request_stop(nonblocking=True)
             stop_error = ''
             try:
                 # Faulted sensor/logger must not prevent fresh physical stop verification.
-                final = self.controller.wait_for_standstill().pose
+                final = self._settle(diagnostic=True).pose
             except Exception as stopping:
                 stop_error = f'; {stopping}'
             result = ReturnResult('aborted', f'{type(exc).__name__}: {exc}{stop_error}',

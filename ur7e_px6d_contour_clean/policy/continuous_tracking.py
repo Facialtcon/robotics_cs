@@ -162,6 +162,8 @@ class ContinuousTrackingPolicy:
     def __init__(self, config):
         validate_config(config)
         self.c, self.p = dict(config['continuous_tracking']), dict(config['policy'])
+        self.search_geometry = config.get('continuous_search_geometry')
+        self.execution_settled = None
         self.max_speed = float(config['robot']['max_tcp_speed'])
         self.nominal_dt = 1 / float(self.p['control_rate_hz'])
         self.dt = self.nominal_dt
@@ -263,7 +265,8 @@ class ContinuousTrackingPolicy:
         else:
             self._settle_since = None
         self.settle_hold_elapsed = 0. if self._settle_since is None else now-self._settle_since
-        self.stop_confirmed = self.settle_hold_elapsed + 1e-12 >= float(self.c['settle_hold_sec'])
+        self.stop_confirmed = (self.settle_hold_elapsed + 1e-12 >= float(self.c['settle_hold_sec'])
+                               and self.execution_settled is not False)
         return self.stop_confirmed
 
     def _confirm(self, now, robot, vector):
@@ -540,7 +543,8 @@ class ContinuousTrackingPolicy:
         self.stop_confirmed = False
         return self._command(pose, velocity)
 
-    def update(self, now, raw, processed, robot):
+    def update(self, now, raw, processed, robot, *, execution_settled=None):
+        self.execution_settled = execution_settled
         pose = robot.pose
         self.tracking_pose = pose.copy()
         self.v_t = self.v_n = 0.
@@ -592,8 +596,13 @@ class ContinuousTrackingPolicy:
                 self.state = State.TARGET_SEARCH
                 return self._command(pose)
             else:
-                if (np.linalg.norm(pose[:2]-self._start_pose[:2])+float(self.c['search_speed'])*self.dt
-                        >= float(self.c['search_max_distance'])-float(self.c.get('search_boundary_margin', self.c['boundary_margin']))
+                geometry = self.search_geometry
+                origin = self._start_pose[:2] if geometry is None else np.asarray(geometry['origin_xy'])
+                limit = (float(self.c['search_max_distance'])-float(self.c.get('search_boundary_margin', self.c['boundary_margin']))
+                         if geometry is None else float(geometry['usable_distance_m']))
+                prediction_dt = self.dt if geometry is None else max(self.dt, self.nominal_dt)
+                if (np.linalg.norm(pose[:2]-origin)+float(self.c['search_speed'])*prediction_dt
+                        >= limit
                         or now-self._started >= float(self.c['search_max_time_sec'])):
                     self.request_stop(now, pose, 'initial search budget exhausted', code=TerminationReason.STOP_SEARCH_LIMIT, event='BUDGET_STOP')
                     return self._command(pose)
