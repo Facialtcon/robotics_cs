@@ -1,5 +1,58 @@
+# Experiment data, logs and generated output directories
 data/
+outputs/
+results/
+simulation_outputs/
+workspace_view_*/
+logs/
+log/
+*.log
+*.log.*
+
+# Python, test and analysis caches
 __pycache__/
-.pytest_cache/
 *.py[cod]
-.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# Virtual environments, IDE settings and local machine files
+.venv*/
+venv/
+env/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.env
+.env.local
+
+# Temporary files and backups (including *.backup.yaml calibration copies)
+tmp/
+temp/
+*.tmp
+*.tmp.*
+*.swp
+*.swo
+*~
+*.bak
+*.bak.*
+*.backup
+*.backup.*
+*.orig
+*.rej
+
+# Known generated figures and animations, including explicit output locations
+# Keep other images available for documentation and test fixtures.
+simulation_result.png
+contour_result.png
+visualization.png
+continuous_summary*.png
+continuous_preview*.png
+workspace_contour.png
+scan_strategy_debug.png
+boundary_recovery_*.png
+simulation.gif
+simulation.mp4
