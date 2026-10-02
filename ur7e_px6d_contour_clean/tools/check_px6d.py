@@ -90,14 +90,41 @@ class DiagnosticPX6DReader(PX6DReader):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(ROOT / "config.yaml"))
-    parser.add_argument("--samples", type=int, default=500)
+    parser.add_argument("--samples", type=int, default=None)
     parser.add_argument('--diagnostics-output', type=pathlib.Path,
                         help='write bounded host request diagnostics once, after closing the sensor')
+    parser.add_argument('--comparison-dir', type=pathlib.Path,
+                        help='save independent software comparison, raw bytes and USB evidence together')
+    parser.add_argument('--system-only', action='store_true',
+                        help='inspect USB/ownership/permissions without opening the sensor or robot')
+    parser.add_argument('--campaign', action='store_true',
+                        help='Enter-guided original / known-good / original cable comparisons, same USB port')
+    parser.add_argument('--duration', type=float, default=30., help='comparison collection seconds per round (max 300)')
+    parser.add_argument('--repeats', type=int, default=2, help='comparison repeats per implementation (1 to 5)')
+    parser.add_argument('--poll-rate-hz', type=float, help='diagnostic-only rate override; never saves scan config')
     args = parser.parse_args()
-    if args.samples <= 0:
+    if args.samples is not None and args.samples <= 0:
         parser.error('--samples must be positive')
+    if (args.system_only or args.campaign or args.poll_rate_hz is not None) and not args.comparison_dir:
+        parser.error('--system-only/--campaign/--poll-rate-hz require --comparison-dir')
+    if not math.isfinite(args.duration) or not 0 < args.duration <= 300 or not 1 <= args.repeats <= 5:
+        parser.error('comparison duration must be in (0, 300] seconds and repeats in [1, 5]')
+    if args.poll_rate_hz is not None and (not math.isfinite(args.poll_rate_hz) or args.poll_rate_hz <= 0):
+        parser.error('--poll-rate-hz must be positive and finite')
     config = load_config(args.config)
     sensor = config["sensor"]
+    if args.comparison_dir:
+        if args.diagnostics_output:
+            parser.error('--comparison-dir already contains results; do not combine --diagnostics-output')
+        from tools.px6d_comparison import comparison_main
+        try:
+            return comparison_main(args, sensor)
+        except (ValueError, EOFError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        except KeyboardInterrupt:
+            return 130
+    args.samples = 500 if args.samples is None else args.samples
     values = []
     reader = DiagnosticPX6DReader(
         sensor["serial_port"],
