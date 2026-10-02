@@ -170,6 +170,7 @@ DIAGNOSTIC_FIELDS = (
     "measurement_direction_x", "measurement_direction_y", "stop_requested", "stop_confirmed",
     "contact_hold_elapsed", "settle_hold_elapsed", "reacquire_origin_x", "reacquire_origin_y",
     "reacquire_reference_x", "reacquire_reference_y", "reacquire_tracking_error", "reacquire_path_length",
+    "reacquire_speed_path_length", "reacquire_raw_pose_path_length", "reacquire_max_displacement",
     "memory_timestamp", "memory_confidence", "limit_reason",
     "memory_x", "memory_y", "memory_normal_x", "memory_normal_y", "loss_detection_x", "loss_detection_y",
     "reacquire_normal_x", "reacquire_normal_y", "reacquire_tangent_x", "reacquire_tangent_y",
@@ -236,6 +237,8 @@ class ContinuousTrackingPolicy:
         self._last_recovery_origin = None
         self._recovery_count = 0
         self._recovery_previous_pose = None
+        self._recovery_previous_observation_time = None
+        self._recovery_previous_speed = 0.
         self._memory_normal = self._memory_tangent = None
         self._theta = 0.
         self.fxy = self.filtered_fxy = self.force_rate = self.lost_timer = 0.
@@ -245,6 +248,8 @@ class ContinuousTrackingPolicy:
         self.direction_limited = False
         self.contact_hold_elapsed = self.settle_hold_elapsed = 0.
         self.reacquire_tracking_error = self.reacquire_path_length = 0.
+        self.reacquire_speed_path_length = self.reacquire_raw_pose_path_length = 0.
+        self.reacquire_max_displacement = 0.
         self.unload_active = False
         self._unload_started = self._unload_release_since = self._unload_resumed = None
         self._unload_resume_announced = False
@@ -599,7 +604,7 @@ class ContinuousTrackingPolicy:
             return False
         return True
 
-    def _begin_recovery(self, now, pose):
+    def _begin_recovery(self, now, pose, *, robot=None):
         if not self.c['reacquire_enabled']:
             if self.real_execution:
                 self.diagnostics['recovery_disabled'] = 'WARNING: recovery disabled; holding for contact'
@@ -633,21 +638,47 @@ class ContinuousTrackingPolicy:
         self._memory_normal, self._memory_tangent = memory['normal'].copy(), memory['tangent'].copy()
         self._reacquire, self._theta = now, 0.
         self.reacquire_path_length = self.reacquire_tracking_error = 0.
+        self.reacquire_speed_path_length = self.reacquire_raw_pose_path_length = 0.
+        self.reacquire_max_displacement = 0.
         self._recovery_previous_pose = pose[:2].copy()
+        self._recovery_previous_observation_time = now if robot is None else robot.timestamp
+        self._recovery_previous_speed = float(np.linalg.norm(
+            self.tracking_velocity if robot is None else robot.tcp_speed[:2]))
         self.reacquire_reference = pose[:2].copy()
         self._confirm_started = None
         self.state = State.LOCAL_REACQUIRE
         self._recovery_count += 1
         self._event(now, pose, 'LOCAL_REACQUIRE')
 
+    def _observe_reacquire_path(self, robot):
+        """Integrate actual planar speed using HOST RTDE observation times.
+
+        Summing every pose difference counts stationary encoder/pose variation
+        as travel. Keep that sum for diagnosis, not as the travel budget. The
+        independent radial lower bound still catches displacement with missing
+        velocity evidence; it must not be repeatedly added to the integral.
+        """
+        pose = robot.pose
+        self.reacquire_raw_pose_path_length += float(np.linalg.norm(pose[:2]-self._recovery_previous_pose))
+        self._recovery_previous_pose = pose[:2].copy()
+        elapsed = robot.timestamp-self._recovery_previous_observation_time
+        if elapsed > 0:
+            speed = float(np.linalg.norm(robot.tcp_speed[:2]))
+            self.reacquire_speed_path_length += .5*(self._recovery_previous_speed+speed)*elapsed
+            self._recovery_previous_observation_time = robot.timestamp
+            self._recovery_previous_speed = speed
+        self.reacquire_max_displacement = max(self.reacquire_max_displacement,
+            float(np.linalg.norm(pose[:2]-self.reacquire_origin[:2])))
+        self.reacquire_path_length = max(self.reacquire_speed_path_length,
+                                        self.reacquire_max_displacement)
+
     def _recover(self, now, robot, vector):
         pose = robot.pose
-        self.reacquire_path_length += float(np.linalg.norm(pose[:2]-self._recovery_previous_pose))
-        self._recovery_previous_pose = pose[:2].copy()
+        self._observe_reacquire_path(robot)
         self.reacquire_tracking_error = float(np.linalg.norm(self.reacquire_reference-pose[:2]))
         margin = float(self.c['boundary_margin'])
         limits = (
-            (now-self._reacquire >= float(self.c['reacquire_max_time_sec']), 'time'),
+            (now >= self._reacquire+float(self.c['reacquire_max_time_sec']), 'time'),
             (np.linalg.norm(pose[:2]-self.reacquire_origin[:2]) >= float(self.c['reacquire_max_distance'])-margin, 'displacement'),
             (self.reacquire_path_length >= float(self.c['reacquire_max_path'])-margin, 'path'),
             (self.reacquire_tracking_error > float(self.c['reacquire_max_tracking_error']), 'tracking error'),
@@ -655,10 +686,13 @@ class ContinuousTrackingPolicy:
         for exceeded, reason in limits:
             if exceeded:
                 if self.real_execution:
-                    if reason in ('time', 'tracking error'):
+                    if reason == 'tracking error':
                         self.diagnostics[f'recovery_{reason}'] = f'WARNING: local reacquire {reason} budget exceeded'
                         continue  # Existing reference freezes when following error is large.
-                    if self.contact_flag or self._confirm_started is not None:
+                    # No measured motion means the travel budget may never
+                    # expire. Keep this recovery episode bounded by its
+                    # configured time even while contact is being confirmed.
+                    if reason != 'time' and (self.contact_flag or self._confirm_started is not None):
                         continue  # Stop and confirm contact before declaring spatial exhaustion.
                 self.request_stop(now, pose, f'local reacquire {reason} budget exhausted',
                                   code=TerminationReason.STOP_RECOVERY_EXHAUSTED, event='BUDGET_STOP')
@@ -908,7 +942,7 @@ class ContinuousTrackingPolicy:
                     self._event(now, pose, 'REACQUIRED')
                 return self._command(pose)
             if self._settled(now, robot):
-                self._begin_recovery(now, pose)
+                self._begin_recovery(now, pose, robot=robot)
             elif now-self._confirm_started >= float(self.c['confirmation_timeout_sec']):
                 self.request_stop(now, pose, 'contact lost stop confirmation timeout')
             return self._command(pose)
@@ -936,6 +970,8 @@ class ContinuousTrackingPolicy:
             int(self.direction_limited), *self.measurement_direction, int(self.stop_requested), int(self.stop_confirmed),
             self.contact_hold_elapsed, self.settle_hold_elapsed, *origin, *reference,
             self.reacquire_tracking_error, self.reacquire_path_length,
+            self.reacquire_speed_path_length, self.reacquire_raw_pose_path_length,
+            self.reacquire_max_displacement,
             memory.get('timestamp', float('nan')), memory.get('confidence', 0.), self.reason,
             *memory_pose, *memory_normal, *loss, *recovery_normal, *recovery_tangent,
         )))

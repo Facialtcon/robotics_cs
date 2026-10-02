@@ -267,6 +267,7 @@ class SafeReturnExecutor:
                 self.command_speed = float(speed)
                 self.controller.move_linear_async(self.target, speed, self.settings['return_acceleration'])
                 deadline = time.monotonic() + float(self.settings['return_segment_timeout_sec'])
+                arrival_deadline = None
                 while True:
                     started = time.monotonic()
                     state = self.observe()
@@ -275,8 +276,20 @@ class SafeReturnExecutor:
                             self.controller.diagnostics['return_progress'] = f'WARNING: {self.phase} taking longer than configured interval'
                         else:
                             raise ReturnAborted(f'{self.phase} timed out')
-                    if self._at_target(state):
+                    at_target = self._at_target(state)
+                    # Position tolerance can be reached while moveL is still
+                    # decelerating. Do not cancel that trajectory with stopL.
+                    # The owner requires fresh RTDE packets and a held low speed.
+                    if at_target and self.controller.standstill_confirmed:
                         break
+                    now = time.monotonic()
+                    if at_target and arrival_deadline is None:
+                        # Bound the new natural-settling wait using the existing
+                        # stop-confirmation budget. Leaving tolerance must not
+                        # restart it and permit an endless endpoint oscillation.
+                        arrival_deadline = now + float(self.controller.config.get('confirmation_timeout_sec', 1.0))
+                    if arrival_deadline is not None and now >= arrival_deadline:
+                        raise ReturnAborted(f'{self.phase} did not settle at target')
                     time.sleep(max(0., self.period-(time.monotonic()-started)))
                 self.phase += '_STOPPING'
                 state = self._settle()

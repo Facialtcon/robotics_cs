@@ -315,9 +315,14 @@ class URRTDEController:
                 if self._speed_guard_since is None:
                     self._speed_guard_since = now
                 self._speed_guard_count += 1
-            elif not expired:
+            elif self.config.get('continuous_real_execution') or not expired:
                 self._speed_guard_since = None
                 self._speed_guard_count = 0
+                expired = False
+                # Real mode reports phase overspeed without fault-latching.
+                # A fresh normal sample ends that episode; prior log rows
+                # retain the warning, without labelling current zero speed high.
+                self.diagnostics.pop('phase_speed', None)
         # Missing packet provenance cannot authorize a debounced overspeed.
         severe = measured > hard or (measured > trip and self._packet_stamp is None)
         sustained = expired or self._speed_guard_count >= CONTINUOUS_DEBOUNCE_PACKETS

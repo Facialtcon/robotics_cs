@@ -8,6 +8,7 @@ driver in this workspace.
 from __future__ import annotations
 
 import math
+import os
 import struct
 import time
 from collections import deque
@@ -123,10 +124,14 @@ class PX6DReader:
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
                 timeout=0.0,
-                write_timeout=0.0,  # One nonblocking 6-byte write; short writes fail closed.
+                write_timeout=0.0,  # POSIX requests bypass pyserial's EAGAIN retry loop below.
                 xonxoff=False,
                 rtscts=False,
                 dsrdtr=False,
+                # pyserial takes the POSIX flock before changing settings or
+                # clearing input. This excludes cooperating project readers;
+                # it is not protection against clients that ignore flock.
+                **({'exclusive': True} if os.name == 'posix' else {}),
             )
             # Opening this USB CDC port can reset or temporarily stall the
             # PX6D firmware.  v1.0.1 on the lab sensor needs a settling delay.
@@ -286,6 +291,7 @@ class PX6DReader:
             request_start_host_monotonic=started, timeout_sec=timeout_sec,
             timeout_scope='whole request: pacing/write/output drain/read/parse',
             request_deadline_host_monotonic=deadline, parse_elapsed_sec=0.,
+            write_method=None, write_fd_nonblocking=None,
             flush_method='bounded out_waiting polling; no blocking tcdrain',
             previous_request_interval_sec=None, pacing_elapsed_sec=0., write_elapsed_sec=0., flush_elapsed_sec=0.,
             tx_bytes=0, rx_bytes=0, buffer_bytes_start=len(self._buffer),
@@ -322,7 +328,20 @@ class PX6DReader:
             stage = 'write'
             diagnostic['tx_bytes'] = None  # Unknown if write raises after a partial send.
             try:
-                diagnostic['tx_bytes'] = self._port.write(command)
+                if os.name == 'posix' and callable(getattr(self._port, 'fileno', None)):
+                    # pyserial's write_timeout=0 still retries EAGAIN/EINTR
+                    # internally without a deadline. Send once on its already
+                    # nonblocking fd; short writes and errors fail closed.
+                    diagnostic['write_method'] = 'single nonblocking os.write'
+                    fd = self._port.fileno()
+                    diagnostic['write_fd_nonblocking'] = not os.get_blocking(fd)
+                    if not diagnostic['write_fd_nonblocking']:
+                        raise PX6DError('PX6D serial fd is blocking; refusing unbounded write')
+                    diagnostic['tx_bytes'] = os.write(fd, command)
+                else:
+                    # Preserve non-POSIX adapters and hardware-free test ports.
+                    diagnostic['write_method'] = 'serial.write adapter'
+                    diagnostic['tx_bytes'] = self._port.write(command)
             finally:
                 diagnostic['write_elapsed_sec'] = time.monotonic()-self._last_request_started
             if diagnostic['tx_bytes'] != len(command):

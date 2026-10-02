@@ -1,4 +1,6 @@
-"""Serial protocol and deadline tests use only a fake clock and byte queues."""
+"""Serial tests use fake clocks/byte queues and local pipes, never devices."""
+import errno
+import os
 import struct
 from types import SimpleNamespace
 
@@ -322,6 +324,133 @@ def test_short_write_fails_without_waiting_for_a_response(serial_reader):
     assert failure.value.sensor_diagnostics['requests'][-1]['read_iterations'] == 0
 
 
+@pytest.fixture
+def nonblocking_pipe():
+    if os.name != 'posix':
+        pytest.skip('POSIX serial write path')
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(write_fd, False)
+    try:
+        yield read_fd, write_fd
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+@pytest.mark.parametrize('command,reply', [
+    (px.GET_FRAME_COMMAND, packet()), (px.GET_VERSION_COMMAND, version_packet())])
+def test_posix_request_writes_exact_command_once_without_pyserial_retry_loop(
+        serial_reader, nonblocking_pipe, monkeypatch, command, reply):
+    reader, port, _ = serial_reader
+    read_fd, write_fd = nonblocking_pipe
+    monkeypatch.setattr(port, 'fileno', lambda: write_fd, raising=False)
+    writes = []
+    real_write = os.write
+    def write_once(fd, data):
+        writes.append((fd, data))
+        count = real_write(fd, data)
+        port.rx.extend(reply)
+        return count
+    with monkeypatch.context() as patch:
+        patch.setattr(px.os, 'write', write_once)
+        assert reader._request(command, len(reply), .05) == reply
+    assert writes == [(write_fd, command)]
+    assert not port.writes  # The adapter's pyserial-style write is bypassed.
+    assert os.read(read_fd, len(command)) == command
+    record = reader.diagnostics_snapshot()['requests'][-1]
+    assert record['write_method'] == 'single nonblocking os.write'
+    assert record['write_fd_nonblocking'] is True
+    assert record['tx_bytes'] == len(command)
+
+
+@pytest.mark.parametrize('error_number', [errno.EAGAIN, errno.EINTR, errno.EIO])
+def test_posix_write_error_fails_once_and_latches_without_waiting_for_reply(
+        serial_reader, nonblocking_pipe, monkeypatch, error_number):
+    reader, port, clock = serial_reader
+    _, write_fd = nonblocking_pipe
+    monkeypatch.setattr(port, 'fileno', lambda: write_fd, raising=False)
+    writes = []
+    def fail_write(fd, data):
+        writes.append((fd, data))
+        raise OSError(error_number, 'offline injected serial write failure')
+    started = clock.now
+    with monkeypatch.context() as patch:
+        patch.setattr(px.os, 'write', fail_write)
+        with pytest.raises(px.PX6DError, match='serial write failed') as failure:
+            reader.read_wrench()
+        port.rx.extend(packet())
+        with pytest.raises(px.PX6DError, match='requires explicit'):
+            reader.read_wrench()
+    assert writes == [(write_fd, px.GET_FRAME_COMMAND)]
+    assert clock.now == started
+    record = failure.value.sensor_diagnostics['requests'][-1]
+    assert record['failure_stage'] == 'write' and record['read_iterations'] == 0
+    assert record['tx_bytes'] is None
+    assert failure.value.sensor_diagnostics['requires_resynchronization']
+
+
+def test_posix_full_nonblocking_pipe_returns_real_eagain_without_retry(
+        serial_reader, nonblocking_pipe, monkeypatch):
+    reader, port, _ = serial_reader
+    _, write_fd = nonblocking_pipe
+    monkeypatch.setattr(port, 'fileno', lambda: write_fd, raising=False)
+    while True:
+        try:
+            os.write(write_fd, b'x' * 4096)
+        except BlockingIOError:
+            break
+    real_write = os.write
+    writes = []
+    def bounded_write(fd, data):
+        writes.append((fd, data))
+        assert len(writes) == 1, 'EAGAIN must not trigger a second write'
+        return real_write(fd, data)
+    with monkeypatch.context() as patch:
+        patch.setattr(px.os, 'write', bounded_write)
+        with pytest.raises(px.PX6DError, match='serial write failed') as failure:
+            reader.read_wrench()
+    assert isinstance(failure.value.__cause__, BlockingIOError)
+    assert writes == [(write_fd, px.GET_FRAME_COMMAND)]
+    assert reader.diagnostics_snapshot()['requires_resynchronization']
+
+
+def test_posix_short_write_never_sends_remainder(serial_reader, nonblocking_pipe, monkeypatch):
+    reader, port, _ = serial_reader
+    read_fd, write_fd = nonblocking_pipe
+    monkeypatch.setattr(port, 'fileno', lambda: write_fd, raising=False)
+    real_write = os.write
+    writes = []
+    def short_write(fd, data):
+        writes.append((fd, data))
+        return real_write(fd, data[:3])
+    with monkeypatch.context() as patch:
+        patch.setattr(px.os, 'write', short_write)
+        with pytest.raises(px.PX6DError, match='write was incomplete') as failure:
+            reader.read_wrench()
+    assert writes == [(write_fd, px.GET_FRAME_COMMAND)]
+    assert os.read(read_fd, 3) == px.GET_FRAME_COMMAND[:3]
+    record = failure.value.sensor_diagnostics['requests'][-1]
+    assert record['tx_bytes'] == 3 and record['read_iterations'] == 0
+    assert failure.value.sensor_diagnostics['requires_resynchronization']
+
+
+def test_posix_blocking_fd_is_rejected_before_write(serial_reader, nonblocking_pipe, monkeypatch):
+    reader, port, _ = serial_reader
+    _, write_fd = nonblocking_pipe
+    os.set_blocking(write_fd, True)
+    monkeypatch.setattr(port, 'fileno', lambda: write_fd, raising=False)
+    def forbidden_write(*args):
+        pytest.fail('blocking fd must never be written')
+    with monkeypatch.context() as patch:
+        patch.setattr(px.os, 'write', forbidden_write)
+        with pytest.raises(px.PX6DError, match='fd is blocking') as failure:
+            reader.read_wrench()
+    record = failure.value.sensor_diagnostics['requests'][-1]
+    assert record['write_fd_nonblocking'] is False
+    assert record['read_iterations'] == 0
+    assert failure.value.sensor_diagnostics['requires_resynchronization']
+
+
 def test_request_history_is_bounded_and_snapshot_detached(serial_reader):
     reader, port, _ = serial_reader
     port.on_write = lambda command: port.rx.extend(packet())
@@ -341,6 +470,120 @@ def test_duplicate_connect_does_not_open_or_close_another_port(serial_reader):
     assert reader._port is port and not port.closed
 
 
+@pytest.fixture
+def real_pty_sensor(monkeypatch):
+    """Real POSIX serial opens and flock, confined to a local pseudo-terminal."""
+    if os.name != 'posix':
+        pytest.skip('POSIX exclusive serial access')
+    import pty
+    import select
+    import serial
+    import serial.serialposix
+    import threading
+    master, slave = pty.openpty()
+    device = os.ttyname(slave)
+    requests, errors, ports = [], [], []
+    stopped = threading.Event()
+
+    def peer():
+        pending = bytearray()
+        try:
+            while not stopped.is_set():
+                if not select.select([master], [], [], .02)[0]:
+                    continue
+                pending.extend(os.read(master, 1024))
+                while len(pending) >= 6:
+                    command = bytes(pending[:6])
+                    del pending[:6]
+                    assert command in (px.GET_VERSION_COMMAND, px.GET_FRAME_COMMAND)
+                    requests.append(command)
+                    os.write(master, version_packet() if command == px.GET_VERSION_COMMAND else packet())
+        except BaseException as exc:
+            errors.append(exc)
+
+    def open_local_pty(path, **kwargs):
+        assert path == device and path.startswith('/dev/pts/')
+        port = serial.serialposix.Serial(path, **kwargs)
+        ports.append(port)
+        return port
+
+    monkeypatch.setattr(serial, 'Serial', open_local_pty)
+    thread = threading.Thread(target=peer, daemon=True)
+    thread.start()
+    try:
+        yield SimpleNamespace(device=device, master=master, requests=requests, errors=errors)
+    finally:
+        stopped.set()
+        thread.join(2.)
+        for port in ports:
+            port.close()
+        os.close(master)
+        os.close(slave)
+
+
+def test_posix_second_reader_cannot_clear_or_close_current_owner(real_pty_sensor):
+    import time
+    device = real_pty_sensor
+    first = px.PX6DReader(device.device, startup_delay_sec=0.)
+    second = px.PX6DReader(device.device, startup_delay_sec=0.)
+    try:
+        first.connect()
+        assert first.firmware == 'v1.0.1'
+        original_port = first._port
+        # An accidental second open used to flush this owner's input queue.
+        queued = b'pending-owner-response'
+        os.write(device.master, queued)
+        deadline = time.monotonic()+1.
+        while original_port.in_waiting < len(queued) and time.monotonic() < deadline:
+            time.sleep(.001)
+        assert original_port.in_waiting == len(queued)
+        with pytest.raises(px.PX6DError, match='exclusively lock') as failed:
+            second.connect()
+        assert second._port is None
+        assert first._port is original_port and original_port.is_open
+        assert original_port.read(len(queued)) == queued
+        assert device.requests == [px.GET_VERSION_COMMAND]
+        assert failed.value.sensor_diagnostics['requests'] == []
+        assert failed.value.__cause__ is not None
+        assert first.read_wrench().fx == 1.
+        assert device.requests == [px.GET_VERSION_COMMAND, px.GET_FRAME_COMMAND]
+
+        first.close()
+        second.connect()
+        assert second.firmware == 'v1.0.1'
+        assert second.read_wrench().fx == 1.
+        assert device.requests == [px.GET_VERSION_COMMAND, px.GET_FRAME_COMMAND]*2
+        assert not device.errors
+    finally:
+        first.close()
+        second.close()
+
+
+def test_non_posix_open_preserves_serial_adapter_arguments(monkeypatch):
+    import serial
+    clock = Clock()
+    port = Port(clock)
+    port.reset_output_buffer = lambda: None
+    options = {}
+
+    def serial_adapter(device, **kwargs):
+        assert device == 'offline-fake-port'
+        options.update(kwargs)
+        return port
+
+    monkeypatch.setattr(px, 'os', SimpleNamespace(name='nt'))
+    monkeypatch.setattr(serial, 'Serial', serial_adapter)
+    reader = px.PX6DReader('offline-fake-port', startup_delay_sec=0.)
+    monkeypatch.setattr(reader, '_request', lambda *args: version_packet())
+    try:
+        reader.connect()
+        assert reader.firmware == 'v1.0.1'
+        assert 'exclusive' not in options
+        assert options['timeout'] == options['write_timeout'] == 0.
+    finally:
+        reader.close()
+
+
 @pytest.mark.parametrize('respond', [True, False])
 def test_read_only_cli_writes_diagnostics_after_close_without_retries(serial_reader, monkeypatch, tmp_path, capsys, respond):
     import json
@@ -348,7 +591,7 @@ def test_read_only_cli_writes_diagnostics_after_close_without_retries(serial_rea
     from tools import check_px6d
     reader, port, _ = serial_reader
     monkeypatch.setattr(reader, 'connect', lambda: None)
-    monkeypatch.setattr(check_px6d, 'PX6DReader', lambda *args: reader)
+    monkeypatch.setattr(check_px6d, 'DiagnosticPX6DReader', lambda *args: reader)
     output = tmp_path/'sensor.json'
     monkeypatch.setattr(sys, 'argv', ['check_px6d', '--samples', '2', '--diagnostics-output', str(output)])
     if respond:

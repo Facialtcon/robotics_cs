@@ -205,6 +205,46 @@ def test_phase_speed_warns_global_speed_and_polygon_stop(real_config):
     owner.close()
 
 
+@pytest.mark.parametrize('high', [.00065, .0008])
+def test_real_speed_warning_clears_only_on_fresh_recovery(real_config, high):
+    robot_config, start = prepare_real(real_config, PROJECT_ROOT/'config.yaml')
+    owner = Devices(real_config, start).controller(robot_config)
+    owner.set_continuous_phase('LOCAL_REACQUIRE')
+    def observe(stamp, now, measured):
+        owner._packet_stamp = stamp
+        owner._check_continuous_speed(np.asarray(start), np.array([measured, 0, 0, 0, 0, 0]), now)
+    observe(1., 10., high)
+    observe(1.03, 10.03, high)
+    assert 'phase_speed' in owner.diagnostics
+    assert owner.speed_guard_diagnostics['speed_guard_state'] == 'WARNING'
+    # A different phase or cached zero-speed read cannot clear the episode.
+    owner.set_continuous_phase('STOP')
+    observe(1.03, 10.04, 0.)
+    assert 'phase_speed' in owner.diagnostics
+    observe(1.05, 10.05, 0.)
+    assert 'phase_speed' not in owner.diagnostics
+    assert owner.speed_guard_diagnostics['speed_guard_state'] == 'OK'
+    assert owner.speed_guard_diagnostics['speed_guard_count'] == 0
+    assert owner.speed_guard_diagnostics['speed_guard_elapsed_sec'] == 0.
+    observe(1.06, 10.06, .00065)
+    assert owner.speed_guard_diagnostics['speed_guard_state'] == 'PENDING'
+    assert owner.speed_guard_diagnostics['speed_guard_count'] == 1
+    assert 'phase_speed' not in owner.diagnostics and not owner.motion_fault
+
+
+def test_nonreal_speed_episode_cannot_clear_after_fault_deadline(real_config):
+    robot_config, start = prepare_real(real_config, PROJECT_ROOT/'config.yaml')
+    owner = Devices(real_config, start).controller(robot_config)
+    owner.config['continuous_real_execution'] = False
+    owner.set_continuous_phase('LOCAL_REACQUIRE')
+    owner._packet_stamp = 1.
+    owner._check_continuous_speed(np.asarray(start), np.array([.00065, 0, 0, 0, 0, 0]), 10.)
+    owner._packet_stamp = 1.03
+    with pytest.raises(RobotError, match='speed exceeds'):
+        owner._check_continuous_speed(np.asarray(start), np.zeros(6), 10.03)
+    assert owner.motion_fault
+
+
 def test_rtde_stagnation_warns_but_disconnect_and_ur_stops_raise(real_config):
     robot_config, start = prepare_real(real_config, PROJECT_ROOT/'config.yaml')
     devices = Devices(real_config, start)

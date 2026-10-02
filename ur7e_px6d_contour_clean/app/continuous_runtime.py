@@ -100,6 +100,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
     previous_cycle_start = None
     last_wrench_observed = None
     sensor_failed = False
+    robot_connect_started = False
     timing = dict.fromkeys(TIMING_FIELDS, '')
     diagnostics = {}
     def software_warnings():
@@ -166,6 +167,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         print(f"Continuous run: {logger.run_dir}", flush=True)
         if args.execute:
             reader.connect()
+            robot_connect_started = True
             controller.connect(allow_start_away_from_fixed_pose=True)
         else:
             robot = controller.read_state()
@@ -381,7 +383,15 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         result = 1
     finally:
         # Always stop before diagnostics, disk writes or resource disconnection.
-        if (controller is not None and args.execute and getattr(controller, 'connection_failed', False)
+        if (controller is not None and args.execute and not robot_connect_started
+                and getattr(controller, 'receive', None) is None
+                and getattr(controller, 'control', None) is None):
+            # Sensor startup may fail before any robot connection or command.
+            # There is no RTDE observation to make and no physical stop claim.
+            stop_snapshot_info = dict(source='not_connected', standstill_confirmed=False,
+                motion_status='no_motion_commanded_by_this_task',
+                runtime_stop_state='NOT_CONNECTED', stop_requests=[])
+        elif (controller is not None and args.execute and getattr(controller, 'connection_failed', False)
                 and getattr(controller, 'receive', None) is None):
             # connect() already closed its partially initialized interfaces.
             # Preserve the root error and do not pretend the cached pose proves standstill.

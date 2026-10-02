@@ -29,7 +29,7 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 | 项目 | 查看或操作 |
 |---|---|
 | 停止原因 | `termination.json` / `termination.txt` 的 reason、detail、phase；`summary.json` 的停止确认结果 |
-| 为什么不动 | `samples.csv` 的 `tangent_limit_reason`、处理后力、n/t、指令和实际 TCP 速度/位移；`software_warnings` 是历史告警 |
+| 为什么不动 | `samples.csv` 的 `tangent_limit_reason`、处理后力、n/t、指令和实际 TCP 速度/位移；`software_warnings` 可能包含历史告警，不等于当前停止原因 |
 | 接触刹停与卸力 | `policy_waypoints.csv` 的接触、首次低速、停稳、进入跟踪、卸力和恢复事件；停止请求历史区分制动与保持确认 |
 | 传感器异常 | 请求编号、主机单调时间、实际总耗时、write/输出等待/read/解析耗时、收发字节数、CRC 失败数、缓冲区及循环最长间隔 |
 | 最后有效力 | `last_valid_wrench_host_monotonic` / `last_valid_wrench_age_sec`；主机接收时间不是传感器采样时间，超时快照不是新测量 |
@@ -39,11 +39,18 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 | 回放 | 菜单 **19** 选择明确运行目录；**20** 配合本次箱体标定查看工作空间投影 |
 
 PX6D 使用配置中的串口路径，921600 baud、8N1、100 Hz。先结束其他占用串口的程序。
+Linux 上本项目的读取器以排他文件锁打开串口，重复打开会失败；该协作锁不能阻止所有不遵守锁的外部程序。
 50 ms 限制整个请求，含节拍、write、输出等待、read 和解析；没有延长超时。
 读取失败后立即停止，由 RTDE 独立、有界确认静止；不会继续请求、复用旧力、盲目重试或重新采零。
 `rx_bytes=0` 只代表主机未读到字节；结合 `serial_bytes_at_failure` 判断队列积压。
 收到部分字节看缓冲长度，候选包无效看 CRC/类型计数；`valid_packet_buffered_at_failure` 只检查缓冲头部。
 实际超预算及调度间隔另有记录，不会一律显示成恰好 50 ms。
+`tx_bytes=6` 只证明主机写入接受了请求，不能证明 PX6D 已收到。只读工具在失败后被动监听
+1 秒，结果见 `passive_after_failure`，期间不发请求、不把迟到包用作新力。
+若请求期间和被动监听均为零接收，先保持机器人停止，检查/更换 USB 线及供电、重新连接设备，
+再执行同一只读采集；无需修改接触阈值或增大超时。仍断流时保留 JSON，进一步核查设备固件及 USB 链路。
+若 PX6D 初始化就失败、机器人接口尚未连接，停止报告显示 `NOT_CONNECTED`；这不代表真机停稳失败，
+也不冒称已通过 RTDE 确认停稳。
 
 ### 接触后切向为零与卸力
 
@@ -61,6 +68,22 @@ PX6D 使用配置中的串口路径，921600 baud、8N1、100 Hz。先结束其�
 参考力 1.5 N、死区 0.15 N、增益 0.0005 (m/s)/N 不变。Fxy 是处理后的平面合力，并非纯目标法向力。
 不自动扣背景、翻转方向或接触采零。TCP、工作空间及原有速度/力保护不变；原真实模式原始力/矩
 60 N / 5 Nm 为硬停止阈值，处理后 12 N / 1 Nm 保持原诊断语义。
+
+### 接触丢失与重接触路径耗尽
+
+低力确认接触丢失后，先停稳，再按原局部弧线重接触。路径预算采用实际平面 TCP 速度模长
+按主机 RTDE 观测时间积分，并以本次最大起点位移作为下界；不再把每帧位置往返波动全部算成行程。
+`samples.csv` 同时记录 `reacquire_speed_path_length`（速度积分）、`reacquire_raw_pose_path_length`
+（原逐帧位置差累计）、`reacquire_max_displacement`（最大起点位移），单位均为米。
+生效计数为 `reacquire_path_length`。这些是反馈估计，不能单靠两种计数的差值区分测量噪声与真实微动。
+
+原 4 mm 路径/位移预算及 0.5 mm 预留、0.5 mm/s 速度上限、参考弧长和空间边界不变。
+重接触累计达到原配置的 **8 秒**仍未完成时，报告 `STOP_RECOVERY_EXHAUSTED` 并停止；
+真实模式也执行此截止，避免没有进展时长期挂起。力重新出现不会重置本轮截止时间。
+若重接触时力继续下降，须核对实际安装方向；软件不自动翻转符号或扩大搜索范围。
+
+真实模式的阶段超速告警在新鲜 RTDE 样本恢复到阈值内后清除，当前状态回到 `OK`；
+重复时间戳不能清除告警，原超速记录仍保留在此前日志行。全局速度硬限不变。
 
 ### 可选方向观察与只读通信诊断
 
@@ -104,8 +127,8 @@ Remote Control、安全状态和其他控制程序占用。Q/Esc 不响应时检
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/user-linux/robotics_cs/.venv312/bin/python -m pytest -q
-/home/user-linux/robotics_cs/.venv312/bin/python tools/replay_continuous_policy.py data/real/continuous/run_20261002_121516_883033 --output data/analysis/continuous_replay_20261002.json
+/home/user-linux/robotics_cs/.venv312/bin/python tools/replay_continuous_policy.py data/real/continuous/run_20261002_181532_094239 --output data/analysis/reacquire_20261003/replay_after.json
 ```
 
-重放使用保存配置和记录输入，不再区分“方向已验证/未验证”。记录仅包含约 0.63 s 跟踪，
-不能外推 1.5 s 之后的卸力效果，也不能把改变指令后的记录输入重放视为真实闭环轨迹。
+重放使用保存配置和记录输入，跳过独立执行的启动返回段；报告首次指令/状态变化及原停机帧的
+新旧路径计数。不能把改变指令后的记录输入重放视为真实闭环轨迹，也不能推断日志结束后的接触结果。

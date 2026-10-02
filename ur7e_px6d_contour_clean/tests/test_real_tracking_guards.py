@@ -306,19 +306,38 @@ def test_contact_at_recovery_budget_edge_can_confirm(real):
     assert policy.state == State.CONTINUOUS_TRACKING
 
 
-def test_recovery_nonspatial_limits_warn_and_existing_spatial_limit_stops(real):
+def test_recovery_memory_and_tracking_error_warn_but_spatial_limit_stops(real):
     config, *_ = real
     policy = tracking(config)
     policy.last_reliable_contact['timestamp'] = -10.
     policy._last_recovery_origin = np.zeros(6)
     lose(policy)
-    policy._reacquire = -10.
     policy.reacquire_reference = np.array([.001, 0])
     assert sample(policy, 1.19, 0.).move
     assert policy.state == State.LOCAL_REACQUIRE
-    assert {'recovery_memory', 'recovery_progress', 'recovery_time', 'recovery_tracking error'} <= policy.diagnostics.keys()
+    assert {'recovery_memory', 'recovery_progress', 'recovery_tracking error'} <= policy.diagnostics.keys()
     assert sample(policy, 1.20, 0., pose=np.array([.004, 0, 0, 0, 0, 0])).state == 'STOP'
     assert 'displacement' in policy.reason
+
+
+@pytest.mark.parametrize('force', [0., 1.5])
+def test_recovery_time_budget_stops_without_measurable_progress(real, force):
+    config, *_ = real
+    policy = tracking(config)
+    lose(policy)
+    deadline = policy._reacquire+policy.c['reacquire_max_time_sec']
+    # Fresh zero-speed feedback at the same pose must not wait forever once
+    # pose noise no longer falsely consumes the path budget. No budget reset
+    # is granted for contact arriving on the deadline.
+    now = policy._last_time
+    while now+.01 < deadline:
+        now += .01
+        command = sample(policy, now, 0.)
+        assert policy.state == State.LOCAL_REACQUIRE
+    command = sample(policy, deadline, force)
+    assert policy.state == State.STOP and not command.move
+    assert policy.stop_reason.value == 'STOP_RECOVERY_EXHAUSTED'
+    assert policy.reason == 'local reacquire time budget exhausted'
 
 
 def test_real_overload_uses_measured_budget_then_stops_without_motion(real):

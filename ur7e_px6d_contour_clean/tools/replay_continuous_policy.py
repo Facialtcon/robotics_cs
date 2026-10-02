@@ -22,6 +22,7 @@ def replay(run_dir):
         rows = list(csv.DictReader(stream))
     original = json.loads((directory/'termination.json').read_text())
     result = dict(source=str(directory.resolve()), sample_count=len(rows),
+        skipped_return_samples=sum(row['current_state'] == 'RETURN_TO_START' for row in rows),
         original_termination_reason=original['reason'], original_termination_detail=original['detail'],
         original_configuration_sha=config.get('continuous_provenance', {}).get('commit'),
         new_unload_defaults=UNLOAD_DEFAULTS,
@@ -31,7 +32,13 @@ def replay(run_dir):
         policy = ContinuousTrackingPolicy(deepcopy(config))
         max_error, first_change, state_differences = 0., None, 0
         first_limits = {}
+        replayed_samples, recorded_stop_comparison = 0, None
         for index, row in enumerate(rows):
+            # Startup return has its own executor and no policy read intervals.
+            # Feeding it to this policy also invents a pre-scan search history.
+            if row['current_state'] == 'RETURN_TO_START':
+                continue
+            replayed_samples += 1
             now = float(row['monotonic_sec'])
             raw = Wrench.from_sequence([float(row[k]) for k in ('raw_fx','raw_fy','raw_fz','raw_tx','raw_ty','raw_tz')])
             processed = Wrench.from_sequence([float(row[k]) for k in ('dfx','dfy','dfz','dtx','dty','dtz')])
@@ -48,7 +55,17 @@ def replay(run_dir):
                                     old_state=row['current_state'], new_state=command.state)
             if policy.tangent_limit_reason:
                 first_limits.setdefault(policy.tangent_limit_reason, now)
+            if row['current_state'] == 'STOP' and recorded_stop_comparison is None:
+                telemetry = policy.telemetry(command)
+                recorded_stop_comparison = dict(csv_line=index+2, host_monotonic=now,
+                    old_reason=row['reason'], new_state=command.state, new_reason=command.reason,
+                    old_reacquire_path_length_m=float(row['reacquire_path_length']),
+                    new_reacquire_path_length_m=policy.reacquire_path_length,
+                    new_path_diagnostics={key: value for key, value in telemetry.items()
+                        if key in ('reacquire_raw_pose_path_length', 'reacquire_speed_path_length',
+                                   'reacquire_max_displacement')})
         result['cases'][case] = dict(final_state=policy.state.value,
+            replayed_samples=replayed_samples, recorded_stop_comparison=recorded_stop_comparison,
             stop_reason=None if policy.stop_reason is None else policy.stop_reason.value,
             state_differences=state_differences, max_command_difference_mps=max_error,
             first_changed_output=first_change, current_limit_first_seen=first_limits,

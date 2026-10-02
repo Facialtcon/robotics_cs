@@ -8,6 +8,7 @@ from experiment_logging.paths import PROJECT_ROOT
 from robot.rtde_controller import RobotError
 from safety.safe_return import SafeReturnExecutor, PX6DForceMonitor, return_trajectory
 from sensor.force_preprocess import WrenchPreprocessor
+from sensor.px6d_reader import PX6DTimeout
 from test_real_tracking_guards import clock, real
 
 
@@ -157,6 +158,12 @@ def test_return_waits_for_strict_speed_and_80ms_before_next_segment(real, clock,
     move = devices.control.moveL
     pending = None
     previous_low_at = None
+    stops = []
+    stop = devices.control.stopL
+    def record_stop(*args):
+        stops.append((clock.now, previous_low_at))
+        return stop(*args)
+    devices.control.stopL = record_stop
     count = 0
     def move_with_slow_braking(*args):
         nonlocal pending, previous_low_at, count
@@ -187,6 +194,133 @@ def test_return_waits_for_strict_speed_and_80ms_before_next_segment(real, clock,
     result = executor.execute()
     assert result.status == 'complete' and count == 4
     assert high_observations and all(v == high for v in high_observations)
+    # Entering the position tolerance must not cancel a still-moving moveL.
+    assert len(stops) == 4
+    assert all(stopped-low_at >= .08-1e-9 for stopped, low_at in stops)
+
+
+def test_startup_return_does_not_brake_on_recorded_moving_endpoint(real, clock):
+    config, start, devices, owner = real
+    devices.receive.pose[0] += .003
+    owner.activate_control(confirmed=True)
+    move, stop = devices.control.moveL, devices.control.stopL
+    pending = None
+    early_stops = []
+    # run_20261002_175719_740837, sample 284: 0.955 mm from target,
+    # actual XYZ speed 5.483 mm/s immediately before the premature stopL.
+    offset = np.array([.6413212902361332-.6411369442455408,
+                       .35976357840240863-.36063827570822093,
+                       .056754071548616725-.057090414301392584])
+    velocity = [.0006373948439216648, .0035713509187579773, .004110830918803425]
+    assert np.linalg.norm(offset) < config['continuous_tracking']['startup_position_tolerance']
+    def delayed_move(*args):
+        nonlocal pending
+        accepted = move(*args)
+        pending = (clock.now+.12, devices.receive.pose.copy())
+        devices.receive.pose[:3] += offset
+        devices.receive.speed[:3] = velocity
+        return accepted
+    def poll():
+        nonlocal pending
+        if pending is not None and clock.now >= pending[0]:
+            # Synthetic natural completion; the log cannot predict a new trajectory.
+            devices.receive.pose[:] = pending[1]
+            devices.receive.speed[:] = 0.
+            pending = None
+    def stop_move(*args):
+        nonlocal pending
+        if pending is not None:
+            early_stops.append(clock.now)
+            # A stop cancels moveL. Reproduce the recorded settled error (>1 mm).
+            devices.receive.pose[:] = pending[1]
+            devices.receive.pose[1] -= .001001078745344
+            pending = None
+        return stop(*args)
+    devices.control.moveL, devices.control.stopL = delayed_move, stop_move
+    monitor = PX6DForceMonitor(config, Sensor(), WrenchPreprocessor.from_config(config['preprocessing']))
+    result = SafeReturnExecutor(config, start, owner, force_monitor=monitor, poll=poll).execute()
+    assert result.status == 'complete', result.abort_reason
+    assert not early_stops
+    np.testing.assert_array_equal(result.final_pose, start)
+    assert len([c for c in devices.control.calls if c[0] == 'moveL']) == 3
+
+
+@pytest.mark.parametrize('fault', ['moving', 'leaves_tolerance', 'frozen_rtde'])
+def test_return_endpoint_wait_has_finite_stop_budget(real, clock, fault):
+    config, start, devices, owner = real
+    misalign(devices, start)
+    owner.activate_control(confirmed=True)
+    move, stop = devices.control.moveL, devices.control.stopL
+    started = None
+    stopped = []
+    def stalled_move(*args):
+        nonlocal started
+        accepted = move(*args)
+        started = clock.now
+        if fault == 'frozen_rtde':
+            devices.receive.frozen_stamp = owner._packet_stamp
+        else:
+            devices.receive.speed[0] = .0008
+        return accepted
+    def poll():
+        if fault == 'leaves_tolerance' and started is not None and clock.now-started >= .05:
+            devices.receive.pose[0] = start[0]+.005  # 2 mm beyond the retreat target.
+    def stop_move(*args):
+        stopped.append(clock.now)
+        # Fresh observations during fault cleanup prove the requested stop.
+        devices.receive.frozen_stamp = None
+        return stop(*args)
+    devices.control.moveL, devices.control.stopL = stalled_move, stop_move
+    result = SafeReturnExecutor(config, start, owner, poll=poll).execute()
+    assert result.status == 'aborted' and 'did not settle at target' in result.abort_reason
+    assert len([c for c in devices.control.calls if c[0] == 'moveL']) == 1
+    budget = owner.config.get('confirmation_timeout_sec', 1.)
+    assert len(stopped) == 1
+    assert budget <= stopped[0]-started < budget+.02
+    assert clock.now-started < budget+.2
+    assert owner.stop_state == 'STOPPED' and owner.standstill_confirmed
+
+
+@pytest.mark.parametrize('fault', ['sensor', 'operator'])
+def test_return_endpoint_wait_preserves_immediate_fault_stop(real, clock, fault):
+    config, start, devices, owner = real
+    misalign(devices, start)
+    owner.activate_control(confirmed=True)
+    move, stop = devices.control.moveL, devices.control.stopL
+    started = failed_at = None
+    stopped = []
+    def moving(*args):
+        nonlocal started
+        accepted = move(*args)
+        started = clock.now
+        devices.receive.speed[0] = .0008
+        return accepted
+    def stop_move(*args):
+        stopped.append(clock.now)
+        return stop(*args)
+    def due():
+        return started is not None and clock.now-started >= .04
+    def poll():
+        nonlocal failed_at
+        if fault == 'operator' and due():
+            failed_at = clock.now
+            return 'Q'
+    class FaultSensor(Sensor):
+        def read_wrench(self):
+            nonlocal failed_at
+            assert failed_at is None, 'fault cleanup must not reread the failed sensor'
+            if fault == 'sensor' and due():
+                failed_at = clock.now
+                raise PX6DTimeout('injected endpoint sensor timeout')
+            return super().read_wrench()
+    devices.control.moveL, devices.control.stopL = moving, stop_move
+    monitor = PX6DForceMonitor(config, FaultSensor(), WrenchPreprocessor.from_config(config['preprocessing']))
+    result = SafeReturnExecutor(config, start, owner, force_monitor=monitor, poll=poll).execute()
+    assert result.status == 'aborted'
+    assert ('PX6DTimeout' if fault == 'sensor' else 'KeyboardInterrupt') in result.abort_reason
+    assert failed_at is not None and stopped == [failed_at]
+    assert len([c for c in devices.control.calls if c[0] == 'moveL']) == 1
+    assert owner.stop_state == 'STOPPED' and owner.standstill_confirmed
 
 
 def test_default_wait_is_strict_but_explicit_preflight_accepts_noise(real, clock):
