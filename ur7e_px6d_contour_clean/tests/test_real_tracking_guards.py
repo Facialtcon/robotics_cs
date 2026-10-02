@@ -38,6 +38,7 @@ def clock(monkeypatch):
 
 @pytest.fixture
 def real(config):
+    config['force_direction_status'] = {'verified': True, 'reason': 'synthetic unit-test force axes'}
     robot_config, start = prepare_real(config, PROJECT_ROOT/'config.yaml')
     devices = Devices(config, start)
     owner = devices.controller(robot_config)
@@ -321,15 +322,17 @@ def test_recovery_nonspatial_limits_warn_and_existing_spatial_limit_stops(real):
     assert 'displacement' in policy.reason
 
 
-def test_real_overload_stall_keeps_outward_normal_and_zero_tangent(real):
+def test_real_overload_uses_measured_budget_then_stops_without_motion(real):
     config, *_ = real
     policy = tracking(config)
     for i in range(101, 180): command = sample(policy, i*.01, 4.)
     assert policy.state == State.CONTINUOUS_TRACKING and command.move
-    assert 'overload_stall' in policy.diagnostics
+    assert policy.tangent_limit_reason == 'HIGH_FORCE_UNLOADING'
     velocity = command.direction_xy*command.speed
     assert np.dot(velocity, policy.tangent) == pytest.approx(0.)
     assert np.dot(velocity, policy.contact_direction) == pytest.approx(-policy.c['normal_speed_limit'])
+    for i in range(180, 280): command = sample(policy, i*.01, 4.)
+    assert policy.stop_reason.value == 'STOP_UNLOAD_NO_MOTION' and not command.move
 
 
 def test_simulation_overload_stall_remains_terminal(real):
@@ -337,8 +340,8 @@ def test_simulation_overload_stall_remains_terminal(real):
     config['continuous_real_execution'] = False
     policy = tracking(config)
     for i, force in enumerate(np.linspace(1.5, 4., 26)[1:], 101): sample(policy, i*.01, force)
-    for i in range(126, 190): sample(policy, i*.01, 4.)
-    assert policy.state == State.STOP and 'unloading' in policy.reason
+    for i in range(126, 290): sample(policy, i*.01, 4.)
+    assert policy.state == State.STOP and policy.stop_reason.value == 'STOP_UNLOAD_NO_MOTION'
 
 
 @pytest.mark.parametrize('kind,small,large', [('z', .0015, .006), ('rotation', 2., 6.)])

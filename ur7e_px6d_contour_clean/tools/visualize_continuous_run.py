@@ -35,6 +35,7 @@ def read_run(run_dir):
                 'sim_boundary_physical_fx','sim_boundary_physical_fy','sim_robot_estimate_fx','sim_robot_estimate_fy'):
         data[key] = np.array([float(row.get(key) or 'nan') for row in rows])
     data['reason'] = [row.get('reason','') for row in rows]
+    data['tangent_limit_reason'] = [row.get('tangent_limit_reason','unavailable (legacy log)') for row in rows]
     data['direction_phase'] = [row.get('direction_phase','unavailable') for row in rows]
     data["time"] = data["monotonic_sec"] - data["monotonic_sec"][0]
     data["state"] = [row["current_state"] for row in rows]
@@ -219,7 +220,8 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
         f=force_values[index];v=speeds[index]
         force.set_title(f'Fx {f[0]:.2f}, Fy {f[1]:.2f}, Fxy {f[2]:.2f} N\nF_ref {f[3]:.2f}, error {f[4]:+.2f} N' if debug else 'Control feedback load [N]',fontsize=8)
         velocity.set_title(f'cmd {v[0]:.3f}, actual {v[1]:.3f} mm/s\nv_t {v[2]:+.3f}, v_n {v[3]:+.3f} mm/s',fontsize=8)
-        title.set_text(f"{data['time'][index]:.2f}s | {data['state'][index]} / {data['direction_phase'][index]} | {data['reason'][index]}")
+        title.set_text(f"{data['time'][index]:.2f}s | {data['state'][index]} / {data['direction_phase'][index]} | "
+                       f"tangent limit: {data['tangent_limit_reason'][index]} | {data['reason'][index]}")
         note.set_text('\n'.join(part for part in (physical['note'],
             component_note(simulated=bool(scene),enabled=debug and components),vectors.truth_note) if part))
         width,height=fig.get_size_inches()

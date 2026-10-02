@@ -16,6 +16,10 @@ def left(vector):
 
 
 def handed_tangent(target_side, hand):
+    """Viewed from Base +Z toward XY, with n toward the target interior:
+    CW keeps target on the right (t=R90*n); CCW on the left (t=-R90*n).
+    Always recompute t from the signed n, never negate n alone afterwards.
+    """
     return left(target_side) * (1 if hand == "CLOCKWISE" else -1)
 
 

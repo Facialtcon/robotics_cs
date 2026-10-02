@@ -156,13 +156,98 @@ python run_continuous_tracking.py --check-calibration
 
 1. 完成设备读取、TCP 和标定检查；探针、传感器、箱体与标定所对应的布置一致。
 2. 机器人静止，探针在扫描姿态下无目标接触，零偏采集期间保持空载。启动程序会采集软件零偏；不要在接触目标时把接触力归零。
-3. 核对传感器到 Base 的力方向变换及符号。必要时执行下方只读工具：先保持空载完成采样，再按提示从已知 Base 方向轻推并观察。工具只连接 PX6D，不连接 UR、不保存配置；显示结果需由操作者结合实际方向判断。
+3. 连续真机连接前必须有与当前配置匹配的实测方向记录。执行下方 `--verify` 工具：先在保存的扫描姿态下静止空载，输入 `UNLOADED` 采集唯一一次软件零偏，然后按提示施加 Base ±X、±Y、±Z 方向的小力。这里的方向指**施加在探针上的力向量**，不是从哪一侧推来。工具只连接 PX6D，不连接 UR、不修改配置或符号；过程中不提供重新采零入口。验证失败时不启动跟踪。
 4. 核对从当前位置到 P0 的完整路径，包括抬升、在安全高度旋转、平移和下降的空间。自动返回没有障碍物碰撞规划。
 5. 使用前台交互终端运行，保证 Q/Esc 可被读取；操作者留在现场并能操作示教器急停。
 
 ```bash
-python tools/check_force_direction.py
+/home/user-linux/robotics_cs/.venv312/bin/python tools/check_force_direction.py --verify
+/home/user-linux/robotics_cs/.venv312/bin/python tools/check_force_direction.py --status
 ```
+
+默认记录为 `calibration/force_direction_verification.json`。记录绑定传感器设备路径、预处理、TCP、
+`force_direction_sign` 和扫描标定文件；这些配置改变后旧记录失效。安装被实际改变但文件未变时，
+软件无法自行知道，操作者必须重新核对。`--status` 完全离线，未通过时退出码为 1。
+首次运行前没有实测文件是正常的“未验证”，单位矩阵不会自动被认作已标定。
+
+六个方向分别采 50 帧，检查去偏置力模长 0.5～3 N、方向误差不超过 15°、三轴合成标准差
+不超过 0.15 N，避免用近零或不稳定信号判断符号。它们是核对工具的判据，不是控制力限；
+现场若无法稳定施加这些已知方向，保留失败记录并使用实际安装测量校准，不能伪造通过记录。
+静止/空载/已知方向依赖现场确认，单个恒定负载无法仅靠传感器自己识别为“错误采零”。
+
+### 力方向、卸力和恢复的约定
+
+`R_BS = rotation_sensor_to_base` 直接把传感器分量转换为 Base 分量，仅适用于保存的固定扫描姿态。
+若从工具安装标定组成它，则 `R_BS = R_BT @ R_TS`；TCP 姿态只提供 `R_BT`，不能推导未知的
+`R_TS`。力只旋转；力矩另外使用已配置的原点偏移项 `r × F`。工具不根据本次力上涨拟合或翻转安装方向。
+
+预处理顺序保持为：空载偏置 → EMA → 配置重力项 → 坐标变换 → 配置颗粒背景基线。
+`Fxy` 是处理后的平面合力，包含无法分离的摩擦、背景及偏差，不是纯目标法向力。
+没有新增自动扣背景、目标接触采零或目标力调整。空载偏置已经包含当时的静态重力；
+另设重力/背景项时必须确认其意义，不能把同一静态负载扣两次。
+
+`n = force_direction_sign * unit(filtered Base XY)` 定义为估计压入/朝目标方向；卸力沿 `-n`。
+若转换后的传感器报告的是环境作用于探针的力，所需 sign 为 -1；若报告相反作用方，所需 sign 为 +1。
+这不是对当前实物符号的判断。工具用实际施力检查配置，失败时由现场标定修正后重新验证，不自动改值。
+`v = vt*t + vn*n`；力过大时 `vn < 0`。从 Base +Z 看 XY，CW 的 `t=R90*n`、目标在右侧；
+CCW 的 `t=-R90*n`、目标在左侧。代码在 n 更新时一起重算 t，不能单独把 n 再取反。
+可视化中的 n 是压入方向估计；实测作用力箭头依据验证记录中的作用方转换，独立于 n/t，避免重复取反。
+
+首次接触阈值到确认期间始终发送零速度请求，需实际 TCP 低速持续保持且执行器确认停止后才进入跟踪。
+记录“首次低速观测”和“持续静止确认”，二者不是同一个时刻。SEARCH 仍是 18 mm/s，减速度未提高。
+
+| 卸力参数 | 当前值和依据 |
+|---|---|
+| 切向暂停 | 2.25 N，保持原阈值；较低过载区仍按原 load_scale 降低切向 |
+| 法向反馈 | 原参考 1.5 N、死区 0.15 N、增益 0.0005 (m/s)/N、上限 0.5 mm/s |
+| 恢复条件 | 当前力与 0.25 s 均值都不超过 2.0 N，持续 0.1 s；与暂停阈值相差 0.25 N |
+| 恢复速度 | 0.5 s 渐变，同时保留原 0.01 m/s² 指令变化上限；没有提高任何速度上限 |
+| 无效评估 | 1.5 s 后，实际卸力投影位移至少 0.2 mm，力均值至少改善 0.1 N |
+| 总预算 | 从该次卸力开始累计 3 s 或最大 XY 偏移 1 mm，间歇改善不会重置 |
+
+0.2 mm 采用已有位置容差尺度；以 0.5 mm/s 走这段距离至少需要 0.4 s，此外还有指令加速、
+EMA 的约 0.206 s（100 Hz、alpha=0.8、99%阶跃收敛）和 0.25 s 力趋势窗口。1.5 s 提供观测余量，
+不再把 0.5 s 的几帧上涨判成方向错误。这些是保守软件预算，不代表测得了目标刚度或现场位移噪声；
+现场仍需确认 0.2 mm 是否可可靠观测、1 mm 的局部卸力空间是否可用。原 sandbox 保护继续生效。
+
+明确退出原因：`STOP_UNLOAD_NO_MOTION`（卸力方向实际位移不足）、`STOP_UNLOAD_INEFFECTIVE`
+（已移动但平滑后的合力未改善）、`STOP_UNLOAD_BUDGET`（总时间/空间预算耗尽）。不动态反转方向。
+没有方向记录则 `STOP_FORCE_DIRECTION_UNVERIFIED`，真实入口在构造设备前拒绝启动；策略层也保留停止检查。
+原真实模式原始力/矩硬停止阈值仍为 60 N / 5 Nm；处理后 12 N / 1 Nm 在原真实模式中是诊断阈值，
+本轮没有把它们抬高、冒称为原有硬停止或改动这层既有语义。卸力新预算是额外的有限退出条件。
+
+### 串口时限与“为什么不动”的记录
+
+上一轮的完整内部包解析、跨请求残留拒绝、失败后禁止继续请求、CRC/类型校验和有界内存诊断均保留。
+50 ms 现在约束整次主机请求（节拍等待、非阻塞 write、输出队列等待、read、解析），没有延长。
+不再调用可能无限等待的 `flush()/tcdrain`，而在同一截止时间内轮询 `out_waiting`；短写直接失败。
+通用操作系统调度仍可能造成实际耗时超过预算，诊断同时保留实际总耗时、各阶段耗时及循环最长间隔，
+不会把长调用仍只标成“耗时 50 ms”，也不接受截止时间后才完成的包。无序号协议不能证明任意迟到重复包的新鲜度。
+错误诊断只检查有限缓冲前缀，避免错误后的证据扫描延迟刹停；`buffer_candidate_scope=head only`。
+
+串口失败立即走既有刹停链路，后续仅用 RTDE 确认静止，不重读失败传感器、不恢复请求、不重新采零。
+RTDE 确认也有原有超时，不能无限等待。`termination.json` 的 `failure_host_monotonic` 是异常时刻；
+`last_valid_wrench_host_monotonic`、`last_valid_wrench_age_sec` 明确标记缓存样本。所有接收时间均为主机时间。
+
+`policy_waypoints.csv` 新增低速、静止确认、进入跟踪、卸力开始/解除、切向恢复、卸力退出和传感器失败事件。
+`samples.csv` 的 `tangent_limit_reason` 是当前限制；`software_warnings` 保留历史告警，不能当作当前仍生效的限制。
+原力、n/t、指令与实际 TCP 数据保留，并增加实际 n/t 速度、接触后位移、卸力位移/力趋势/预算耗时。
+停止请求历史包含请求、首次低速、静止保持起点和确认时间。磁盘仍使用既有异步记录队列，不逐帧打印。
+
+以下命令前两条完全离线；后两条仅连接 PX6D，需在现场探针脱离目标且机器人静止后执行：
+
+```bash
+cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/user-linux/robotics_cs/.venv312/bin/python -m pytest -q
+/home/user-linux/robotics_cs/.venv312/bin/python tools/replay_continuous_policy.py data/real/continuous/run_20261002_121516_883033 --output data/analysis/continuous_replay_20261002.json
+/home/user-linux/robotics_cs/.venv312/bin/python tools/check_px6d.py --samples 3000 --diagnostics-output /tmp/px6d_readonly.json
+/home/user-linux/robotics_cs/.venv312/bin/python tools/check_force_direction.py --verify
+/home/user-linux/robotics_cs/.venv312/bin/python tools/check_force_direction.py --status
+```
+
+重放同时输出“保留方向未验证事实”和“仅离线假设方向已验证”两种结果。后者仅用于隔离比较卸力逻辑，
+不是绕过现场验证的开关。旧记录仅有约 0.63 s 跟踪，不能外推 1.5 s 后的真机卸力结果。
+任何改变指令后的记录输入重放都不代表新控制策略的闭环真实轨迹。这里没有连接机器人或运行运动的命令。
 
 ### 启动
 

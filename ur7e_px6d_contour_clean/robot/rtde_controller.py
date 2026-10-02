@@ -733,7 +733,7 @@ class URRTDEController:
         self.standstill_confirmed = False
         self._settled_since = self._settled_stamp = None
         report = dict(method=self._stop_method, return_value=None, exception=None,
-                      api_anomaly=False, physical_stop='unconfirmed')
+                      api_anomaly=False, physical_stop='unconfirmed', request_host_monotonic=self._stop_started)
         self.stop_report = report
         self.stop_history.append(report)
         if nonblocking is None:
@@ -816,6 +816,11 @@ class URRTDEController:
             now-self._settled_since >= float(self.config.get('settle_hold_sec', .08)))
         if self.stop_report is not None and self._stop_pending and self.stop_state != 'FAILED':
             self.stop_report['physical_stop'] = 'confirmed' if self.standstill_confirmed else 'unconfirmed'
+            self.stop_report['settle_hold_start_host_monotonic'] = self._settled_since
+            if low:
+                self.stop_report.setdefault('first_low_speed_host_monotonic', now)
+            if self.standstill_confirmed:
+                self.stop_report.setdefault('confirmed_host_monotonic', now)
 
     def wait_for_standstill(self, *, observe=None, timeout=None, startup=False):
         """Fresh device timestamps + held actual TCP speed are the sole authority."""

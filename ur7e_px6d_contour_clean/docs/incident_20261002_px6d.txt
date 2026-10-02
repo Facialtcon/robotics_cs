@@ -1,0 +1,196 @@
+2026-10-02 连续跟踪停机：离线证据与最小修复
+
+范围
+项目 ur7e_px6d_contour_clean；运行 data/real/continuous/run_20261002_121516_883033。
+读取 termination.json、summary.json、scan_stop_snapshot.json、policy_waypoints.csv、
+config_snapshot.yaml 和全部 1403 帧。samples.csv 与 full_log.csv 字节相同，不能算两份独立证据。
+运行与检查前 HEAD 均为 ba52029b3d7c6f9e71d5782b06cc983774ebd3d6，检查前工作区干净。
+仅离线读取、假设备测试、策略回放；未连接串口/机器人，未运行 --execute。
+
+实际时间线（单调时间为主；CSV 行号包含表头）
+时间                  行号   事实
+1248846.545577754         2   首个 TARGET_SEARCH 记录。
+1248859.628430966      1294   前一帧平面力 0.973056 N，尚未触发接触阈值。
+1248859.638651093      1295   首次 Fxy >= 1 N，Fxy=1.144325 N；FIRST_CONTACT，
+                             FIRST_THRESHOLD_STOP_REQUEST。这是首次阈值证据，
+                             不等同于精确物理触碰时刻。
+1248859.638744194～
+1248859.638758562      1295   刹停命令调用区间；command_speed=0，执行状态 STOPPING；
+                             当时实际 XYZ TCP 速度仍为 17.327 mm/s。
+1248860.045065897             接触刹停段平面力峰值 3.014211 N。
+1248860.110768872      1341   FIRST_CONTACT 确认事件，进入 CONTINUOUS_TRACKING；
+                             接触证据持续 0.472118 s，静止保持 0.086298 s；
+                             runtime=STOPPED，实际速度 0.02244 mm/s；
+                             Fxy=2.924662 N；此转换帧仍是零速度命令。
+1248860.115329231      1342   首个非零跟踪命令：仅法向卸力，受加速度限制从
+                             -0.04560 mm/s 起步；期望法向已经饱和到 -0.5 mm/s。
+1248860.166224738             实际发送的法向分量达到 -0.5 mm/s。
+1248860.620463113      1392   overload_stall 首次写入逐帧 software_warnings；
+                             距期望法向饱和开始 0.505134 s；Fxy=3.181125 N。
+1248860.741313313      1404   最后有效帧，Fxy=3.186406 N；vn=-0.5 mm/s；
+                             实际 XYZ 速度 0.62882 mm/s。
+1248860.750804471             SAFETY_STOP 事件携带失败循环开始时间，不能作为
+                             超时完成时间：run 在循环开头赋 now，读取失败后未更新。
+2026-10-02 12:15:38.769227Z   termination 记录 PX6DTimeout / STOP_SENSOR_ERROR，
+                             phase=SENSOR_READ，state=CONTINUOUS_TRACKING；
+                             上海时间 20:15:38.769227。
+1248861.070314346～
+1248861.070320336             最终 RTDE 观测区间；STOPPED，静止确认成功。
+
+终止记录的 monotonic_sec=1248860.741313313 沿用最后有效样本，不是异常发生时刻。
+失败请求的发送时刻、字节数和真实读取耗时未记录，不能从该值倒推精确超时起点。
+scan_stop_snapshot 在 12:15:41.050924Z 写出，wrench_is_last_valid_sample=true，
+wrench_age_sec=2.342793；其中力不是刹停后重新测得的力。
+两次 stop_requests 均为 speedL_zero 刹停、静止后 speedStop，API 无异常，物理停止确认。
+
+为何接触后没有沿边走
+从首次阈值到接触确认，TCP 平面净位移约 [0.07074, -1.01869] mm，约 1.021 mm；
+这是接触后的正常刹停/静止确认阶段，力在刹停段从 1.144 N 上升到约 3 N。
+随后 64 帧连续跟踪共 0.630544 s，Fxy 范围 2.896998～3.203084 N，始终超过
+本次 overload_tangent_zero_force=2.25 N，所以切向期望速度从跟踪开始就为零。
+实际记录的切向分量绝对值最大 7.8941e-8 m/s，是加速度平滑/方向转动的微小残量。
+不是 overload_stall 首次警告才导致切向归零；该警告在跟踪后约 0.510 s 才出现，
+并且 diagnostics 字典不主动删除旧警告，不能只看最终字典判定其起始时间或持续状态。
+
+本次保存参数：force_reference=1.5 N；force_gain=0.0005 m/(s·N)；
+force_deadband=0.15 N；normal_speed_limit=0.0005 m/s；tangential_speed=0.001 m/s；
+overload_stall_sec=0.5；overload_improvement_force=0.1 N；force_direction_sign=+1。
+公式：e=1.5-Fxy，dead=sign(e)*max(abs(e)-0.15,0)，
+vn=clip(0.0005*dead, -0.0005, +0.0005)，v=vt*t+vn*n。
+n 是方向滤波后的平面力单位向量乘 force_direction_sign。
+末帧 n=[-0.353465,0.935448]，命令 v≈[+0.176732,-0.467724] mm/s。
+跟踪段实际净位移 [0.102234,-0.269951] mm，投影到初始 n/t 为 -0.288648/-0.002800 mm；
+实际在法向缓慢移动，视觉上可能近似停住，但不是 TCP 完全静止。力总体 2.924662→3.186406 N；
+中间最低值也没有比饱和计时起点下降 0.1 N，符合本次卸力无改善警告条件。
+
+方向待验证：-n 与原搜索方向的点积约 0.9463，所谓卸力方向大致仍朝原搜索方向。
+预处理按：固定空载偏置 → EMA(alpha=0.8，权重在旧样本) → 重力补偿 → 旋转 → 基线。
+本次旋转为单位阵、重力及输出基线为零；没有按 TCP 姿态自动推导传感器安装旋转。
+由逐帧 EMA 关系反算的力偏置恒定约 [-0.43226021,-1.94894485,10.04629610] N，
+未发现接触过程中重新采零的迹象；原始采零窗口未保存，此值是离线反算。
+force_display 的 physical_sign_confirmed/base_frame_confirmed 均为 false。
+坐标安装关系、力究竟作用于哪一方、法向是否受摩擦污染，需要现场方向验证；
+现有证据不能单独证明 sign 必须为 -1。未改符号、增益、速度、阈值或控制策略。
+卸力不降与最终串口超时是两条独立问题链，没有证据证明前者导致后者。
+
+读取链路及缺陷证据
+read_wrench → _request → _read_packet → _extract_packet。
+原实现 100 Hz 请求起点节拍，write 后 flush，随后才启动 50 ms 响应读取窗口；
+节拍等待、write、flush 不计入 50 ms；串口 timeout=0（非阻塞读），write_timeout=0.5 s。
+该窗口语义保持不变，新诊断分别记录各阶段和请求总耗时；50 ms 不是整次调用上限。
+成功帧原日志串口调用中位数 0.6731 ms、P99 1.2269 ms、最大 2.5066 ms；
+主循环起点间隔中位数 10.1491 ms、最大 10.7556 ms。失败帧没有相应耗时字段。
+这些正常历史不能排除失败循环本身发生调度停顿、USB/传感器停顿、半包或 CRC 错误。
+
+在修改前，用假时钟/假串口分别复现：
+1. 内部已有 CRC 正确的完整 29 字节包，但 in_waiting=0，_read_packet 错误超时。
+   原因：解析只发生在 if waiting 分支内。
+2. 请求 1 超时，随后迟到响应进入串口，请求 2 会把该旧包当作新力返回。
+   原因：回复没有请求序号；原代码没有跨请求残留检查或失败后禁止继续读取的约束。
+原提取器能处理分包、查找包头、CRC 失败后逐字节重新查找，并保留粘包中的剩余字节；
+但第二个完整包滞留内部时可触发缺陷 1。原 CRC 失败没有计数，工具却固定打印 crc_errors=0。
+本次日志未记录这些字节状态，不能认定以上已复现缺陷就是本次停机根因。
+唯一已证实的直接停机原因是 _read_packet 抛出 PX6DTimeout 后触发传感器错误停止。
+
+代码中只有一个 PX6DReader 实例和一次 connect；启动采零、返回监控、主循环和
+最终监控顺序共享该 reader，日志线程不调用设备。未发现同一运行内并发读串口。
+原最终停止监控会再次请求力，构成超时后的迟到响应风险；现已禁止该路径。
+历史日志没有操作系统串口占用记录，无法排除当时另一个外部进程打开同一设备。
+
+本轮修改
+sensor/px6d_reader.py：每轮先解析已有缓冲；请求前发现内部/OS 残留即报错停止，
+不把它交给新请求；失败后禁止继续发请求，显式静止启动重同步才可解除。
+完整旧包在提取器中可正确解析，但不能跨越新的请求边界被当作新数据。
+补充期望响应类型/设备校验、短写检查、重复 connect 检查和有界诊断（最近 32 请求）。
+读取超过原有截止时间才返回的字节保留为证据，不作为有效回复使用。
+app/continuous_runtime.py：先刹停，再把失败诊断放入 termination；传感器失败后的
+刹停保持 RTDE 观测/静止确认，不重读传感器、不重同步、不采零、不沿用旧力继续运动。
+tools/check_px6d.py：复用既有只读入口，增加 --diagnostics-output，结束并关闭串口后
+一次写出 JSON；CRC 计数改为实际值；失败立即退出，不自动恢复。没有机器人连接/运动指令。
+tests/test_px6d_reader.py、tests/test_continuous_runtime.py：新增相应协议与停止链路测试。
+
+诊断判读
+request_id、request/tx/read 的 host_monotonic、各阶段 elapsed、tx/rx_bytes、
+buffer 起止/峰值、CRC/类型校验失败计数、解析次数、最大循环间隔保存在内存。
+rx_bytes=0 且 serial_bytes_at_failure=0：本次主机未读到字节，结束时队列也空；
+这不是“传感器从未发送”的物理证明。
+rx_bytes>0、buffer_bytes_end 小于包长：检查半包/错位；crc_failures>0：候选包 CRC 失败。
+valid_packet_buffered_at_failure=true：截止时内部仍有完整有效候选包未交付。
+max_read_loop_gap_sec 过大：主机读循环停顿；即使 rx_bytes=0，
+serial_bytes_at_failure>0 也能显示 OS 队列中已积压、尚未读取的字节。
+诊断不逐帧打印或同步写盘；接收时间明确是主机时间，没有冒称传感器采样时间。
+响应没有序号，无法从协议证明任意迟到重复包的新鲜度；显式版本查询不是这样的保证。
+重同步方法仅留给调用者确认静止空载的启动流程，运行时和只读工具均不自动调用。
+
+离线验证
+保存配置 + 全部 1403 帧输入回放：状态差异 0，速度指令最大误差 0，警告首次出现行相同。
+测试命令：PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q
+最终结果：225 passed in 30.55s；git diff --check 通过。
+使用项目既有虚拟环境；系统 python 缺 rtde_control，ROS 自动加载的 pytest 插件又缺依赖，
+因此仅对本次测试关闭第三方插件自动加载，保留 tests/conftest.py 的硬件/网络禁止钩子。
+覆盖完整内部包、分包、粘包、CRC、错误设备/命令、无响应、半包、迟到包、
+跨请求残留、失败后禁止重试、显式静止重同步成功/失败、长读循环间隔、短写、
+有界诊断、只读工具输出、运行时传感器异常后继续确认刹停且不再请求力。
+
+下一步最小现场验证（本轮未执行）
+先确保机器人静止、探针脱离目标、退出其他 PX6D 使用程序，仅运行：
+.venv/bin/python tools/check_px6d.py --samples 3000 --diagnostics-output /tmp/px6d_readonly.json
+保留 100 Hz / 50 ms，不运行机器人跟踪入口。失败后保存 JSON，不在运动中恢复或重试。
+若只读通信稳定，再在静止空载起点完成正常初始偏置，并按既有现场流程用已知 Base
+方向的小力验证传感器轴映射和力作用方向。接触目标时不重新采零；先确认映射，再决定
+是否需要修改变换或符号；本轮结果不构成真机修复成功或可恢复沿边跟踪的证明。
+
+第二轮软件交付补充（保留以上历史诊断，以下覆盖其“修复后软件行为”描述）
+
+实际低速与确认拆分：按本次逐帧实际 XYZ 速度，首次低于静止门槛出现在
+1248860.024471097，距刹停请求约 0.386 s；其后保持约 0.0863 s，于
+1248860.110768872 确认静止/接触。前一段是到首次低速观测的间隔，仍不能精确
+分离机械制动和微动稳定；不能将总计约 0.472 s 全称为机械制动时间。
+
+本轮明确改变：
+1. 原 50 ms 仅覆盖 read；现改为整个请求的共同截止时间，包含节拍等待、write、
+   输出队列等待、read、解析。write 为非阻塞单次写，短写失败；不调用无界 flush/tcdrain。
+   所有实际耗时和截止时间仍记录；主机调度造成的超限不会隐藏。任何不确定交换，
+   包括 Ctrl+C 中断请求，都禁止随后继续请求。旧包/迟到包防护及独立 RTDE 刹停确认保留。
+2. 真实入口要求有配置绑定的实测方向记录，在连接设备之前检查；策略也有第二道检查。
+   检查工具一次初始空载确认/采零后核对六个已知 Base 施力方向，显示保存的扫描姿态、
+   sensor 去偏置力、Base 力、n/t 和稳态卸力方向。低平面力时明确方向不可用。
+   不根据 TCP 姿态猜安装旋转，不修改旋转/符号，不在接触后重新采零。
+3. 接触零速命令先于后续日志健康检查/watchdog 发出；Q/Esc 在下一次传感器读取前刹停。
+   已验证方向时，高力进入跟踪即开启有界卸力；2.0 N/0.1 s 恢复保持、0.5 s 恢复渐变，
+   1.5 s 后结合 0.2 mm 实际投影位移及 0.25 s 力均值改善评估，3 s / 1 mm 总预算不重置。
+   无位移、已移动未改善、总预算耗尽有不同停止原因。原 SEARCH 18 mm/s、参考力、
+   增益、法向/切向上限、切向归零阈值、减速度、工作空间及硬停止机制不变。
+4. 不再用历史 overload_stall 字典值表示当前限制。逐帧 tangent_limit_reason、卸力
+   预算/位移/力均值/趋势、实际 n/t 速度与事件一起解释“为什么不动”。异常时间独立记录，
+   最后有效力标记接收时间和年龄。没有逐帧终端打印或新增控制线程同步文件写入。
+
+重放结果保存在 data/analysis/continuous_replay_20261002.json，可用 OPERATIONS.md 命令重建：
+- 原配置没有实测方向记录，新真实入口会在连接前停止；单独重放策略作为第二道检查时，
+  第 1341 行首次确认接触即 STOP_FORCE_DIRECTION_UNVERIFIED，其后 64 帧状态与旧输出有意不同。
+- 仅用于离线比较、假设方向已验证时，1403 帧状态/指令与旧记录相同（速度差为零）；
+  新增 UNLOAD_STARTED 和当前抑制原因。旧 overload_stall 的 0.5 s 警告不再代表控制决策。
+  记录在约 0.63 s 卸力后结束，达不到新 1.5 s 评估时点，没有虚构后续轨迹或真机改善。
+- 有效卸力恢复、无效/无位移/预算退出由假设备和合成力测试覆盖，不作为物理方向验证。
+
+文件范围（包含保留的上一轮修改）：
+  sensor/px6d_reader.py、sensor/force_direction.py
+  policy/continuous_tracking.py、policy/boundary_estimation.py
+  app/continuous_runtime.py、robot/rtde_controller.py、experiment_logging/termination.py
+  config.yaml、simulation/continuous_session.py、simulation/continuous_view.py
+  tools/check_px6d.py、tools/check_force_direction.py、tools/replay_continuous_policy.py、tools/visualize_continuous_run.py
+  tests/test_px6d_reader.py、tests/test_continuous_runtime.py、tests/test_continuous_policy.py
+  tests/test_stopping_cycles.py、tests/test_real_search_guards.py、tests/test_real_tracking_guards.py
+  tests/test_force_direction_tool.py、tests/test_direction_verification.py、tests/test_unloading.py
+  docs/OPERATIONS.md、本诊断记录
+
+运行方式与参数依据见 docs/OPERATIONS.md 第 6 节。使用用户指定的
+/home/user-linux/robotics_cs/.venv312/bin/python；保留原始实验日志和全部上一轮改动，未提交/推送。
+仍需现场确认：真实安装轴和作用方、保存姿态/TCP、空载条件、颗粒背景、位移噪声与局部卸力空间。
+当前方向记录状态为未验证，未连接设备、未运行 --execute；尚无真机修复成功结论。
+
+第二轮最终离线测试：
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/user-linux/robotics_cs/.venv312/bin/python -m pytest -q --tb=short
+244 passed in 31.23s；git diff --check 通过。
+覆盖串口边界与请求实际耗时、接触刹停不被覆盖、方向/顺逆时针一致性、
+高力切向抑制、有效卸力恢复、无位移/无改善/预算退出、传感器失败后独立确认静止。

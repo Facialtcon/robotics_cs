@@ -19,7 +19,8 @@ from policy.continuous_tracking import ContinuousTrackingPolicy, EXTRA_SAMPLE_FI
 from robot.rtde_controller import URRTDEController, RobotError, SearchLimitReached, SPEED_GUARD_FIELDS, check_continuous_xy
 from sensor.force_preprocess import WrenchPreprocessor
 from safety.force_guard import continuous_force_reason, raw_safety_reason
-from sensor.px6d_reader import PX6DReader
+from sensor.px6d_reader import PX6DError, PX6DReader
+from sensor.force_direction import load_direction_verification
 from simulation.continuous_session import SIMULATION_SAMPLE_FIELDS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -99,6 +100,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
     stop_snapshot_info = dict(source='unavailable', standstill_confirmed=False)
     previous_cycle_start = None
     last_wrench_observed = None
+    sensor_failed = False
     timing = dict.fromkeys(TIMING_FIELDS, '')
     diagnostics = {}
     def software_warnings():
@@ -113,6 +115,13 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             if getattr(args, 'enable_reacquire', False):
                 raise RobotError('--enable-reacquire is offline only')
             robot_config, start = prepare_real(config, args.config)
+            config['force_direction_status'] = load_direction_verification(config, args.config)
+            if not config['force_direction_status']['verified']:
+                detail = 'force direction verification required: '+config['force_direction_status']['reason']
+                termination.observe(phase='FORCE_DIRECTION_PREFLIGHT', force_direction_status=config['force_direction_status'])
+                termination.set_stop_reason(TerminationReason.STOP_FORCE_DIRECTION_UNVERIFIED, detail,
+                                            source='continuous.force_direction_preflight')
+                raise RobotError(detail)
             geometry = config['continuous_search_geometry']
             print(f"Search geometric distance to sandbox boundary: {geometry['geometric_distance_m']*1000:.4f} mm\n"
                   f"Search stopping margin: {geometry['stopping_margin_m']*1000:.4f} mm\n"
@@ -133,12 +142,15 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 print('WARNING: --duration applies to simulation only; real continuous execution has no runtime stop budget.', flush=True)
         dt = 1 / float(config["policy"]["control_rate_hz"])
         if args.execute:
-            # Existing site direction checks do not identify the physical object
-            # on which the measured force acts. Record that distinction explicitly;
-            # offline display must not guess a physical sign from targetward control.
+            # Physical display uses the measured convention record, independently
+            # of n/t arrows. Never infer installation rotation from TCP pose.
+            verified = config['force_direction_status']
             config['force_display']=dict(schema_version=1,frame='Base',force_source='processed_wrench',
-                force_convention='unconfirmed',estimate_method='quasistatic_planar_balance',
-                physical_sign_confirmed=False,base_frame_confirmed=False,physical_available=False)
+                force_convention='environment_on_probe',estimate_method='quasistatic_planar_balance',
+                physical_sign_confirmed=True,base_frame_confirmed=True,physical_available=True,
+                reported_force_convention=verified['reported_force_convention'],
+                physical_force_multiplier=verified['physical_force_multiplier'],
+                calibration_reference=verified['reference'])
             policy = ContinuousTrackingPolicy(config)  # validate before any connection
             controller = controller_factory(robot_config)
             s = config["sensor"]
@@ -194,6 +206,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                                         code=TerminationReason.STOP_USER_REQUEST)
                     if not args.execute:
                         break
+                    controller.request_stop(nonblocking=True)  # Before another potentially blocking sensor read.
                 termination.observe(phase="SENSOR_READ")
                 if args.execute:
                     logger.check_health()
@@ -256,6 +269,15 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     controller.set_continuous_phase(policy.state.value, stop_confirmed=policy.stop_confirmed)
                 if args.execute:
                     # Keep timing and writer observations as diagnostics.
+                    # Zero commands (especially first contact) take priority over
+                    # watchdog/logging diagnostics. set_continuous_phase above
+                    # retains the execution owner's stop/resume interlock.
+                    early_stop = not command.move and (not controller.standstill_confirmed or
+                        policy.state in (State.STOP, State.FIRST_CONTACT, State.DIRECTION_RECONFIRM, State.CONTACT_LOST))
+                    if early_stop:
+                        timing['command_send_time'] = time.monotonic()
+                        controller.request_stop(nonblocking=True)
+                        timing['command_return_time'] = time.monotonic()
                     logger.check_health()
                     validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start, diagnostics=diagnostics)
                     # Only an explicitly enabled watchdog participates here.
@@ -265,7 +287,8 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                         controller.kick_watchdog()
                         validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start, diagnostics=diagnostics)
                         logger.check_health()
-                    timing['command_send_time'] = time.monotonic()
+                    if not early_stop:
+                        timing['command_send_time'] = time.monotonic()
                     if command.move:
                         try:
                             controller.command_planar_velocity(command.direction_xy, command.speed, dt)
@@ -277,10 +300,8 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                             command = policy.update(now, raw, processed, robot)
                             controller.set_continuous_phase(policy.state.value)
                             controller.request_stop(nonblocking=True)
-                    elif (not controller.standstill_confirmed or
-                          policy.state in (State.STOP, State.FIRST_CONTACT, State.DIRECTION_RECONFIRM, State.CONTACT_LOST)):
-                        controller.request_stop(nonblocking=True)
-                    timing['command_return_time'] = time.monotonic()
+                    if not early_stop:
+                        timing['command_return_time'] = time.monotonic()
                     validate_cycle_timing(policy.c, cycle_start, time.monotonic(), serial_start, previous_cycle_start, diagnostics=diagnostics)
                     timing.update(runtime_stop_state=controller.stop_state,
                                   actual_xyz_speed_mps=float(np.linalg.norm(robot.tcp_speed[:3])),
@@ -293,7 +314,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 logger.log_sample(now, raw, processed, robot, command, policy.contact_direction,
                                   policy.tangent, extra={**policy.telemetry(command), **timing,
                                       **(speed_diagnostics if args.execute else {}),
-                                      **({'sim_components_available': 0, 'physical_force_available': 0} if args.execute else sample.simulation_telemetry)})
+                                      **({'sim_components_available': 0, 'physical_force_available': 1} if args.execute else sample.simulation_telemetry)})
                 while policy.events:
                     if args.execute and policy.events[0].event_type == 'FIRST_CONTACT':
                         print('FIRST CONTACT CONFIRMED\n'
@@ -312,14 +333,24 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     previous_cycle_start = cycle_start
                     time.sleep(max(0, dt - (time.monotonic() - cycle_start)))
     except KeyboardInterrupt as exc:
+        interrupted_at = time.monotonic() if args.execute else now
         if controller is not None and args.execute:
             stop_after_exception(controller, termination)
+        termination.observe(timestamp=interrupted_at, wrench_is_last_valid_sample=True,
+            last_valid_wrench_host_monotonic=last_wrench_observed,
+            last_valid_wrench_age_sec=None if last_wrench_observed is None else max(0., interrupted_at-last_wrench_observed))
+        # An interrupted request is also an uncertain exchange, even if the
+        # operator interrupt (rather than a timeout) initiated the stop.
+        sensor_failed = bool(getattr(reader, '_requires_resynchronization', False))
+        if sensor_failed:
+            termination.observe(sensor_diagnostics=getattr(exc, 'sensor_diagnostics', None))
         detail = str(exc) or 'Ctrl+C'
         termination.set_stop_reason(TerminationReason.STOP_USER_REQUEST, detail, source="continuous.runner")
         if policy is not None:
             policy.request_stop(now, np.zeros(6) if robot is None else robot.pose,
                                 detail, event="USER_STOP", code=TerminationReason.STOP_USER_REQUEST)
     except Exception as exc:
+        failure_time = time.monotonic() if args.execute else now
         # Stop before any error logging or cleanup, including logger failures.
         if controller is not None and args.execute:
             stop_after_exception(controller, termination)
@@ -329,6 +360,17 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                                     tcp_pose=snapshot.get('tcp_pose'), tcp_speed=snapshot.get('tcp_speed'))
                 print('Robot connection failure snapshot (freshness not verified):\n'+
                       json.dumps(snapshot, ensure_ascii=False, indent=2), flush=True)
+        sensor_failed = isinstance(exc, PX6DError)
+        termination.observe(timestamp=failure_time, failure_host_monotonic=failure_time,
+            last_valid_wrench_host_monotonic=last_wrench_observed,
+            last_valid_wrench_age_sec=None if last_wrench_observed is None else max(0., failure_time-last_wrench_observed),
+            wrench_is_last_valid_sample=True)
+        if sensor_failed:
+            # Preserve the failed request before cleanup. No extra sensor read,
+            # recovery or disk write may delay the stop requested above.
+            termination.observe(sensor_diagnostics=getattr(exc, 'sensor_diagnostics', None))
+            if policy is not None and robot is not None:
+                policy._event(failure_time, robot.pose, 'SENSOR_FAILURE')
         speed_limit_observation = getattr(exc, 'speed_limit_observation', None)
         if speed_limit_observation is not None:
             # Keep the rejected read separate from the last accepted state and
@@ -336,7 +378,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             termination.observe(speed_limit_observation=speed_limit_observation)
         termination.set_stop_reason(detail=str(exc), exception=exc, source="continuous.runner")
         if policy is not None:
-            policy.request_stop(now, np.zeros(6) if robot is None else robot.pose, str(exc))
+            policy.request_stop(failure_time, np.zeros(6) if robot is None else robot.pose, str(exc))
             if getattr(controller, 'stop_state', None) == 'FAILED':
                 policy.stop_reason, policy.reason = TerminationReason.STOP_MOTION_ERROR, str(exc)
         print(f"Continuous tracking stopped: {type(exc).__name__}: {exc}", flush=True)
@@ -353,7 +395,9 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             try:
                 if args.execute:
                     controller.request_stop(nonblocking=True)
-                    monitoring = True
+                    # A timed-out PX6D reply is untagged: do not issue another
+                    # request during braking. RTDE standstill monitoring remains.
+                    monitoring = not sensor_failed
                     def observe_terminal_stop():
                         nonlocal monitoring, result
                         # Continue device observations through the existing hold.
@@ -390,6 +434,9 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                         if controller.poll_stop():
                             break
                         time.sleep(max(0., dt-(time.monotonic()-started)))
+                    if policy is not None and robot is not None:
+                        confirmed_at = (controller.stop_report or {}).get('confirmed_host_monotonic', robot.timestamp)
+                        policy._event(confirmed_at, robot.pose, 'EXECUTION_STOP_CONFIRMED')
                     controller.finish_control_script_if_stopped()
                     stop_snapshot_info = dict(source='fresh_rtde_actual_speed', standstill_confirmed=True,
                         runtime_stop_state=controller.stop_state,
@@ -411,6 +458,10 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     stop_snapshot_info.update(runtime_stop_state=controller.stop_state,
                                               stop_requests=controller.stop_history)
                 termination.set_stop_reason(detail=str(exc), exception=exc, source='continuous.stop_observation', terminal=False)
+        if args.execute:
+            termination.observe(wrench_is_last_valid_sample=True,
+                last_valid_wrench_host_monotonic=last_wrench_observed,
+                last_valid_wrench_age_sec=None if last_wrench_observed is None else max(0., time.monotonic()-last_wrench_observed))
         if policy is not None and policy.state == State.STOP:
             termination.set_stop_reason(policy.stop_reason, policy.reason, source="continuous.policy")
             if policy.stop_reason not in (TerminationReason.STOP_USER_REQUEST, TerminationReason.STOP_TIME_LIMIT,

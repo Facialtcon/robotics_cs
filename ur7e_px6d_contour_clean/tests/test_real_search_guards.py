@@ -23,6 +23,7 @@ from test_continuous_runtime import args, prepare
 
 @pytest.fixture
 def real_config(config):
+    config['force_direction_status'] = {'verified': True, 'reason': 'synthetic unit-test force axes'}
     prepare_real(config, PROJECT_ROOT/'config.yaml')
     return config
 

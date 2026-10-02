@@ -13,6 +13,15 @@ from core.models import PolicyCommand, PolicyWaypoint
 from experiment_logging.termination import TerminationReason, classify_stop_reason
 from policy.boundary_estimation import handed_tangent, unit
 from safety.force_guard import ForceRateGuard, force_safety_reason, continuous_force_reason
+from sensor.force_direction import control_directions, normal_feedback_speed
+
+# Conservative software budgets, not measured contact stiffness. At 0.5 mm/s,
+# 0.2 mm needs >=0.4 s plus acceleration/filter settling; never use the old
+# 0.5 s warning as proof of wrong physical sign. Total budgets never restart.
+UNLOAD_DEFAULTS = dict(unload_resume_force=2.0, unload_resume_hold_sec=.1,
+    unload_force_window_sec=.25, unload_evaluation_sec=1.5,
+    unload_min_displacement_m=.0002, unload_max_displacement_m=.001,
+    unload_max_time_sec=3., unload_resume_ramp_sec=.5)
 
 
 class State(str, Enum):
@@ -37,6 +46,17 @@ EXTRA_SAMPLE_FIELDS = (
 
 def validate_config(config: dict) -> None:
     c, p = config["continuous_tracking"], config["policy"]
+    u = {**UNLOAD_DEFAULTS, **c}
+    if any(not np.isfinite(float(u[k])) or float(u[k]) <= 0 for k in UNLOAD_DEFAULTS):
+        raise ValueError('unload budgets must be finite and positive')
+    if not (c['force_reference']+c['force_deadband'] <= u['unload_resume_force'] < c['overload_tangent_zero_force']):
+        raise ValueError('unload resume threshold must precede tangent-zero threshold')
+    filter_settle = (np.log(.01)/np.log(config['preprocessing']['filter_alpha']) / p['control_rate_hz']
+                     if config['preprocessing']['filter_alpha'] > 0 else 0.)
+    minimum_time = u['unload_min_displacement_m']/c['normal_speed_limit'] + filter_settle + u['unload_force_window_sec']
+    if not (minimum_time <= u['unload_evaluation_sec'] < u['unload_max_time_sec'] and
+            u['unload_min_displacement_m'] < u['unload_max_displacement_m']):
+        raise ValueError('unload evaluation must allow measurable displacement and filter settling within finite budgets')
     if c.get("enabled") is not True:
         raise ValueError("continuous_tracking.enabled must be true for this entry point")
     positive = ("tangential_speed", "force_reference", "force_gain", "normal_speed_limit",
@@ -161,13 +181,21 @@ DIRECTION_FIELDS = ('measurement_jump_deg', 'estimate_residual_deg', 'measuremen
                     'direction_resume_progress_m', 'direction_phase')
 EXTRA_SAMPLE_FIELDS += DIRECTION_FIELDS
 EXTRA_SAMPLE_FIELDS += ('force_rate_guard_active',)
+UNLOAD_FIELDS = ('tangent_limit_reason', 'unload_active', 'unload_elapsed_sec',
+                'unload_displacement_m', 'unload_projected_displacement_m',
+                'unload_force_mean_N', 'unload_force_improvement_N', 'unload_force_slope_N_s',
+                'unload_resume_scale', 'force_direction_verified', 'settle_hold_start_host_monotonic',
+                'tcp_displacement_from_contact_m', 'actual_v_n_mps', 'actual_v_t_mps')
+EXTRA_SAMPLE_FIELDS += UNLOAD_FIELDS
 
 
 class ContinuousTrackingPolicy:
     def __init__(self, config):
         validate_config(config)
-        self.c, self.p = dict(config['continuous_tracking']), dict(config['policy'])
+        self.c, self.p = {**UNLOAD_DEFAULTS, **config['continuous_tracking']}, dict(config['policy'])
         self.real_execution = bool(config.get('continuous_real_execution'))
+        self.force_direction_verified = (not self.real_execution or
+            config.get('force_direction_status', {}).get('verified') is True)
         self.diagnostics = {}
         self.search_geometry = config.get('continuous_search_geometry')
         self.execution_settled = None
@@ -182,6 +210,7 @@ class ContinuousTrackingPolicy:
         self.last_reliable_tangent = self.last_contact_direction = None
         self.last_reliable_contact = None
         self.tracking_pose = self.loss_detection_pose = self.reacquire_origin = None
+        self.tracking_velocity = np.zeros(2)
         self.reacquire_reference = None
         self.force_direction = np.zeros(2)
         self.contact_direction = np.zeros(2)
@@ -206,7 +235,6 @@ class ContinuousTrackingPolicy:
         self._direction_resume_started = self._direction_resume_pose = self._direction_resume_tangent = None
         self.direction_resume_progress_m = 0.
         self._confirmation_vectors = deque()
-        self._saturation_since = self._saturation_force = None
         self._last_recovery_origin = None
         self._recovery_count = 0
         self._recovery_previous_pose = None
@@ -219,6 +247,88 @@ class ContinuousTrackingPolicy:
         self.direction_limited = False
         self.contact_hold_elapsed = self.settle_hold_elapsed = 0.
         self.reacquire_tracking_error = self.reacquire_path_length = 0.
+        self.unload_active = False
+        self._unload_started = self._unload_release_since = self._unload_resumed = None
+        self._unload_resume_announced = False
+        self._unload_pose = self._unload_direction = None
+        self._force_window = deque()
+        self.unload_elapsed = self.unload_displacement = self.unload_projected = 0.
+        self.unload_force_mean = self.unload_improvement = self.unload_force_slope = 0.
+        self.unload_resume_scale = 1.
+        self.tangent_limit_reason = 'READY'
+        self._contact_low_speed_seen = False
+
+    def _begin_unload(self, now, pose):
+        if not self.force_direction_verified:
+            self.request_stop(now, pose, 'force frame/control direction not verified',
+                              code=TerminationReason.STOP_FORCE_DIRECTION_UNVERIFIED)
+            return
+        self.unload_active = True
+        self._unload_started, self._unload_pose = now, pose[:2].copy()
+        self._unload_direction = -self.contact_direction.copy()
+        self._unload_initial_force = self.fxy  # Already EMA-filtered; do not average in pre-contact low force.
+        self._unload_release_since = self._unload_resumed = None
+        self.unload_displacement = self.unload_projected = self.unload_elapsed = self.unload_improvement = 0.
+        self._event(now, pose, 'UNLOAD_STARTED')
+
+    def _observe_unload(self, now, pose):
+        self._force_window.append((now, self.fxy))
+        while len(self._force_window) > 1 and self._force_window[0][0] < now-self.c['unload_force_window_sec']:
+            self._force_window.popleft()
+        values = np.asarray(self._force_window)
+        self.unload_force_mean = float(np.mean(values[:, 1]))
+        centered = values[:, 0]-np.mean(values[:, 0])
+        self.unload_force_slope = float(centered @ (values[:, 1]-self.unload_force_mean) /
+            (centered @ centered)) if centered @ centered > 1e-12 else 0.
+        if not self.unload_active:
+            return
+        self.unload_elapsed = now-self._unload_started
+        delta = pose[:2]-self._unload_pose
+        self.unload_displacement = max(self.unload_displacement, float(np.linalg.norm(delta)))
+        self.unload_projected = float(delta @ self._unload_direction)
+        self.unload_improvement = self._unload_initial_force-self.unload_force_mean
+        reason = code = None
+        if (self.unload_displacement >= self.c['unload_max_displacement_m'] or
+                self.unload_elapsed >= self.c['unload_max_time_sec']):
+            reason, code = 'unload total time/displacement budget exhausted', TerminationReason.STOP_UNLOAD_BUDGET
+        elif self._release_unload_if_ready(now, pose):
+            return
+        elif self.unload_elapsed >= self.c['unload_evaluation_sec']:
+            if self.unload_projected < self.c['unload_min_displacement_m']:
+                reason, code = 'unload: insufficient actual TCP displacement', TerminationReason.STOP_UNLOAD_NO_MOTION
+            elif self.unload_improvement < self.c['overload_improvement_force']:
+                reason, code = 'unload: TCP moved but smoothed resultant force did not improve', TerminationReason.STOP_UNLOAD_INEFFECTIVE
+        if reason:
+            self._event(now, pose, code.value)
+            self.request_stop(now, pose, reason, code=code)
+
+    def _release_unload_if_ready(self, now, pose):
+        low = self.fxy <= self.c['unload_resume_force'] and self.unload_force_mean <= self.c['unload_resume_force']
+        self._unload_release_since = (now if self._unload_release_since is None else self._unload_release_since) if low else None
+        if self._unload_release_since is None or now-self._unload_release_since < self.c['unload_resume_hold_sec']:
+            return False
+        self.unload_active = False
+        self._unload_resumed, self._unload_resume_announced = now, False
+        self._event(now, pose, 'UNLOAD_FORCE_RELEASED')
+        return True
+
+    def _unload_tangent_scale(self, now, pose):
+        if not self.unload_active and self.fxy >= self.c['overload_tangent_zero_force']:
+            self._begin_unload(now, pose)
+        if self.unload_active:
+            self.tangent_limit_reason = 'HIGH_FORCE_UNLOADING'
+            return 0.
+        if self._unload_resumed is not None:
+            if not self._unload_resume_announced:
+                self._unload_resumed, self._unload_resume_announced = now, True
+                self._event(now, pose, 'TANGENT_RESUME_STARTED')
+            scale = min(1., max(0., (now-self._unload_resumed)/self.c['unload_resume_ramp_sec']))
+            self.tangent_limit_reason = 'UNLOAD_RECOVERY_RAMP' if scale < 1 else ''
+            if scale >= 1:
+                self._unload_resumed = None
+                self._event(now, pose, 'TANGENT_RESUME_COMPLETED')
+            return scale
+        return 1.
 
     def _event(self, now, pose, name):
         self.events.append(PolicyWaypoint(now, self.state.value, name, pose.copy(),
@@ -238,6 +348,8 @@ class ContinuousTrackingPolicy:
         self.stop_confirmed = False
         self.v_t = self.v_n = 0.
         self._velocity[:] = 0
+        self.unload_active = False
+        self.tangent_limit_reason = str(getattr(self.stop_reason, 'value', self.stop_reason))
 
     def _command(self, pose, velocity=None):
         # None is an immediate stop request, never acceleration-smoothed.
@@ -268,9 +380,14 @@ class ContinuousTrackingPolicy:
         self._confirmation_vectors.clear()
         self.contact_hold_elapsed = self.settle_hold_elapsed = 0.
         self.stop_confirmed = False
+        self._contact_low_speed_seen = False
 
     def _settled(self, now, robot):
+        was_confirmed = self.stop_confirmed
         if np.linalg.norm(robot.tcp_speed[:3]) <= float(self.c['settle_speed_mps']):
+            if self.state == State.FIRST_CONTACT and not self._contact_low_speed_seen:
+                self._event(now, robot.pose, 'FIRST_CONTACT_LOW_SPEED_OBSERVED')
+                self._contact_low_speed_seen = True
             if self._settle_since is None:
                 self._settle_since = now
         else:
@@ -278,6 +395,8 @@ class ContinuousTrackingPolicy:
         self.settle_hold_elapsed = 0. if self._settle_since is None else now-self._settle_since
         self.stop_confirmed = (self.settle_hold_elapsed + 1e-12 >= float(self.c['settle_hold_sec'])
                                and self.execution_settled is not False)
+        if self.stop_confirmed and not was_confirmed:
+            self._event(now, robot.pose, 'STANDSTILL_CONFIRMED')
         return self.stop_confirmed
 
     def _confirm(self, now, robot, vector):
@@ -316,8 +435,8 @@ class ContinuousTrackingPolicy:
                     magnitude = 0.
             if magnitude >= float(self.c['direction_min_filtered_force']) and coherence >= float(self.c['direction_min_coherence']):
                 self._filtered, self._filtered_magnitude = mean, float(np.mean(np.linalg.norm(values, axis=1)))
-                self.contact_direction = float(self.c['force_direction_sign']) * mean / magnitude
-                self.tangent = handed_tangent(self.contact_direction, self.follow_hand)
+                self.contact_direction, self.tangent, _ = control_directions(
+                    mean, self.c['force_direction_sign'], self.follow_hand)
                 self._previous_measurement = vector / self.fxy
                 self.direction_valid, self.direction_confidence = True, coherence
                 self.filtered_fxy = magnitude
@@ -363,7 +482,7 @@ class ContinuousTrackingPolicy:
             self._begin_direction_reconfirm(now, pose, 'low filtered magnitude / direction coherence')
             if not self.real_execution or self.filtered_fxy == 0:
                 return False
-        candidate = float(self.c['force_direction_sign']) * self._filtered / self.filtered_fxy
+        candidate, _, _ = control_directions(self._filtered, self.c['force_direction_sign'], self.follow_hand)
         angle = angle_between(self.contact_direction, candidate)
         self.direction_delta_deg = float(np.rad2deg(angle))
         limit = np.deg2rad(float(self.c['direction_rate_deg_s'])) * self.dt
@@ -597,10 +716,12 @@ class ContinuousTrackingPolicy:
         self.execution_settled = execution_settled
         pose = robot.pose
         self.tracking_pose = pose.copy()
+        self.tracking_velocity = robot.tcp_speed[:2].copy()
         self.v_t = self.v_n = 0.
         self.force_rate_guard_active = False
         if self.state == State.STOP:
             return self._command(pose)
+        self.tangent_limit_reason = '' if self.state == State.CONTINUOUS_TRACKING else self.state.value
         if not np.all(np.isfinite(np.r_[now, robot.timestamp, raw.array(), processed.array(), pose, robot.tcp_speed])):
             self.request_stop(now, pose, 'nonfinite sensor/robot sample')
             return self._command(pose)
@@ -633,6 +754,9 @@ class ContinuousTrackingPolicy:
             self.force_rate_guard_active = False
         if safety:
             self.request_stop(now, pose, safety, code=TerminationReason.STOP_FORCE_LIMIT)
+            return self._command(pose)
+        self._observe_unload(now, pose)
+        if self.state == State.STOP:
             return self._command(pose)
         vector = np.array([processed.fx, processed.fy])
         searching = self.state in (State.READY, State.TARGET_SEARCH)
@@ -681,10 +805,22 @@ class ContinuousTrackingPolicy:
                 self.stop_requested = False
                 return self._command(pose, self.search_direction*float(self.c['search_speed']))
         if self.state == State.FIRST_CONTACT:
+            self.tangent_limit_reason = ('FIRST_CONTACT_SETTLE_HOLD' if
+                np.linalg.norm(robot.tcp_speed[:3]) <= self.c['settle_speed_mps'] else 'FIRST_CONTACT_BRAKING')
             if self._confirm(now, robot, vector):
                 self.initial_contact = pose.copy()
-                self.state = State.CONTINUOUS_TRACKING
-                self._event(now, pose, 'FIRST_CONTACT')
+                if not self.force_direction_verified:
+                    self._event(now, pose, 'FIRST_CONTACT')
+                    self.request_stop(now, pose, 'force frame/control direction not verified',
+                                      code=TerminationReason.STOP_FORCE_DIRECTION_UNVERIFIED)
+                else:
+                    self.state = State.CONTINUOUS_TRACKING
+                    self._event(now, pose, 'FIRST_CONTACT')
+                    self._event(now, pose, 'TRACKING_ENTERED')
+                    if self.fxy >= self.c['overload_tangent_zero_force']:
+                        self._begin_unload(now, pose)
+                if self.state == State.CONTINUOUS_TRACKING:
+                    self.tangent_limit_reason = 'TRACKING_TRANSITION_STOP'
                 self._confirm_started = None
             elif (self.real_execution and self.stop_confirmed and
                   (not self.contact_flag or
@@ -705,6 +841,7 @@ class ContinuousTrackingPolicy:
         if self.state == State.CONTINUOUS_TRACKING:
             self.stop_confirmed = False
             if self.fxy < float(self.c['contact_lost_threshold']):
+                self.tangent_limit_reason = 'LOW_FORCE_CONTACT_CONFIRMATION'
                 self.direction_valid = False
                 self.stop_requested = True
                 if not self._low_force_pending:
@@ -729,6 +866,7 @@ class ContinuousTrackingPolicy:
                 return self._command(pose)
             self._lost, self.lost_timer = None, 0.
             if self._low_force_pending:
+                self.tangent_limit_reason = 'LOW_FORCE_CONTACT_CONFIRMATION'
                 self.stop_requested = True
                 if not self._direction(now, pose, vector):
                     self._force_since = None
@@ -742,16 +880,23 @@ class ContinuousTrackingPolicy:
                 # Even the successful confirmation sample remains a stop.
                 return self._command(pose)
             self.stop_requested = False
+            if not self.unload_active and self.fxy >= self.c['overload_tangent_zero_force']:
+                self._begin_unload(now, pose)
+                if self.state == State.STOP:
+                    return self._command(pose)
             if not self._direction(now, pose, vector):
+                self.tangent_limit_reason = 'DIRECTION_CONFIRMATION'
                 self.stop_requested = True
                 return self._command(pose)
             self._remember(now, pose)  # Includes reliable 0.5--1 N samples.
             if not self._validate_direction_resume(now, pose):
                 return self._command(pose)
-            error = float(self.c['force_reference'])-self.fxy
-            dead = np.sign(error)*max(abs(error)-float(self.c['force_deadband']), 0.)
-            vn = float(np.clip(float(self.c['force_gain'])*dead,
-                               -float(self.c['normal_speed_limit']), float(self.c['normal_speed_limit'])))
+            vn = normal_feedback_speed(self.fxy, self.c)
+            self.unload_resume_scale = self._unload_tangent_scale(now, pose)
+            if self.state == State.STOP:
+                return self._command(pose)
+            if self.unload_active:
+                vn = min(0., vn)  # Do not resume inward advance during the force-release hold.
             high_start = float(self.c['force_reference'])+float(self.c['force_deadband'])
             load_scale = np.clip((float(self.c['overload_tangent_zero_force'])-self.fxy) /
                                  (float(self.c['overload_tangent_zero_force'])-high_start), 0, 1)
@@ -760,20 +905,10 @@ class ContinuousTrackingPolicy:
             vt = float(self.c['tangential_speed'])*load_scale*contact_scale*self.direction_confidence
             vt *= (min(self.direction_speed_scale, float(self.c['direction_resume_scale']))
                    if self._direction_resume_started is not None else self.direction_speed_scale)
-            saturated = vn <= -float(self.c['normal_speed_limit'])+1e-12
-            if saturated:
-                if self._saturation_since is None or self.fxy <= self._saturation_force-float(self.c['overload_improvement_force']):
-                    self._saturation_since, self._saturation_force = now, self.fxy
-                elif now-self._saturation_since >= float(self.c['overload_stall_sec']):
-                    if self.real_execution:
-                        self.diagnostics['overload_stall'] = 'WARNING: saturated unloading without force improvement; tangent held at zero'
-                        vt = 0.
-                    else:
-                        self.request_stop(now, pose, 'saturated unloading without force improvement',
-                                          code=TerminationReason.STOP_FORCE_LIMIT)
-                        return self._command(pose)
-            else:
-                self._saturation_since = None
+            vt *= self.unload_resume_scale
+            if not self.tangent_limit_reason:
+                self.tangent_limit_reason = ('FORCE_LOAD_SCALING' if load_scale < 1 else
+                    'DIRECTION_SPEED_SCALING' if self.direction_speed_scale < 1 else '')
             return self._command(pose, vt*self.tangent+vn*self.contact_direction)
         if self.state == State.CONTACT_LOST:
             self.stop_requested = True
@@ -824,4 +959,10 @@ class ContinuousTrackingPolicy:
             (self.state.value if self.state != State.CONTINUOUS_TRACKING else
              ('VERIFY_RESUME' if self._direction_resume_started is not None else ('LOW_FORCE_CONFIRM' if self._low_force_pending else 'TRACK'))))))
         result['force_rate_guard_active'] = int(self.force_rate_guard_active)
+        result.update(zip(UNLOAD_FIELDS, (self.tangent_limit_reason, int(self.unload_active), self.unload_elapsed,
+            self.unload_displacement, self.unload_projected, self.unload_force_mean, self.unload_improvement,
+            self.unload_force_slope, self.unload_resume_scale, int(self.force_direction_verified),
+            self._settle_since if self._settle_since is not None else '',
+            '' if self.first_threshold_pose is None else float(np.linalg.norm(self.tracking_pose[:2]-self.first_threshold_pose[:2])),
+            float(self.tracking_velocity @ self.contact_direction), float(self.tracking_velocity @ self.tangent))))
         return result

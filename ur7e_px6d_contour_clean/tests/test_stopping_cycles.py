@@ -104,6 +104,19 @@ def test_first_contact_uses_same_braking_monitor(config, monkeypatch, tmp_path):
     target = prepare(config, monkeypatch)
     devices = Devices(config, target)
     record = braking_device(devices)
+    original_speed = devices.control.speedL
+    def checked_speed(velocity, acceleration, duration):
+        if np.any(velocity) and devices.owner.continuous_phase != 'TARGET_SEARCH':
+            assert devices.owner.continuous_phase == 'CONTINUOUS_TRACKING'
+            assert record['mode_exits'], 'contact braking was overwritten before standstill/mode exit'
+        return original_speed(velocity, acceleration, duration)
+    devices.control.speedL = checked_speed
+    original_health = runtime.ContinuousLogWriter.check_health
+    def checked_health(logger):
+        if devices.owner is not None and devices.owner.continuous_phase == 'FIRST_CONTACT':
+            assert record['start'] is not None, 'contact stop must precede post-policy logger checks'
+        return original_health(logger)
+    monkeypatch.setattr(runtime.ContinuousLogWriter, 'check_health', checked_health)
     class ContactSensor(Sensor):
         def read_wrench(self):
             self.count += 1
@@ -116,6 +129,10 @@ def test_first_contact_uses_same_braking_monitor(config, monkeypatch, tmp_path):
     assert len([r for r in contact if r['runtime_stop_state'] == 'STOPPING']) >= 10
     assert any(r['current_state'] == 'CONTINUOUS_TRACKING' for r in rows)
     assert len(record['mode_exits']) == 2  # contact and final time limit
+    summary = json.loads((run_dir/'summary.json').read_text())
+    stop = summary['stop_observation']['stop_requests'][0]
+    assert stop['request_host_monotonic'] <= stop['first_low_speed_host_monotonic'] <= stop['confirmed_host_monotonic']
+    assert stop['confirmed_host_monotonic']-stop['settle_hold_start_host_monotonic'] >= .08
 
 
 def test_unaccepted_brake_and_persistent_motion_have_finite_timeout(config):

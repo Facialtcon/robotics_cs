@@ -14,7 +14,7 @@ DISPLAY_STYLES = {
     'robot_estimate': dict(color='#d32f2f', linestyle='--', name='机器人作用力估计', unit='N'),
     'measured': dict(color='#e07800', linestyle='-', name='处理后力信号', unit='N'),
     'tangent': dict(color='#008855', linestyle='-', name='估计切向', unit='单位方向'),
-    'inward': dict(color='#00a6b2', linestyle='-', name='估计朝内方向', unit='单位方向'),
+    'inward': dict(color='#00a6b2', linestyle='-', name='n：压入方向估计，卸力为 -n', unit='单位方向'),
     'command': dict(color='black', linestyle='-', name='命令速度', unit='mm/s'),
     'actual': dict(color='#9933aa', linestyle='-', name='实际TCP速度', unit='mm/s'),
     'executed': dict(color='#444444', linestyle='-', name='已执行轨迹', unit='mm'),
@@ -279,6 +279,8 @@ def force_demonstration(row, metadata, *, simulated, previous_velocity=None, com
                 metadata.get('physical_sign_confirmed') is True and metadata.get('base_frame_confirmed') is True and
                 metadata.get('calibration_reference')):return result
         result['blue']=vector('dfx','dfy')
+        if result['blue'] is not None:
+            result['blue'] *= float(metadata.get('physical_force_multiplier', 1.))
         result['red']=None if result['blue'] is None else -result['blue']
         note='Quasi-static estimate; measured noise / other-force uncertainty'
     velocity=vector('tcp_vx','tcp_vy')

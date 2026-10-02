@@ -17,6 +17,10 @@ def args(tmp_path, execute=True):
 
 
 def prepare(config, monkeypatch, *, watchdog=False):
+    # Explicit synthetic direction evidence for fake-device runtime tests only.
+    monkeypatch.setattr(runtime, 'load_direction_verification', lambda *a: dict(verified=True,
+        reason='offline fixture', reference='offline fixture', reported_force_convention='probe_on_environment',
+        physical_force_multiplier=-1))
     original = runtime.load_config
     def load(path):
         c=original(path)
@@ -63,6 +67,10 @@ def test_fake_real_continuous_owns_one_control_and_correct_logs(config,monkeypat
     summary=json.loads((path/'summary.json').read_text())
     assert summary['stop_observation']['standstill_confirmed']
     assert summary['strategy']=='continuous'
+    termination = json.loads((path/'termination.json').read_text())
+    assert termination['wrench_is_last_valid_sample'] is True
+    assert termination['last_valid_wrench_host_monotonic'] > 0
+    assert termination['last_valid_wrench_age_sec'] >= 0
     if away:
         status=json.loads((path/'return_status.json').read_text())
         assert status['force_monitor'] is True
@@ -95,6 +103,51 @@ def test_sensor_exception_stops_and_closes(config,monkeypatch,tmp_path):
     assert d.control_count==1
     assert any(x[0]=='speedStop' for x in d.control.calls)
     assert not sensor.connected and not d.receive.connected
+
+
+def test_px6d_timeout_preserves_evidence_stops_and_never_retries_while_braking(config, monkeypatch, tmp_path):
+    from sensor.px6d_reader import PX6DTimeout
+    target = prepare(config, monkeypatch)
+    devices = Devices(config, target)
+    class TimeoutSensor(Sensor):
+        failed = False
+        reads_after_failure = 0
+        def read_wrench(self):
+            if self.failed:
+                self.reads_after_failure += 1
+                raise AssertionError('sensor was retried while braking')
+            if self.count >= 5:
+                self.failed = True
+                exc = PX6DTimeout('PX6D response timeout after 0.050 s')
+                exc.sensor_diagnostics = {'requests': [{'request_id': 6, 'rx_bytes': 0}]}
+                raise exc
+            return super().read_wrench()
+    sensor = TimeoutSensor()
+    assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=lambda *a: sensor) == 1
+    assert sensor.failed and sensor.reads_after_failure == 0
+    path, = (tmp_path/'real/continuous').glob('run_*')
+    termination = json.loads((path/'termination.json').read_text())
+    assert termination['reason'] == 'STOP_SENSOR_ERROR'
+    assert termination['sensor_diagnostics']['requests'][-1]['request_id'] == 6
+    assert termination['wrench_is_last_valid_sample'] is True
+    assert termination['monotonic_sec'] == termination['failure_host_monotonic']
+    assert termination['last_valid_wrench_host_monotonic'] < termination['failure_host_monotonic']
+    assert termination['last_valid_wrench_age_sec'] > 0
+    summary = json.loads((path/'summary.json').read_text())
+    assert summary['stop_observation']['standstill_confirmed']
+    assert any(call[0] == 'speedStop' for call in devices.control.calls)
+    assert not sensor.connected and not devices.receive.connected and not devices.control.connected
+
+
+def test_unverified_force_direction_prevents_all_device_connections(config, monkeypatch, tmp_path):
+    prepare(config, monkeypatch)
+    monkeypatch.setattr(runtime, 'load_direction_verification', lambda *a: dict(verified=False, reason='unmeasured identity'))
+    def forbidden(*a, **k):
+        raise AssertionError('no device construction without measured direction verification')
+    assert runtime.run(args(tmp_path), controller_factory=forbidden, reader_factory=forbidden) == 1
+    path, = (tmp_path/'real/continuous').glob('run_*')
+    record = json.loads((path/'termination.json').read_text())
+    assert record['reason'] == 'STOP_FORCE_DIRECTION_UNVERIFIED'
 
 
 def test_simulation_continuous_uses_simulation_path(tmp_path):

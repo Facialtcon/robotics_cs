@@ -52,7 +52,8 @@ def test_first_stable_contact_stops_and_directly_tracks(config):
         command = tick(policy, i*.01, (1.0, 0))
     assert command.state == "CONTINUOUS_TRACKING"
     assert np.array_equal(policy.initial_contact, np.zeros(6))
-    assert [event.event_type for event in policy.events] == ["FIRST_THRESHOLD_STOP_REQUEST", "FIRST_CONTACT"]
+    assert [event.event_type for event in policy.events] == ["FIRST_THRESHOLD_STOP_REQUEST",
+        'FIRST_CONTACT_LOW_SPEED_OBSERVED', 'STANDSTILL_CONFIRMED', "FIRST_CONTACT", 'TRACKING_ENTERED']
 
 
 @pytest.mark.parametrize("force, expected", [(1.0, 1), (2.0, -1), (1.5, 0), (1.6, 0), (5.0, -1)])
@@ -256,5 +257,4 @@ def test_tracking_positive_rate_guard_still_uses_original_limit():
     assert p.force_rate == pytest.approx(80.)
     assert p.stop_reason == TerminationReason.STOP_FORCE_LIMIT
     assert p.force_rate_guard_active
-
 

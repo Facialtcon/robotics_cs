@@ -98,7 +98,7 @@ class SimulationSession:
         self.config['preprocessing'] = deepcopy(self.scene['preprocessing'])
         self.config['preprocessing']['filter_alpha'] = alpha
         # Geometry remains exclusively in the environment, not policy input.
-        self.policy = ContinuousTrackingPolicy({k: self.config[k] for k in ('continuous_tracking', 'policy', 'robot')})
+        self.policy = ContinuousTrackingPolicy({k: self.config[k] for k in ('continuous_tracking', 'policy', 'robot', 'preprocessing')})
         dynamics = dict(acceleration_limit=.005, delay_steps=2)
         self.config['continuous_simulation_execution'] = dynamics
         self.robot = SimulatedRobot(self.scene['start_point'], self.dt, self.scene['container'], **dynamics)

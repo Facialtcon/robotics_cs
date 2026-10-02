@@ -34,6 +34,7 @@ def test_readonly_tool_reports_3_4_5_without_any_rtde_access(monkeypatch):
 def test_tool_applies_configured_transform_and_displays_sign_without_saving(config, tmp_path):
     config['preprocessing']['coordinate_transform']['rotation_sensor_to_base'] = [[0,-1,0],[1,0,0],[0,0,1]]
     config['continuous_tracking']['force_direction_sign'] = -1
+    config['calibration']['file'] = str(PROJECT_ROOT/'scan_calibration.yaml')
     path = tmp_path/'config.yaml'; path.write_text(yaml.safe_dump(config))
     sensor = Sensor(); sensor.read_wrench = lambda: Wrench(3, 4, 0, 0, 0, 0)
     messages = []
@@ -50,7 +51,8 @@ def test_software_bias_only_uses_raw_then_reports_direction():
     readings = iter([Wrench(15, 0, 0, 0, 0, 0)]*2+[Wrench(18, 4, 0, 0, 0, 0)])
     sensor.read_wrench = lambda: next(readings)
     output = []
-    assert tool.run(reader_factory=lambda *a: sensor, bias_samples=2, samples=1, emit=output.append) == 0
+    assert tool.run(reader_factory=lambda *a: sensor, bias_samples=2, samples=1, emit=output.append,
+                    confirm=lambda _: 'UNLOADED') == 0
     assert any('normalized=[0.600000, 0.800000]' in line for line in output)
 
 

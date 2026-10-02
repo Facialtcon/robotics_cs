@@ -1,4 +1,5 @@
-# Mock + dry-run remains the default. Execute mode has no boolean confirmation gate.
+# Mock + dry-run remains the default. Real continuous execution checks measured
+# force-direction evidence before connecting; the existing START still authorizes motion.
 robot:
   robot_ip: 192.168.1.10
   max_tcp_speed: 0.030          # m/s; unchanged global limit, return uses 0.027 m/s
@@ -14,7 +15,7 @@ sensor:
   serial_format: 8N1
   crc8_polynomial: 0x07
   poll_rate_hz: 100.0
-  timeout_sec: 0.050
+  timeout_sec: 0.050           # whole host request budget: pacing/write/drain/read/parse; no blocking flush
   startup_delay_sec: 2.0       # PX6D v1.0.1 USB CDC settle time after open
 
 preprocessing:
@@ -26,7 +27,10 @@ preprocessing:
     condition: unloaded_stationary_air  # Do not capture this while touching target.
   gravity_wrench_sensor: [0, 0, 0, 0, 0, 0]  # MUST CALIBRATE at fixed orientation
   coordinate_transform:
-    # Placeholder identity. MUST replace/confirm PX6D sensor -> UR base rotation.
+    # Unverified identity, NOT a measured calibration. R_BS maps sensor -> Base
+    # at the saved fixed scan orientation. R_BS = R_BT @ R_TS only when the
+    # sensor -> tool mounting rotation R_TS has independently been measured.
+    # Never infer R_TS from TCP pose. --verify records actual applied-force checks.
     rotation_sensor_to_base:
       - [1, 0, 0]
       - [0, 1, 0]
@@ -43,8 +47,8 @@ policy:
   # about 0.45 N, while 1.0 N detects contact about 4 mm earlier than 2.0 N.
   contact_threshold: 1.0              # N
   contact_hold_time: 0.050            # s, MUST CONFIRM
-  safety_force_threshold: 12.0        # N vector norm, MUST CONFIRM
-  safety_torque_threshold: 1.0        # Nm vector norm, MUST CONFIRM
+  safety_force_threshold: 12.0        # N vector norm; existing real continuous diagnostic threshold
+  safety_torque_threshold: 1.0        # Nm vector norm; real continuous diagnostic (raw hard backstops below)
   absolute_raw_force_threshold: 60.0  # N, independent backstop; MUST CONFIRM
   absolute_raw_torque_threshold: 5.0  # Nm, independent backstop; MUST CONFIRM
   # Formal scan speeds doubled from 0.009/0.003/0.006/0.006 m/s.
@@ -166,7 +170,11 @@ continuous_tracking:
   force_gain: 0.0005              # (m/s)/N
   force_deadband: 0.15            # N
   normal_speed_limit: 0.0005      # m/s
-  force_direction_sign: 1         # simulation inward convention; MUST CONFIRM ON SITE
+  force_direction_sign: 1         # n = sign * unit(filtered Base XY); n is compression/targetward
+  # v = vt*t + vn*n; high force -> vn<0 -> unloading along -n.
+  # If Base reported force is environment ON probe: sign=-1; opposite convention: +1.
+  # Current +1 is unverified. Do NOT auto-flip; verify known external force vectors.
+  # Viewed from +Base Z: CW t=R90*n, CCW t=-R90*n (target respectively right/left).
   force_direction_filter_alpha: 0.8  # weight of PREVIOUS filtered XY vector
   search_speed: 0.018             # m/s; initial P0 -> P1 only, same as original search
   search_max_distance: 0.10       # m
@@ -211,8 +219,17 @@ continuous_tracking:
   direction_resume_distance: 0.00025 # projected advance along newly confirmed tangent
   command_acceleration: 0.01      # m/s^2; XY velocity slew, hard stops bypass
   overload_tangent_zero_force: 2.25 # N; cut tangent before hard force limit
-  overload_stall_sec: 0.5          # s; saturated outward correction without improvement
-  overload_improvement_force: 0.1 # N; improvement to restart bounded overload window
+  overload_stall_sec: 0.5          # legacy log compatibility; no longer an unloading decision window
+  overload_improvement_force: 0.1 # N; minimum decrease in the 0.25 s mean resultant (not pure normal load)
+  unload_resume_force: 2.0        # N; 0.25 N hysteresis below 2.25 N pause threshold
+  unload_resume_hold_sec: 0.1     # s; require both current and mean force below resume threshold
+  unload_force_window_sec: 0.25   # s; mean/trend evidence, no background subtraction
+  unload_evaluation_sec: 1.5      # s; allows 0.2 mm at 0.5 mm/s + filter/acceleration settling
+  unload_min_displacement_m: 0.0002 # m; existing position tolerance scale, validate against site noise
+  unload_max_displacement_m: 0.001 # m; finite 1 mm excursion, no endless retreat
+  unload_max_time_sec: 3.0        # s; total episode budget, never reset by intermittent improvement
+  unload_resume_ramp_sec: 0.5     # s; smooth recovery, existing acceleration cap also applies
+  force_direction_verification_file: calibration/force_direction_verification.json
   memory_max_age_sec: 0.5          # s; maximum age of recovery direction at stop
   reacquire_enabled: true         # use the existing local arc after contact loss
   reacquire_radius: 0.002         # m; independent arc reference radius, no target truth
