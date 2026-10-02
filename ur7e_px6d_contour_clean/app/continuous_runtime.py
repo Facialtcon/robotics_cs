@@ -31,7 +31,8 @@ TIMING_FIELDS = ('serial_read_start', 'serial_read_end', 'tcp_read_start', 'tcp_
 
 
 from app.configuration import prepare_real, calibration_summary, site_configuration_digest
-from app.scan_startup import startup_scan, capture_stationary_bias
+from app.scan_startup import (startup_scan, capture_stationary_bias,
+                             startup_position_tolerance, check_startup_stationary)
 from experiment_logging.paths import git_provenance
 
 def validate_cycle_timing(c, start, now, oldest_observation, previous_start=None, *, diagnostics=None):
@@ -55,10 +56,15 @@ def validate_cycle_timing(c, start, now, oldest_observation, previous_start=None
 
 def check_start(controller, start, config):
     robot = controller.read_state()
-    if np.linalg.norm(robot.pose[:3] - start[:3]) > float(config["policy"]["position_tolerance"]):
+    if np.linalg.norm(robot.pose[:3] - start[:3]) > startup_position_tolerance(config):
         raise RobotError("start TCP is not at calibrated P0; position it before this experiment")
-    if np.linalg.norm(robot.tcp_speed) > 1e-4:
-        raise RobotError("robot must be stationary at P0 before starting")
+    if config.get('continuous_real_execution'):
+        check_startup_stationary(config, robot, controller, anchor=start)
+    else:
+        linear_speed = np.linalg.norm(robot.tcp_speed[:3])
+        angular_speed = np.linalg.norm(robot.tcp_speed[3:])
+        if linear_speed > 1e-4 or angular_speed > .005:
+            raise RobotError('robot must be stationary at P0 before starting')
     return robot
 
 
@@ -102,7 +108,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         config = deepcopy(load_config(args.config))
         config['continuous_provenance'] = git_provenance()
         # Load the saved project calibrations before optional duration shortening;
-        # validate any explicit extra record and never auto-authorize recovery.
+        # validate any explicit extra record; local recovery is enabled by config.
         if args.execute:
             if getattr(args, 'enable_reacquire', False):
                 raise RobotError('--enable-reacquire is offline only')
@@ -119,10 +125,12 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         if args.duration is not None:
             if not np.isfinite(args.duration) or args.duration <= 0:
                 raise ValueError("--duration must be finite and positive")
-            # CLI may shorten the reviewed configuration budget, never raise it.
-            budget = config["continuous_tracking"]["max_runtime_sec"]
-            config["continuous_tracking"]["max_runtime_sec"] = (
-                args.duration if budget is None else min(args.duration, float(budget)))
+            if not args.execute:
+                budget = config["continuous_tracking"]["max_runtime_sec"]
+                config["continuous_tracking"]["max_runtime_sec"] = (
+                    args.duration if budget is None else min(args.duration, float(budget)))
+            else:
+                print('WARNING: --duration applies to simulation only; real continuous execution has no runtime stop budget.', flush=True)
         dt = 1 / float(config["policy"]["control_rate_hz"])
         if args.execute:
             # Existing site direction checks do not identify the physical object
@@ -461,7 +469,7 @@ def main():
     mode.add_argument("--preview", action="store_true", help="interactive offline SIMULATION / SYNTHETIC FORCE")
     mode.add_argument("--dry-run", action="store_true", help="offline simulation (default)")
     parser.add_argument("--scene", type=Path, default=ROOT / "simulation/scene_continuous.yaml")
-    parser.add_argument("--duration", type=float, help="finite preview duration (default: manual stop); shorten budget in other modes")
+    parser.add_argument("--duration", type=float, help="simulation/preview duration; ignored during real execution")
     parser.add_argument("--output", type=Path)
     parser.add_argument('--enable-reacquire', action='store_true', help='offline experimental arc recovery only')
     parser.add_argument('--site-digest', action='store_true', help='print current config binding hash; no devices')

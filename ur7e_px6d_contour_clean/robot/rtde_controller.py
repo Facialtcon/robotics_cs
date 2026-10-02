@@ -241,6 +241,8 @@ class URRTDEController:
         self.standstill_confirmed = False
         self._stop_method = "speedStop"
         self._return_mode = False
+        self._startup_preflight = False
+        self._scan_motion_started = False
         self.motion_fault = ''
         self._stop_pending = False
         self._stop_started = None
@@ -374,7 +376,7 @@ class URRTDEController:
         if confirmed is not True:
             raise RobotError('motion confirmation required')
         self._check_connected()
-        self.wait_for_standstill()
+        self.wait_for_standstill(startup=bool(self.config.get('continuous_real_execution')))
         if self._control_created:
             raise RobotError('Control already created for this task; reconnect is forbidden')
         self._control_created = True
@@ -384,7 +386,7 @@ class URRTDEController:
             factory = RTDEControlInterface
         self.control = factory(self.config['robot_ip'])
         self._verify_tcp()
-        self.wait_for_standstill()
+        self.wait_for_standstill(startup=bool(self.config.get('continuous_real_execution')))
 
     def _connection_failure_snapshot(self):
         """Read cached receive data before cleanup; never authorizes motion."""
@@ -436,6 +438,23 @@ class URRTDEController:
         if self.receive.isEmergencyStopped() or self.receive.isProtectiveStopped():
             raise RobotError('UR emergency/protective stop is active')
 
+    def _check_execution_pose(self, pose):
+        """Real feedback has wider hard bounds; commanded Z/rotation stay zero."""
+        if not self.config.get('continuous_real_execution'):
+            self.guard.check_pose(pose)
+            return
+        self.guard.check_workspace(pose)
+        z_drift = abs(pose[2]-self.guard.fixed_z)
+        orientation_drift = (0. if self.guard.fixed_orientation is None else
+                             _orientation_distance(self.guard.fixed_orientation, pose[3:]))
+        if z_drift > float(self.config['continuous_hard_z_drift_m']):
+            raise RobotError(f'TCP z drift {z_drift:g} m exceeds hard tolerance')
+        if orientation_drift > float(self.config['continuous_hard_orientation_drift_rad']):
+            raise RobotError(f'TCP orientation drift {orientation_drift:g} rad exceeds hard tolerance')
+        if z_drift > self.guard.z_tolerance or orientation_drift > self.guard.orientation_tolerance_rad:
+            self.diagnostics['pose_drift'] = (
+                f'WARNING: actual TCP drift: z={z_drift:g} m, orientation={orientation_drift:g} rad')
+
     def read_state(self) -> RobotState:
         self._check_connected()
         try:
@@ -444,16 +463,10 @@ class URRTDEController:
             pose = _finite_six(self.receive.getActualTCPPose(), "actual TCP pose")
             speed = _finite_six(self.receive.getActualTCPSpeed(), "actual TCP speed")
             assert self.guard is not None
-            searching = self.config.get('continuous_real_execution') and self.continuous_phase in ('READY', 'TARGET_SEARCH')
             if self._return_mode:
                 self.guard.check_workspace(pose)
-            elif searching:
-                try:
-                    self.guard.check_pose(pose)
-                except RobotError as exc:
-                    self.diagnostics['search_pose'] = f'WARNING: {exc}'
             else:
-                self.guard.check_pose(pose)
+                self._check_execution_pose(pose)
             # Braking may consume the reserved clearance, never the raw boundary.
             boundary_config = ({**self.config, 'continuous_boundary_margin': 0.}
                                if self._stop_pending or self.continuous_phase == 'TARGET_SEARCH' else self.config)
@@ -519,13 +532,9 @@ class URRTDEController:
             if self.continuous_phase == 'TARGET_SEARCH':
                 raise SearchLimitReached(str(exc)) from exc
             raise
-        try:
-            self.guard.check_predicted_pose(state.pose, direction, float(speed), float(duration))
-        except RobotError as exc:
-            if self.config.get('continuous_real_execution') and self.continuous_phase == 'TARGET_SEARCH':
-                self.diagnostics['search_pose'] = f'WARNING: {exc}'
-            else:
-                raise
+        predicted_pose = state.pose.copy()
+        predicted_pose[:2] = predicted
+        self._check_execution_pose(predicted_pose)
         if self.config.get('continuous_require_watchdog') and not self._packet_advanced:
             raise RobotError('RTDE packet progress not established')
         velocity = [direction[0] * speed, direction[1] * speed, 0.0, 0.0, 0.0, 0.0]
@@ -533,6 +542,7 @@ class URRTDEController:
             # Set before the call so an ambiguous transport failure still
             # causes stop() to attempt speedStop.
             self.standstill_confirmed = False
+            self._scan_motion_started = True
             self._settled_since = self._settled_stamp = None
             self._stop_pending = False
             self.stop_state = 'RUNNING'
@@ -784,16 +794,27 @@ class URRTDEController:
         if stamp is None or stamp == self._settled_stamp:
             return
         self._settled_stamp = stamp
-        low = (np.linalg.norm(speed[:3]) <= float(self.config.get('continuous_settle_speed_mps', 1e-4))
-               and np.linalg.norm(speed[3:]) <= .005)
+        translation_limit = float(self.config.get('continuous_settle_speed_mps', 1e-4))
+        angular_limit = .005
+        startup = self.config.get('continuous_real_execution') and (
+            self._return_mode or (self._startup_preflight and not self._stop_pending) or
+            (not self._scan_motion_started and self.continuous_phase in ('READY', 'TARGET_SEARCH')
+             and self.stop_state != 'STOPPING'))
+        if startup:
+            if np.linalg.norm(speed[:3]) > translation_limit or np.linalg.norm(speed[3:]) > angular_limit:
+                self.diagnostics['startup_stationary'] = 'WARNING: small TCP velocity during startup preflight'
+            translation_limit = float(self.config['continuous_startup_speed_mps'])
+            angular_limit = float(self.config['continuous_startup_angular_speed_rad_s'])
+        low = (np.linalg.norm(speed[:3]) <= translation_limit and np.linalg.norm(speed[3:]) <= angular_limit)
         self._settled_since = (now if self._settled_since is None else self._settled_since) if low else None
         self.standstill_confirmed = bool(self._settled_since is not None and
             now-self._settled_since >= float(self.config.get('settle_hold_sec', .08)))
         if self.stop_report is not None and self._stop_pending and self.stop_state != 'FAILED':
             self.stop_report['physical_stop'] = 'confirmed' if self.standstill_confirmed else 'unconfirmed'
 
-    def wait_for_standstill(self, *, observe=None, timeout=None):
+    def wait_for_standstill(self, *, observe=None, timeout=None, startup=False):
         """Fresh device timestamps + held actual TCP speed are the sole authority."""
+        self._startup_preflight = bool(startup and self.config.get('continuous_real_execution') and not self._stop_pending)
         self.standstill_confirmed = False
         self._settled_since = self._settled_stamp = None
         deadline = time.monotonic() + float(timeout or self.config.get('confirmation_timeout_sec', 1.0))
@@ -809,6 +830,8 @@ class URRTDEController:
             if self.stop_report is not None and self.stop_state != 'FAILED':
                 self.stop_report['physical_stop'] = 'unconfirmed'
             raise
+        finally:
+            self._startup_preflight = False
 
     def stop(self):
         return self.request_stop()

@@ -37,7 +37,7 @@ ur-rtde 1.6.5 的 `speedStop(a)` 没有异步参数，其控制脚本同步执�
 
 接口依据：[SDU Robotics 接口说明](https://sdurobotics.gitlab.io/ur_rtde/introduction/introduction.html)、[控制脚本](https://gitlab.com/sdurobotics/ur_rtde/-/blob/master/scripts/rtde_control.script)。停稳后的 SDK 模式退出仍有通信往返开销，继续记录周期时长；真实 continuous 的 30 ms 现在是诊断阈值，单次超过不触发 STOP。
 
-`poll_stop()` 与启动预检的 `wait_for_standstill()` 共享同一停稳判据：设备 timestamp 必须向前更新，实际线速度低于阈值且角速度足够低，持续配置的 hold 时间。扫描循环与返回段末尾不调用阻塞等待。重复读取同一缓存包不能累计“静止”时间；缺包、倒退 timestamp、非有限数据、持续运动均不能证明停稳。默认线速度阈值 0.1 mm/s、hold 80 ms，角速度上限 0.005 rad/s。
+停车确认要求设备 timestamp 向前更新、实际速度持续低于阈值。扫描中的 `poll_stop()` 和 FIRST_CONTACT 仍使用线速度 0.1 mm/s、角速度 0.005 rad/s、hold 80 ms 及有限停车超时；扫描循环不调用阻塞等待。真实 continuous 的启动预检、启动返回及首次搜索命令前的交接使用 1 mm/s、0.01 rad/s。发送第一条扫描运动后不再使用启动容差；FIRST_CONTACT 即使发生在第一条运动前也使用原严格判据。返回仍逐周期确认实际停稳，保留 hold 和有限停车超时。重复读取同一缓存包不能累计静止时间。
 
 `speedStop == False` 或 SDK 异常只产生 API anomaly。若新鲜速度证明已停稳，记录 `physical_stop=confirmed`；若持续运动超时则报 `STOP_MOTION_ERROR`，若观测失效则记录观测错误。API 返回值不替代物理结论。下一次运动不会改写前一次 stop 报告。
 
@@ -47,21 +47,29 @@ ur-rtde 1.6.5 的 `speedStop(a)` 没有异步参数，其控制脚本同步执�
 
 `safety/search_geometry.py` 从扫描 P0 沿已保存的 `scan_direction_xy`，对原始沙箱四角的真实边逐条求交，取前方最近交点。它支持顺/逆时针凸四边形，拒绝无效顺序、非有限数据、零方向、起点不在内部或没有前方交点；不使用 AABB 或 P1 距离作为搜索预算。
 
-真实预算为几何距离减去原有 `search_boundary_margin`，保存在运行快照 `continuous_search_geometry`，启动连接设备前打印三项距离。YAML 的 `search_max_distance: 0.10` 保留供仿真使用；真实分支不再用它封顶。搜索预测从标定 P0 起算，下一步进入停车余量前正常触发 `STOP_SEARCH_LIMIT`。真实初始搜索的 search_max_time / max_runtime 仅记录 warning；接触后的运行时间预算与仿真预算保留。过去的周期抖动不扩大下一条 10 ms 命令的几何预测步长。
+真实预算为几何距离减去原有 `search_boundary_margin`，保存在运行快照 `continuous_search_geometry`，启动连接设备前打印三项距离。YAML 的 `search_max_distance: 0.10` 保留供仿真使用；真实分支不再用它封顶。搜索预测从标定 P0 起算，下一步进入停车余量前正常触发 `STOP_SEARCH_LIMIT`。真实 continuous 默认 `max_runtime_sec: null`，即使载入旧的有限预算也只 warning；`--duration` 仅用于仿真/预演。过去的周期抖动不扩大下一条 10 ms 命令的几何预测步长。
 
 斜边的垂直净距或更严格的工作空间仍可让搜索提前结束；这些执行边界也按 SEARCH_LIMIT 正常停车。实际制动允许消耗停车余量，原始 polygon / 工作空间外边界仍为硬限制。力安全、速度阶段限制与停车减速度保持原值。
 
 ## 真实 continuous 的 warning 与 STOP
 
-初始搜索不运行 tracking / direction / reacquire 的规则。运动只因操作者停止、UR emergency/protective stop、设备通信/API 错误、NaN/Inf、全局 TCP 超速、标定 polygon 搜索终点、raw force >= 60 N 或 raw torque >= 5 Nm 停止。Fxy >= 1 N 是正常 FIRST_CONTACT 转移，共用原停车状态机。
+初始搜索不运行 tracking / direction / reacquire 的规则。运动硬停止条件为操作者停止、UR emergency/protective stop、设备通信/API 错误、NaN/Inf、全局 TCP 超速、标定 polygon 搜索终点、raw force >= 60 N 或 raw torque >= 5 Nm，以及明显异常的 Z/姿态偏移。Fxy >= 1 N 是正常 FIRST_CONTACT 转移，共用原停车状态机。
 
-processed force 12 N / torque 1 Nm、force-rate、方向跳变/反转/相干度/置信度、阶段 1.2x/1.5x 速度检查、30 ms 周期、sample gap、observation age、RTDE stagnation、日志延迟/积压以及 startup/bias 抖动，在真实模式只记录 WARNING / diagnostic。搜索中的固定 Z/姿态偏差也只诊断；仍命令原 XY 速度，未修改目标 Z/TCP 或标定。方向估计、导纳和切向/法向速度公式保留。方向质量仍参与原接触确认计算，但不因其超时直接结束实验。停车状态机的物理停稳判据和有限停车超时不变。
+真实 FIRST_CONTACT 中，接触和实际停稳都确认成功后进入 CONTINUOUS_TRACKING。若停稳后 Fxy 掉到 1 N 以下，或停稳但原 confirmation_timeout_sec 内未能确认接触，则清空本次确认窗口、记录 `FIRST_CONTACT_RETRY_SEARCH` / warning，并返回 TARGET_SEARCH。转换当周期保持零速，下一周期仍先检查接触与原 polygon 搜索预算；搜索方向、P0 起点和累计空间预算不重置。策略停稳 hold 与执行层停稳确认缺一不可，未停稳不能重新搜索。仿真维持原确认失败行为。
+
+processed force 12 N / torque 1 Nm、force-rate、方向跳变/反转/相干度/置信度、阶段 1.2x/1.5x 速度检查、30 ms 周期、sample gap、observation age、RTDE stagnation、日志延迟/积压以及 startup/bias 抖动，在真实模式只记录 WARNING / diagnostic。实际 Z 漂移超过原 1 mm、姿态超过原约 1° 时 warning；超过 5 mm / 5° 仍 STOP。速度命令始终为 `[vx, vy, 0, 0, 0, 0]`，未修改目标 Z/TCP 或标定。方向估计、导纳和切向/法向速度公式保留。方向重确认超时继续等待估计；重启无进展暂停一周期后继续使用实时估计。overload stall 只 warning、切向速度置零，保留原向外法向修正。
 
 `capture_stationary_bias()` 在建立零偏前仅采集 raw，检查 finite、60 N/5 Nm 原始上限和基本静止；完成 `set_zero_bias(samples)` 后才开始 process/processed/contact/force-rate。15 N 恒定原始载荷可完成零偏采集。
+
+真实 continuous 的 bias 允许线速度 1 mm/s、角速度 0.01 rad/s、位置漂移 1 mm；超过旧阈值但未超过新阈值只 warning。P0 启动检查也采用 1 mm，不改保存坐标。明显运动、P0 不满足启动容差或配置/标定/TCP 不匹配仍拒绝启动。
+
+真实默认启用现有 local reacquire：低力先停车，持续 0.15 s 后进入 CONTACT_LOST，实际停稳后执行原局部圆弧，重新接触后停稳确认再恢复 tracking。记忆过期、置信度、重复失联无进展、reacquire 时间预算和跟随误差只 warning；缺少记忆或显式关闭 recovery 时原地等待接触。原圆弧角度、累计路径和位移空间预算耗尽且未接触才 STOP；接触到达预算边缘时先停车确认。没有新增恢复算法。仿真保留原严格 guard 行为。
 
 ## return
 
 唯一 `SafeReturnExecutor` 负责轨迹、异步 moveL、每段停稳和最终误差检查。
+
+真实 continuous startup return 的 processed 8 N / 0.7 Nm 只 warning，raw >= 60 N / 5 Nm 和非有限值仍终止；PX6D samples、warning 和 return_status 均保留。返回段软件时间预算只 warning，保持观测并接受人工停止；返回末尾仍必须满足 1 mm 启动位置容差。手动返回和 discrete 保留原行为。
 
 - manual：`force_monitor=None`，不导入 PX6D 驱动，不采零偏，不创建扫描 policy。
 - continuous/discrete startup：注入 `PX6DForceMonitor`，静止临时零偏只用于返回；到 P0 后重新采扫描零偏。

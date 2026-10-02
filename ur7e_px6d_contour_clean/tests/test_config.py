@@ -10,7 +10,8 @@ def test_algorithm_parameters_preserved(config):
     c=config['continuous_tracking']
     assert c['search_speed']==.018 and config['policy']['contact_threshold']==1
     assert c['tangential_speed']==.001 and c['normal_speed_limit']==.0005
-    assert c['force_reference']==1.5 and c['reacquire_enabled'] is False
+    assert c['force_reference']==1.5 and c['reacquire_enabled'] is True
+    assert c['max_runtime_sec'] is None
     assert config['policy']['force_rate_limit']==30
 
 

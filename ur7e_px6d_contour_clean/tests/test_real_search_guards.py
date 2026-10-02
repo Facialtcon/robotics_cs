@@ -70,6 +70,7 @@ def test_processed_limits_do_not_replace_contact_logic(real_config, processed, e
 
 
 def test_search_ignores_time_budgets(real_config):
+    real_config['continuous_tracking']['max_runtime_sec'] = 120.  # Legacy finite config also only warns.
     policy = ContinuousTrackingPolicy(real_config)
     tick(policy, 0.)
     # Keep a nominal prediction interval; neither timer may stop initial search.

@@ -85,9 +85,6 @@ def prepare_real(config, config_path):
         if verification.get('configuration_sha256') != digest:
             raise RobotError('site verification does not match current tool/frame/sign/configuration/calibrations')
         config['continuous_reviewed_configuration_sha256'] = digest
-    if c['reacquire_enabled'] and not (isinstance(verification, dict) and verification.get('recovery_verified') is True):
-        raise RobotError('real recovery requires separate site verification')
-
     # Use measured XY corners, not the fitted rectangle or its mean Z. The
     # polygon guard below also checks sloping edges; its AABB alone is insufficient.
     polygon = np.array([[sandbox['raw_points'][f'P{i}'][axis] for axis in 'xy'] for i in range(4)])
@@ -140,6 +137,10 @@ def prepare_real(config, config_path):
     robot_config = runtime_robot_config(config)
     robot_config.update(fixed_z=calibration['fixed_z'], fixed_orientation=calibration['fixed_orientation'],
                         continuous_real_execution=True, continuous_require_watchdog=require_watchdog,
+                        continuous_startup_speed_mps=float(c['startup_speed_mps']),
+                        continuous_startup_angular_speed_rad_s=float(c['startup_angular_speed_rad_s']),
+                        continuous_hard_z_drift_m=float(c['hard_z_drift_m']),
+                        continuous_hard_orientation_drift_rad=float(c['hard_orientation_drift_rad']),
                         continuous_sample_age_sec=float(c['max_observation_age_sec']),
                         continuous_settle_speed_mps=float(c['settle_speed_mps']), continuous_xy_limits=dict(bounds),
                         continuous_xy_polygon=polygon.tolist(), continuous_speed_limits=speed_limits,

@@ -103,6 +103,7 @@ class PX6DForceMonitor:
     def __init__(self, config, reader, preprocessor):
         self.config, self.reader, self.preprocessor = config, reader, preprocessor
         self.raw = self.processed = None
+        self.diagnostics = {}
 
     def sample(self):
         self.raw = self.reader.read_wrench()
@@ -115,7 +116,12 @@ class PX6DForceMonitor:
             (self.processed.torque, s['return_torque_limit'], 'return torque'),
             (self.raw.force, p['absolute_raw_force_threshold'], 'absolute raw force'),
             (self.raw.torque, p['absolute_raw_torque_threshold'], 'absolute raw torque')):
-            if np.linalg.norm(value) > float(limit):
+            magnitude = np.linalg.norm(value)
+            real = self.config.get('continuous_real_execution', False)
+            if magnitude > float(limit) or (real and label.startswith('absolute raw') and magnitude >= float(limit)):
+                if real and label.startswith('return '):
+                    self.diagnostics[label] = f'WARNING: processed {label} {magnitude:g} exceeds {limit:g}'
+                    continue
                 raise ReturnAborted(f'{label} limit exceeded')
 
 
@@ -140,6 +146,7 @@ class SafeReturnExecutor:
             raise KeyboardInterrupt('operator stopped return')
         if self.force_monitor is not None:
             self.force_monitor.sample()
+            self.controller.diagnostics.update(self.force_monitor.diagnostics)
         state = self.controller.read_state()
         if self.logger is not None:
             if self.force_monitor is None:
@@ -152,7 +159,9 @@ class SafeReturnExecutor:
                     speed=self.command_speed, target_pose=self.target.copy(),
                     contact_flag=False, possible_corner=False, reason=self.phase)
                 self.logger.log_sample(started, self.force_monitor.raw, self.force_monitor.processed,
-                                       state, command, None, None)
+                                       state, command, None, None,
+                                       extra=({'software_warnings': json.dumps(dict(return_monitor=self.force_monitor.diagnostics))}
+                                              if self.config.get('continuous_real_execution') else None))
             if hasattr(self.logger, 'check_health'):
                 self.logger.check_health()
         if self.controller.watchdog_active or self.config.get('continuous_real_execution'):
@@ -180,7 +189,9 @@ class SafeReturnExecutor:
     def _at_target(self, state):
         tolerance = float(self.settings['return_position_tolerance'])
         if self.force_monitor is not None:
-            tolerance = min(tolerance, float(self.config['policy']['position_tolerance']))
+            tolerance = (float(self.config['continuous_tracking']['startup_position_tolerance'])
+                         if self.config.get('continuous_real_execution') else
+                         min(tolerance, float(self.config['policy']['position_tolerance'])))
         return (np.linalg.norm(state.pose[:3]-self.target[:3]) <= tolerance and
                 _orientation_distance(state.pose[3:], self.target[3:]) <= float(self.settings['return_orientation_tolerance']))
 
@@ -225,7 +236,10 @@ class SafeReturnExecutor:
                     started = time.monotonic()
                     state = self.observe()
                     if started >= deadline:
-                        raise ReturnAborted(f'{self.phase} timed out')
+                        if self.config.get('continuous_real_execution'):
+                            self.controller.diagnostics['return_progress'] = f'WARNING: {self.phase} taking longer than configured interval'
+                        else:
+                            raise ReturnAborted(f'{self.phase} timed out')
                     if self._at_target(state):
                         break
                     time.sleep(max(0., self.period-(time.monotonic()-started)))
@@ -251,7 +265,8 @@ class SafeReturnExecutor:
             payload = dict(return_status=result.status, return_abort_reason=result.abort_reason,
                 stop_pose=result.stop_pose, final_pose=result.final_pose, return_target=self.start_pose.tolist(),
                 return_target_label=self.target_label, force_monitor=self.force_monitor is not None,
-                stop_requests=self.controller.stop_history)
+                stop_requests=self.controller.stop_history,
+                software_warnings=dict(self.controller.diagnostics))
             if hasattr(self.logger, 'write_json'):
                 self.logger.write_json('return_status.json', payload)
             else:

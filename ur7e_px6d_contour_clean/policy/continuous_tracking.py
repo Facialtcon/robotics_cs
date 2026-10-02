@@ -59,6 +59,11 @@ def validate_config(config: dict) -> None:
     for key in positive:
         if not np.isfinite(float(c[key])) or float(c[key]) <= 0:
             raise ValueError(f"continuous_tracking.{key} must be finite and positive")
+    if config.get('continuous_real_execution'):
+        for key in ('startup_speed_mps', 'startup_angular_speed_rad_s', 'startup_position_tolerance',
+                    'hard_z_drift_m', 'hard_orientation_drift_rad'):
+            if not np.isfinite(float(c[key])) or float(c[key]) <= 0:
+                raise ValueError(f'continuous_tracking.{key} must be finite and positive')
     budget = c['max_runtime_sec']
     if budget is not None and (isinstance(budget, bool) or not np.isfinite(float(budget)) or float(budget) <= 0):
         raise ValueError('continuous_tracking.max_runtime_sec must be null or finite and positive')
@@ -427,7 +432,8 @@ class ContinuousTrackingPolicy:
         if now-self._confirm_started+1e-12 >= float(self.c['confirmation_timeout_sec']):
             self.request_stop(now, robot.pose, 'direction reconfirmation timeout',
                               code=TerminationReason.STOP_DIRECTION_UNCONFIRMED)
-            return self._command(robot.pose)
+            if not self.real_execution:
+                return self._command(robot.pose)
         if self.fxy < float(self.c['contact_lost_threshold']):
             if self._lost is None:
                 self._lost = now
@@ -459,27 +465,43 @@ class ContinuousTrackingPolicy:
             return True
         self.direction_resume_progress_m = float(np.dot(pose[:2]-self._direction_resume_pose, self._direction_resume_tangent))
         if self.fxy >= float(self.c['overload_tangent_zero_force']):
-            self.request_stop(now, pose, 'direction restart overload', code=TerminationReason.STOP_FORCE_LIMIT)
-            return False
+            if self.real_execution:
+                self.diagnostics['direction_restart_overload'] = 'WARNING: direction restart overload; tangent held at zero'
+                return True  # Existing load_scale zeros tangent, keeping outward normal correction.
+            else:
+                self.request_stop(now, pose, 'direction restart overload', code=TerminationReason.STOP_FORCE_LIMIT)
+                return False
         if self.direction_resume_progress_m < -float(self.c['boundary_margin']):
             self.request_stop(now, pose, 'direction restart backward progress', code=TerminationReason.STOP_DIRECTION_NO_PROGRESS)
+            if self.real_execution:
+                self._direction_resume_started = None  # Pause once, then use the existing live estimate.
             return False
         if self.direction_resume_progress_m >= float(self.c['direction_resume_distance']):
             self._direction_resume_started = None
             self._event(now, pose, 'DIRECTION_RESUME_VERIFIED')
         elif now-self._direction_resume_started >= float(self.c['direction_resume_sec']):
             self.request_stop(now, pose, 'direction restart insufficient progress', code=TerminationReason.STOP_DIRECTION_NO_PROGRESS)
+            if self.real_execution:
+                self._direction_resume_started = None
             return False
         return True
 
     def _begin_recovery(self, now, pose):
         if not self.c['reacquire_enabled']:
-            self.request_stop(now, pose, 'contact lost; experimental recovery disabled', code=TerminationReason.STOP_NO_CONTACT)
+            if self.real_execution:
+                self.diagnostics['recovery_disabled'] = 'WARNING: recovery disabled; holding for contact'
+            else:
+                self.request_stop(now, pose, 'contact lost; experimental recovery disabled', code=TerminationReason.STOP_NO_CONTACT)
             return
         memory = self.last_reliable_contact
         if memory is None or now-memory['timestamp'] > float(self.c['memory_max_age_sec']):
-            self.request_stop(now, pose, 'recovery memory stale or unreliable')
-            return
+            if self.real_execution:
+                self.diagnostics['recovery_memory'] = 'WARNING: recovery memory stale or unavailable'
+                if memory is None:
+                    return  # Hold for contact; no new direction or search is invented.
+            else:
+                self.request_stop(now, pose, 'recovery memory stale or unreliable')
+                return
         if memory['confidence'] < float(self.c['direction_min_coherence']):
             if self.real_execution:
                 self.diagnostics['recovery_confidence'] = 'WARNING: recovery memory confidence below configured threshold'
@@ -488,8 +510,11 @@ class ContinuousTrackingPolicy:
                 return
         if (self._last_recovery_origin is not None
                 and np.linalg.norm(pose[:2]-self._last_recovery_origin[:2]) < float(self.c['reacquire_min_progress'])):
-            self.request_stop(now, pose, 'repeated contact loss without spatial progress')
-            return
+            if self.real_execution:
+                self.diagnostics['recovery_progress'] = 'WARNING: repeated contact loss without spatial progress'
+            else:
+                self.request_stop(now, pose, 'repeated contact loss without spatial progress')
+                return
         self.reacquire_origin = pose.copy()
         self._last_recovery_origin = pose.copy()
         self._memory_normal, self._memory_tangent = memory['normal'].copy(), memory['tangent'].copy()
@@ -516,6 +541,12 @@ class ContinuousTrackingPolicy:
         )
         for exceeded, reason in limits:
             if exceeded:
+                if self.real_execution:
+                    if reason in ('time', 'tracking error'):
+                        self.diagnostics[f'recovery_{reason}'] = f'WARNING: local reacquire {reason} budget exceeded'
+                        continue  # Existing reference freezes when following error is large.
+                    if self.contact_flag or self._confirm_started is not None:
+                        continue  # Stop and confirm contact before declaring spatial exhaustion.
                 self.request_stop(now, pose, f'local reacquire {reason} budget exhausted',
                                   code=TerminationReason.STOP_RECOVERY_EXHAUSTED, event='BUDGET_STOP')
                 return self._command(pose)
@@ -616,8 +647,8 @@ class ContinuousTrackingPolicy:
             self._started, self._start_pose = now, pose.copy()
         budget = self.c['max_runtime_sec']
         if budget is not None and now-self._started >= float(budget):
-            if self.real_execution and searching:
-                self.diagnostics['search_runtime'] = 'WARNING: runtime budget exceeded during initial search'
+            if self.real_execution:
+                self.diagnostics['search_runtime' if searching else 'runtime'] = 'WARNING: configured runtime budget exceeded'
             else:
                 self.request_stop(now, pose, 'maximum experiment duration reached', event='BUDGET_STOP', code=TerminationReason.STOP_TIME_LIMIT)
                 return self._command(pose)
@@ -655,6 +686,19 @@ class ContinuousTrackingPolicy:
                 self.state = State.CONTINUOUS_TRACKING
                 self._event(now, pose, 'FIRST_CONTACT')
                 self._confirm_started = None
+            elif (self.real_execution and self.stop_confirmed and
+                  (not self.contact_flag or
+                   now-self._confirm_started >= float(self.c['confirmation_timeout_sec']))):
+                # Retry only after the existing policy AND execution standstill
+                # confirmation. Keep the original search origin/direction/budget.
+                self.state = State.TARGET_SEARCH
+                self._reset_confirmation(now)
+                self._confirm_started = None
+                self.direction_valid = False
+                self.diagnostics['first_contact_retry'] = 'WARNING: first contact not confirmed; resuming original target search'
+                self._event(now, pose, 'FIRST_CONTACT_RETRY_SEARCH')
+                # This transition sample remains stopped; the next SEARCH tick
+                # applies the unchanged contact and polygon checks before moving.
             return self._command(pose)
         if self.state == State.DIRECTION_RECONFIRM:
             return self._direction_reconfirm(now, robot, vector)
@@ -721,14 +765,24 @@ class ContinuousTrackingPolicy:
                 if self._saturation_since is None or self.fxy <= self._saturation_force-float(self.c['overload_improvement_force']):
                     self._saturation_since, self._saturation_force = now, self.fxy
                 elif now-self._saturation_since >= float(self.c['overload_stall_sec']):
-                    self.request_stop(now, pose, 'saturated unloading without force improvement',
-                                      code=TerminationReason.STOP_FORCE_LIMIT)
-                    return self._command(pose)
+                    if self.real_execution:
+                        self.diagnostics['overload_stall'] = 'WARNING: saturated unloading without force improvement; tangent held at zero'
+                        vt = 0.
+                    else:
+                        self.request_stop(now, pose, 'saturated unloading without force improvement',
+                                          code=TerminationReason.STOP_FORCE_LIMIT)
+                        return self._command(pose)
             else:
                 self._saturation_since = None
             return self._command(pose, vt*self.tangent+vn*self.contact_direction)
         if self.state == State.CONTACT_LOST:
             self.stop_requested = True
+            if self.real_execution and self.contact_flag:
+                if self._confirm(now, robot, vector):
+                    self.state = State.CONTINUOUS_TRACKING
+                    self._lost, self.lost_timer, self._confirm_started = None, 0., None
+                    self._event(now, pose, 'REACQUIRED')
+                return self._command(pose)
             if self._settled(now, robot):
                 self._begin_recovery(now, pose)
             elif now-self._confirm_started >= float(self.c['confirmation_timeout_sec']):

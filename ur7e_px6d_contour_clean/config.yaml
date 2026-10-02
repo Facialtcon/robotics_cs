@@ -178,13 +178,18 @@ continuous_tracking:
   reacquire_angular_speed_deg_s: 30.0
   reacquire_max_time_sec: 8.0
   reacquire_max_distance: 0.004   # m displacement bound about actual stopped recovery origin
-  max_runtime_sec: 120.0
+  max_runtime_sec: null            # real continuous runs until operator/hard fault/spatial exhaustion
   visualization_fps: 10
   # Revision: all new physical values MUST CONFIRM ON SITE.
   max_sample_gap_sec: 0.03          # s; diagnostic only in real continuous execution
   max_observation_age_sec: 0.02     # s; real host-age diagnostic, not device sample age
   cycle_timeout_sec: 0.03          # s; real cycle diagnostic, includes I/O and logging
   settle_speed_mps: 0.0001         # m/s; norm of actual XYZ velocity
+  startup_speed_mps: 0.001         # real preflight/bias only; braking still uses settle_speed_mps
+  startup_angular_speed_rad_s: 0.01
+  startup_position_tolerance: 0.001 # m; real P0 check and bias drift
+  hard_z_drift_m: 0.005            # real feedback: original 1 mm tolerance only warns
+  hard_orientation_drift_rad: 0.08726646259971647 # 5 degrees; commands remain planar
   settle_hold_sec: 0.08            # s; fresh continuous low-speed observations
   confirmation_timeout_sec: 1.0   # s; bounded wait after threshold/stop request
   direction_min_force: 0.5         # N; processed XY direction signal floor
@@ -209,12 +214,12 @@ continuous_tracking:
   overload_stall_sec: 0.5          # s; saturated outward correction without improvement
   overload_improvement_force: 0.1 # N; improvement to restart bounded overload window
   memory_max_age_sec: 0.5          # s; maximum age of recovery direction at stop
-  reacquire_enabled: false        # real DEFAULT: stop on loss; opt in only offline
+  reacquire_enabled: true         # use the existing local arc after contact loss
   reacquire_radius: 0.002         # m; independent arc reference radius, no target truth
   reacquire_max_path: 0.004        # m; accumulated ACTUAL TCP path during one search
   reacquire_position_gain: 5.0     # 1/s; actual TCP to position reference feedback
   reacquire_reference_freeze_error: 0.0001 # m; freeze reference progression above this
-  reacquire_max_tracking_error: 0.0005     # m; stop above this
+  reacquire_max_tracking_error: 0.0005     # m; real warning, simulation stop
   boundary_margin: 0.0005         # m; reserve for stopping/communication, MUST VALIDATE
   reacquire_min_progress: 0.002   # m; reject repeated loss without spatial progress
   watchdog_frequency_hz: 20.0    # Hz; robot-side timeout 50 ms; SDK 1.6.5 only verified
