@@ -1,5 +1,4 @@
-# Mock + dry-run remains the default. Real continuous execution checks measured
-# force-direction evidence before connecting; the existing START still authorizes motion.
+# Mock + dry-run remains the default. Real motion requires separate Enter confirmations.
 robot:
   robot_ip: 192.168.1.10
   max_tcp_speed: 0.030          # m/s; unchanged global limit, return uses 0.027 m/s
@@ -30,7 +29,7 @@ preprocessing:
     # Unverified identity, NOT a measured calibration. R_BS maps sensor -> Base
     # at the saved fixed scan orientation. R_BS = R_BT @ R_TS only when the
     # sensor -> tool mounting rotation R_TS has independently been measured.
-    # Never infer R_TS from TCP pose. --verify records actual applied-force checks.
+    # Never infer R_TS from TCP pose; the optional direction tool only observes.
     rotation_sensor_to_base:
       - [1, 0, 0]
       - [0, 1, 0]
@@ -229,7 +228,6 @@ continuous_tracking:
   unload_max_displacement_m: 0.001 # m; finite 1 mm excursion, no endless retreat
   unload_max_time_sec: 3.0        # s; total episode budget, never reset by intermittent improvement
   unload_resume_ramp_sec: 0.5     # s; smooth recovery, existing acceleration cap also applies
-  force_direction_verification_file: calibration/force_direction_verification.json
   memory_max_age_sec: 0.5          # s; maximum age of recovery direction at stop
   reacquire_enabled: true         # use the existing local arc after contact loss
   reacquire_radius: 0.002         # m; independent arc reference radius, no target truth

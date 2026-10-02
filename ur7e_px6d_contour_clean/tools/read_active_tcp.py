@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config.loader import load_config
+from app.operator_input import confirm_enter
 from robot.tcp_identity import read_tcp_offset_readonly, normalize_tcp_offset, tcp_offsets_match
 
 
@@ -102,6 +103,9 @@ def main() -> int:
     print(f"active_tcp_offset={offset}")
     if args.write_config:
         print(f"previous_config_tcp_offset={configured}")
+        if not confirm_enter(f'即将把上述 active TCP 保存到 {config_path}，改动时备份原配置。'):
+            print('已取消，未写配置。')
+            return 0
         backup = save_tcp_offset(config_path, original, offset)
         if backup is None:
             print(f"TCP 已完全一致，无需改写：{config_path}")
@@ -125,6 +129,9 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except SystemExit:
         raise
+    except (KeyboardInterrupt, EOFError):
+        print('已取消，未写配置。')
+        raise SystemExit(130)
     except Exception as exc:
         print(f"active TCP read failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         raise SystemExit(1)

@@ -1,4 +1,4 @@
-"""Finite unloading and recovery with explicit synthetic force-direction evidence."""
+"""Finite unloading and recovery without a force-direction verification gate."""
 from copy import deepcopy
 
 import numpy as np
@@ -12,7 +12,6 @@ from sensor.force_direction import control_directions, normal_feedback_speed
 def exercise(config, force, *, moving=True, seconds=3.5):
     c = deepcopy(config)
     c['continuous_real_execution'] = True
-    c['force_direction_status'] = {'verified': True, 'reason': 'synthetic plant'}
     policy = ContinuousTrackingPolicy(c)
     pose, speed = np.zeros(6), np.zeros(6)
     rows = []
@@ -71,16 +70,12 @@ def test_hysteresis_prevents_repeated_restart_around_pause_threshold(config):
     assert all(abs(row['v_t']) < 1e-10 for _, _, row in rows)
 
 
-def test_unverified_direction_stops_after_confirmation_without_unloading(config):
-    config['continuous_real_execution'] = True
-    config['force_direction_status'] = {'verified': False}
-    policy = ContinuousTrackingPolicy(config)
-    for i in range(20):
-        now = i*.01
-        w = Wrench(3., 0., 0., 0., 0., 0.)
-        command = policy.update(now, w, w, RobotState(now, np.zeros(6), np.zeros(6)), execution_settled=True)
-        assert not command.move
-    assert policy.stop_reason.value == 'STOP_FORCE_DIRECTION_UNVERIFIED'
+def test_high_force_enters_unloading_without_any_direction_record(config):
+    policy, rows = exercise(config, lambda t: 3., seconds=.5)
+    assert policy.state == State.CONTINUOUS_TRACKING
+    assert policy.unload_active and policy.stop_reason is None
+    assert any(command.move for _, command, _ in rows)
+    assert all(row['v_t'] == 0. for _, _, row in rows)
 
 
 @pytest.mark.parametrize('sign', [-1, 1])

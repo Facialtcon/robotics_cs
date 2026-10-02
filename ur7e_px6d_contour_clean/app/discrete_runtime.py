@@ -5,8 +5,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from app.configuration import prepare_discrete
-from app.operator_input import OperatorKeyboard
-from app.scan_startup import startup_scan, capture_stationary_bias
+from app.operator_input import OperatorKeyboard, confirm_enter
+from app.scan_startup import startup_scan, capture_stationary_bias, hold_startup_confirmation
 from config.loader import load_config, runtime_robot_config
 from experiment_logging.data_logger import ExperimentLogger
 from experiment_logging.paths import PROJECT_ROOT
@@ -66,9 +66,12 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         controller.connect()
         with OperatorKeyboard() as keyboard:
             if execute:
-                startup_scan(config, start, controller, reader, logger, keyboard.poll, confirm=keyboard.read_line)
+                startup_return_done = startup_scan(config, start, controller, reader, logger, keyboard.poll, confirm=keyboard.read_line)
+                keyboard.on_wait = lambda: hold_startup_confirmation(config, start, controller)
             baseline = config['preprocessing']['baseline']
             if baseline['capture_on_start']:
+                if not confirm_enter('探针须脱离目标、静止空载；即将采集扫描零偏。', read_line=keyboard.read_line):
+                    raise KeyboardInterrupt('bias not confirmed')
                 if execute:
                     capture_stationary_bias(config, reader, preprocessing, controller, baseline['sample_count'],
                         poll=keyboard.poll, logger=logger)
@@ -80,6 +83,12 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                         samples.append(reader.read_wrench())
                         time.sleep(period)
                     preprocessing.set_zero_bias(samples)
+            if execute:
+                if not confirm_enter('即将从 P0 沿保存方向开始离散扫描。', read_line=keyboard.read_line):
+                    raise KeyboardInterrupt('scan not confirmed')
+                hold_startup_confirmation(config, start, controller)
+                if not startup_return_done:
+                    controller.activate_control(confirmed=True)
             print(f'离散扫描日志: {logger.run_dir}')
             print('Q 正常停止并按配置返回 P0；ESC/Ctrl+C 原地停止。')
             counts = [0, 0, 0]

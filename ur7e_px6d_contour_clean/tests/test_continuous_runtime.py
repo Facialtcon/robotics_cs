@@ -17,10 +17,6 @@ def args(tmp_path, execute=True):
 
 
 def prepare(config, monkeypatch, *, watchdog=False):
-    # Explicit synthetic direction evidence for fake-device runtime tests only.
-    monkeypatch.setattr(runtime, 'load_direction_verification', lambda *a: dict(verified=True,
-        reason='offline fixture', reference='offline fixture', reported_force_convention='probe_on_environment',
-        physical_force_multiplier=-1))
     original = runtime.load_config
     def load(path):
         c=original(path)
@@ -30,7 +26,7 @@ def prepare(config, monkeypatch, *, watchdog=False):
         return c
     monkeypatch.setattr(runtime,'load_config',load)
     monkeypatch.setattr(runtime,'OperatorKeyboard',Keyboard)
-    monkeypatch.setattr(Keyboard,'answer','START')
+    monkeypatch.setattr(Keyboard,'answer','')
     # Real SEARCH no longer ends on a software time budget. These fixtures use
     # an explicit operator Q after the requested test interval, after startup.
     contexts = 0
@@ -71,6 +67,11 @@ def test_fake_real_continuous_owns_one_control_and_correct_logs(config,monkeypat
     assert termination['wrench_is_last_valid_sample'] is True
     assert termination['last_valid_wrench_host_monotonic'] > 0
     assert termination['last_valid_wrench_age_sec'] >= 0
+    import yaml
+    snapshot = yaml.safe_load((path/'config_snapshot.yaml').read_text())
+    assert 'force_direction_status' not in snapshot
+    assert 'force_direction_verification_file' not in snapshot['continuous_tracking']
+    assert snapshot['force_display']['physical_available'] is False
     if away:
         status=json.loads((path/'return_status.json').read_text())
         assert status['force_monitor'] is True
@@ -81,6 +82,49 @@ def test_cancel_before_control_is_clean_exit(config,monkeypatch,tmp_path):
     d=Devices(config,target)
     assert runtime.run(args(tmp_path),controller_factory=d.controller,reader_factory=Sensor)==0
     assert d.control_count==0
+
+
+@pytest.mark.parametrize('stage', ['return_bias', 'return_motion', 'scan_bias', 'scan_motion'])
+def test_each_startup_action_requires_separate_enter(config, monkeypatch, tmp_path, stage):
+    target = prepare(config, monkeypatch)
+    pose = np.array(target)
+    if stage.startswith('return'):
+        pose[0] += .003
+    devices, sensor = Devices(config, pose), Sensor()
+    prompts = []
+    def read_line(self, prompt):
+        current = ('return_bias' if '启动返回用零偏' in prompt else
+                   'return_motion' if '自动返回扫描 P0' in prompt else
+                   'scan_bias' if '扫描零偏' in prompt else 'scan_motion')
+        prompts.append(current)
+        assert devices.control_count == 0
+        assert sensor.count == (0 if current.endswith('bias') else 2)
+        return 'q' if current == stage else ''
+    monkeypatch.setattr(Keyboard, 'read_line', read_line)
+    assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=lambda *a: sensor) == 0
+    assert prompts[-1] == stage
+    assert devices.control_count == 0
+    assert not sensor.connected and not devices.receive.connected
+
+
+def test_waiting_for_enter_after_return_keeps_existing_watchdog_alive(config, monkeypatch, tmp_path):
+    target = prepare(config, monkeypatch, watchdog=True)
+    pose = np.array(target); pose[0] += .003
+    devices, waited = Devices(config, pose), []
+    def read_line(self, prompt):
+        if getattr(self, 'on_wait', None) is not None:
+            assert devices.owner.watchdog_active
+            deadline = time.monotonic() + .12  # Longer than the unchanged 50 ms watchdog.
+            calls = len(devices.control.calls)
+            while time.monotonic() < deadline:
+                self.on_wait()
+                time.sleep(.005)
+            assert len(devices.control.calls) == calls  # No new movement during confirmation.
+            waited.append(prompt)
+        return ''
+    monkeypatch.setattr(Keyboard, 'read_line', read_line)
+    assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=Sensor) == 0
+    assert len(waited) == 2
 
 
 def test_false_stop_api_can_still_confirm_physical_stop(config,monkeypatch,tmp_path):
@@ -137,17 +181,6 @@ def test_px6d_timeout_preserves_evidence_stops_and_never_retries_while_braking(c
     assert summary['stop_observation']['standstill_confirmed']
     assert any(call[0] == 'speedStop' for call in devices.control.calls)
     assert not sensor.connected and not devices.receive.connected and not devices.control.connected
-
-
-def test_unverified_force_direction_prevents_all_device_connections(config, monkeypatch, tmp_path):
-    prepare(config, monkeypatch)
-    monkeypatch.setattr(runtime, 'load_direction_verification', lambda *a: dict(verified=False, reason='unmeasured identity'))
-    def forbidden(*a, **k):
-        raise AssertionError('no device construction without measured direction verification')
-    assert runtime.run(args(tmp_path), controller_factory=forbidden, reader_factory=forbidden) == 1
-    path, = (tmp_path/'real/continuous').glob('run_*')
-    record = json.loads((path/'termination.json').read_text())
-    assert record['reason'] == 'STOP_FORCE_DIRECTION_UNVERIFIED'
 
 
 def test_simulation_continuous_uses_simulation_path(tmp_path):

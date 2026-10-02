@@ -9,10 +9,20 @@ import termios
 import tty
 
 
+def confirm_enter(message: str, *, read_line=None) -> bool:
+    """Each action needs a fresh Enter; words and Q/Esc do not authorize it."""
+    prompt = message + ' 按 Enter 确认，Q/Esc 取消：'
+    if read_line is not None:
+        return read_line(prompt) == ''
+    with OperatorKeyboard() as keyboard:
+        return keyboard.read_line(prompt) == ''
+
+
 class OperatorKeyboard:
     def __init__(self):
         self.enabled = bool(sys.stdin.isatty() and os.name == "posix")
         self._original = None
+        self.on_wait = None
 
     def __enter__(self) -> "OperatorKeyboard":
         if self.enabled:
@@ -36,20 +46,31 @@ class OperatorKeyboard:
         return "Q" if key == "q" else None
 
     def read_line(self, prompt: str) -> str:
-        """Temporarily restore visible, editable line input inside cbreak mode."""
+        """Read a fresh confirmation key, never a buffered newline from input()."""
         if not self.enabled:
-            return input(prompt)
+            raise EOFError('确认需要前台交互终端，不能通过管道预先输入回车。')
         fd = sys.stdin.fileno()
         previous = termios.tcgetattr(fd)
-        line_mode = termios.tcgetattr(fd)
-        line_mode[3] |= termios.ICANON | termios.ECHO | termios.ISIG
         try:
-            # Do not flush input that the operator has already typed.
-            termios.tcsetattr(fd, termios.TCSANOW, line_mode)
-            return input(prompt)
+            tty.setcbreak(fd)
+            termios.tcflush(fd, termios.TCIFLUSH)
+            print(prompt, end='', flush=True)
+            while True:
+                if self.on_wait is not None:
+                    self.on_wait()
+                readable, _, _ = select.select([fd], [], [], .01)
+                if not readable:
+                    continue
+                key = os.read(fd, 1)
+                if not key or key == b'\x04':
+                    raise EOFError('confirmation input closed')
+                print(flush=True)
+                if key == b'\x03':
+                    raise KeyboardInterrupt
+                return '' if key in (b'\r', b'\n') else key.decode('utf-8', errors='replace')
         finally:
-            # Also restore Q/Esc polling after EOF or Ctrl+C. The enclosing
-            # context restores the original terminal when the run exits.
+            # Discard repeated Enter/CRLF before restoring the caller's mode.
+            termios.tcflush(fd, termios.TCIFLUSH)
             termios.tcsetattr(fd, termios.TCSANOW, previous)
 
     def __exit__(self, *_args) -> None:

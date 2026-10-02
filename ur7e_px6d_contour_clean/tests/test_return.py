@@ -16,7 +16,7 @@ def test_manual_return_uses_no_sensor_and_one_control(config, tmp_path):
     d = Devices(config, initial)
     def confirm(prompt):
         assert d.control_count == 0
-        return 'RETURN'
+        return ''
     assert run(controller_factory=d.controller, confirm=confirm, data_root=tmp_path) == 0
     assert d.control_count == 1
     moves = [x[1] for x in d.control.calls if x[0]=='moveL']
@@ -45,7 +45,7 @@ def test_cancel_never_constructs_control(config,tmp_path):
 
 def test_motion_during_confirmation_rejects_before_control(config,tmp_path):
     target=load_return_target(PROJECT_ROOT/'config.yaml',config)['pose'];d=Devices(config,target)
-    def confirm(_): d.receive.pose[0]+=.01;return 'RETURN'
+    def confirm(_): d.receive.pose[0]+=.01;return ''
     assert run(controller_factory=d.controller,confirm=confirm,data_root=tmp_path)==1
     assert d.control_count==0
 

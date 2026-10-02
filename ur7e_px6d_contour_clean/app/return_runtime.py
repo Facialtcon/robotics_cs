@@ -14,7 +14,7 @@ from experiment_logging.paths import PROJECT_ROOT, create_run, read_metadata
 from robot.rtde_controller import RobotError, URRTDEController, _orientation_distance
 from robot.tcp_identity import tcp_offsets_match
 from safety.safe_return import SafeReturnExecutor, return_trajectory, print_return_plan
-from app.operator_input import OperatorKeyboard
+from app.operator_input import OperatorKeyboard, confirm_enter
 
 
 def load_return_target(config_path, config, *, p0_only=False):
@@ -71,8 +71,8 @@ def run(config_path=PROJECT_ROOT/'config.yaml', *, controller_factory=URRTDECont
         print(f'当前 TCP: {current.pose.tolist()}\n目标 {target["label"]}: {target["pose"]}\n来源: {target["source"]}')
         segments = return_trajectory(config, current.pose, target['pose'])
         print_return_plan(config, current.pose, target['pose'], segments)
-        if (confirm or input)('确认完整四段路径后输入 RETURN：').strip() != 'RETURN':
-            result, status, reason = 0, 'cancelled', 'RETURN not confirmed'
+        if not confirm_enter('核对完整四段路径；即将返回上述目标。', read_line=confirm):
+            result, status, reason = 0, 'cancelled', 'return not confirmed'
         else:
             fresh = controller.wait_for_standstill()
             if (np.linalg.norm(fresh.pose[:3]-current.pose[:3]) > config['safe_return']['return_position_tolerance'] or

@@ -7,6 +7,7 @@ Workspace P0/P1/P2/P3 are corner labels, separate from scan P0/P1.
 from __future__ import annotations
 
 import argparse
+from app.operator_input import confirm_enter
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -104,7 +105,7 @@ def read_corner(receiver, name, *, clock=time.time):
     return pose, metadata
 
 
-def teach_corners(receiver, metadata, *, input_fn=input, print_fn=print, clock=time.time):
+def teach_corners(receiver, metadata, *, input_fn=None, print_fn=print, clock=time.time):
     print_fn("四角顺序：workspace P0 → P1 → P2 → P3，沿箱体四边依次示教。")
     print_fn("workspace X 轴为 P0→P1；Y 轴为 P0→P3。这些角点不是旧扫描标定的 P0/P1。")
     print_fn("请用示教器移动；程序只读取，不会发送运动或停止命令。各点保存完整 TCP 位姿。")
@@ -112,12 +113,8 @@ def teach_corners(receiver, metadata, *, input_fn=input, print_fn=print, clock=t
     points = {}
     for name in POINT_NAMES:
         while True:
-            answer = input_fn(f"将 TCP 手动移至 workspace {name} 并静止，按 Enter 读取（输入 ABORT 取消）：").strip()
-            if answer.upper() in {"ABORT", "CANCEL", "Q"}:
+            if not confirm_enter(f'将 TCP 手动移至 workspace {name} 并静止，即将读取角点。', read_line=input_fn):
                 return None
-            if answer:
-                print_fn("按 Enter 采样，或输入 ABORT 取消。")
-                continue
             try:
                 pose, sample = read_corner(receiver, name, clock=clock)
             except InvalidTeachingSample as exc:
@@ -151,7 +148,7 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def main(argv=None, *, receiver_factory=None, input_fn=input, print_fn=print, clock=time.time):
+def main(argv=None, *, receiver_factory=None, input_fn=None, print_fn=print, clock=time.time):
     from workspace.workspace_calibrator import fit_workspace, save_calibration
 
     receiver = None
@@ -180,9 +177,8 @@ def main(argv=None, *, receiver_factory=None, input_fn=input, print_fn=print, cl
                 return 0
         calibration = fit_workspace(points, metadata=metadata)
         print_calibration(calibration, destination, print_fn=print_fn)
-        answer = input_fn("核对四角、轴方向和拟合误差后，输入 SAVE 保存（其它输入取消）：").strip()
-        if answer != "SAVE":
-            print_fn("未确认 SAVE，未写入有效 workspace 标定。")
+        if not confirm_enter('核对四角、轴方向和拟合误差；即将保存 workspace 标定。', read_line=input_fn):
+            print_fn('已取消，未写入有效 workspace 标定。')
             return 0
         if destination.exists():
             stamp = datetime.fromtimestamp(clock(), timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")

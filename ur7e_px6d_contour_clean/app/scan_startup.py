@@ -6,6 +6,7 @@ from robot.rtde_controller import RobotError, _orientation_distance
 from safety.force_guard import raw_safety_reason
 from safety.safe_return import SafeReturnExecutor, PX6DForceMonitor, return_trajectory, print_return_plan
 from sensor.force_preprocess import WrenchPreprocessor
+from app.operator_input import confirm_enter
 
 
 def startup_position_tolerance(config):
@@ -59,6 +60,14 @@ def capture_stationary_bias(config, reader, preprocessor, controller, count, *, 
     preprocessor.set_zero_bias(samples)
 
 
+def hold_startup_confirmation(config, start, controller):
+    """Observe standstill during an operator prompt; keep an existing watchdog alive."""
+    check_startup_stationary(config, controller.read_diagnostic_state(), controller, anchor=start)
+    if controller.config.get('continuous_require_watchdog') and controller.watchdog_active:
+        controller._check_watchdog_health()
+        controller.kick_watchdog()
+
+
 def startup_scan(config, start, controller, reader, logger, poll, *, confirm=None):
     startup = {'startup': True} if config.get('continuous_real_execution') else {}
     current = controller.wait_for_standstill(**startup)
@@ -70,17 +79,22 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
     print_return_plan(config, current.pose, start, segments, scan=True)
     if not away:
         print('Startup return: already at P0 and aligned; no return motion required.')
-    print('PX6D 力监控参与扫描与返回；请确认空载零偏、力方向、完整路径和现场急停。')
-    if (confirm or input)('输入 START 执行必要的启动返回并开始扫描：').strip() != 'START':
-        raise KeyboardInterrupt('START not confirmed')
+        return False
+    if not confirm_enter('探针须脱离目标、静止空载；即将采集启动返回用零偏。', read_line=confirm):
+        raise KeyboardInterrupt('bias not confirmed')
     fresh = controller.wait_for_standstill(**startup)
     if (np.linalg.norm(fresh.pose[:3]-current.pose[:3]) > startup_position_tolerance(config) or
         _orientation_distance(fresh.pose[3:], current.pose[3:]) > config['safe_return']['return_orientation_tolerance']):
         raise RobotError('robot moved during path confirmation')
     temporary = WrenchPreprocessor.from_config(config['preprocessing'])
-    if away:
-        capture_stationary_bias(config, reader, temporary, controller,
-            config['safe_return']['startup_bias_sample_count'], poll=poll, logger=logger)
+    capture_stationary_bias(config, reader, temporary, controller,
+        config['safe_return']['startup_bias_sample_count'], poll=poll, logger=logger)
+    if not confirm_enter('核对完整返回路径和姿态；即将自动返回扫描 P0。', read_line=confirm):
+        raise KeyboardInterrupt('startup return not confirmed')
+    fresh = controller.wait_for_standstill(**startup)
+    if (np.linalg.norm(fresh.pose[:3]-current.pose[:3]) > startup_position_tolerance(config) or
+        _orientation_distance(fresh.pose[3:], current.pose[3:]) > config['safe_return']['return_orientation_tolerance']):
+        raise RobotError('robot moved during path confirmation')
     controller.activate_control(confirmed=True)
     if away:
         if controller.config.get('continuous_require_watchdog'):

@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from app.operator_input import confirm_enter
 
 ROOT = Path(__file__).resolve().parent
 
@@ -82,11 +83,7 @@ MENU_GROUPS = (
     ("结果查看（离线）", ("19", "20")),
 )
 
-MOTION_CONFIRMATIONS = {
-    "11": "OPEN_REAL_RESET",
-    "12": "OPEN_REAL_SCAN",
-    "18": "OPEN_CONTINUOUS_SCAN",
-}
+MOTION_CONFIRMATIONS = {"11", "12", "18"}
 
 
 def print_menu() -> None:
@@ -276,7 +273,7 @@ def build_command(step: str) -> list[str]:
 
 
 def run_child(command: list[str]) -> int:
-    # Inherit terminal and process group: START echo and child Q/Esc handling stay intact.
+    # Inherit terminal and process group for fresh confirmations and child Q/Esc handling.
     # subprocess.run's interrupt cleanup can kill the child before its safety cleanup.
     child = subprocess.Popen(command, cwd=ROOT, env=clean_child_environment())
     interrupted = False
@@ -301,14 +298,13 @@ def run_step(step: str) -> int:
         if dependency_error:
             raise ValueError(dependency_error)
         if step in MOTION_CONFIRMATIONS:
-            confirmation = MOTION_CONFIRMATIONS[step]
             print(f"\n警告：{name}。可能连接控制接口并发送真机运动命令。")
-            print("须先检查现场、急停和完整返回/扫描路径；保留子程序 START/返回确认，不自动重试。")
+            print("须先检查现场、急停和完整返回/扫描路径；子程序运动前仍需单独按 Enter 确认。")
             print("连续：Q/Esc/Ctrl+C 原地停止。原离散：Q 按原配置返回，Esc/Ctrl+C 不返回。")
-            if ask(f"输入 {confirmation} 继续") != confirmation:
+            if not confirm_enter('即将打开所选真机任务。'):
                 raise Cancelled
         if step == "9":
-            print("读取当前 active TCP 并自动保存到 config.yaml 的 tcp.offset；保留原配置备份。")
+            print("读取当前 active TCP，单独按 Enter 确认后保存到 config.yaml 的 tcp.offset；保留原配置备份。")
             print("请先在示教器标定并启用正确针尖 TCP；本工具不调用 setTcp，也不能代替针尖标定。")
         command = build_command(step)
         print(f"\n开始：{name}\n执行：{shlex.join(command)}", flush=True)

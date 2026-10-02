@@ -26,12 +26,9 @@ def replay(run_dir):
         original_configuration_sha=config.get('continuous_provenance', {}).get('commit'),
         new_unload_defaults=UNLOAD_DEFAULTS,
         interpretation='Recorded inputs, not a closed-loop prediction after changed commands; no physical direction verification and no extrapolation beyond last valid frame.',
-        runtime_preflight='Missing measured direction record prevents real connection/motion; the following exercises the policy separately.',
         cases={})
-    for case, verified in [('saved_unverified_direction', False), ('hypothetical_verified_direction_OFFLINE_ONLY', True)]:
-        settings = deepcopy(config)
-        settings['force_direction_status'] = {'verified': verified, 'reason': 'offline replay assumption only'}
-        policy = ContinuousTrackingPolicy(settings)
+    for case in ['saved_configuration']:
+        policy = ContinuousTrackingPolicy(deepcopy(config))
         max_error, first_change, state_differences = 0., None, 0
         first_limits = {}
         for index, row in enumerate(rows):

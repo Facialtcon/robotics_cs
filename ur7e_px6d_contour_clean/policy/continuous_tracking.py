@@ -184,7 +184,7 @@ EXTRA_SAMPLE_FIELDS += ('force_rate_guard_active',)
 UNLOAD_FIELDS = ('tangent_limit_reason', 'unload_active', 'unload_elapsed_sec',
                 'unload_displacement_m', 'unload_projected_displacement_m',
                 'unload_force_mean_N', 'unload_force_improvement_N', 'unload_force_slope_N_s',
-                'unload_resume_scale', 'force_direction_verified', 'settle_hold_start_host_monotonic',
+                'unload_resume_scale', 'settle_hold_start_host_monotonic',
                 'tcp_displacement_from_contact_m', 'actual_v_n_mps', 'actual_v_t_mps')
 EXTRA_SAMPLE_FIELDS += UNLOAD_FIELDS
 
@@ -194,8 +194,6 @@ class ContinuousTrackingPolicy:
         validate_config(config)
         self.c, self.p = {**UNLOAD_DEFAULTS, **config['continuous_tracking']}, dict(config['policy'])
         self.real_execution = bool(config.get('continuous_real_execution'))
-        self.force_direction_verified = (not self.real_execution or
-            config.get('force_direction_status', {}).get('verified') is True)
         self.diagnostics = {}
         self.search_geometry = config.get('continuous_search_geometry')
         self.execution_settled = None
@@ -259,10 +257,6 @@ class ContinuousTrackingPolicy:
         self._contact_low_speed_seen = False
 
     def _begin_unload(self, now, pose):
-        if not self.force_direction_verified:
-            self.request_stop(now, pose, 'force frame/control direction not verified',
-                              code=TerminationReason.STOP_FORCE_DIRECTION_UNVERIFIED)
-            return
         self.unload_active = True
         self._unload_started, self._unload_pose = now, pose[:2].copy()
         self._unload_direction = -self.contact_direction.copy()
@@ -809,16 +803,11 @@ class ContinuousTrackingPolicy:
                 np.linalg.norm(robot.tcp_speed[:3]) <= self.c['settle_speed_mps'] else 'FIRST_CONTACT_BRAKING')
             if self._confirm(now, robot, vector):
                 self.initial_contact = pose.copy()
-                if not self.force_direction_verified:
-                    self._event(now, pose, 'FIRST_CONTACT')
-                    self.request_stop(now, pose, 'force frame/control direction not verified',
-                                      code=TerminationReason.STOP_FORCE_DIRECTION_UNVERIFIED)
-                else:
-                    self.state = State.CONTINUOUS_TRACKING
-                    self._event(now, pose, 'FIRST_CONTACT')
-                    self._event(now, pose, 'TRACKING_ENTERED')
-                    if self.fxy >= self.c['overload_tangent_zero_force']:
-                        self._begin_unload(now, pose)
+                self.state = State.CONTINUOUS_TRACKING
+                self._event(now, pose, 'FIRST_CONTACT')
+                self._event(now, pose, 'TRACKING_ENTERED')
+                if self.fxy >= self.c['overload_tangent_zero_force']:
+                    self._begin_unload(now, pose)
                 if self.state == State.CONTINUOUS_TRACKING:
                     self.tangent_limit_reason = 'TRACKING_TRANSITION_STOP'
                 self._confirm_started = None
@@ -961,7 +950,7 @@ class ContinuousTrackingPolicy:
         result['force_rate_guard_active'] = int(self.force_rate_guard_active)
         result.update(zip(UNLOAD_FIELDS, (self.tangent_limit_reason, int(self.unload_active), self.unload_elapsed,
             self.unload_displacement, self.unload_projected, self.unload_force_mean, self.unload_improvement,
-            self.unload_force_slope, self.unload_resume_scale, int(self.force_direction_verified),
+            self.unload_force_slope, self.unload_resume_scale,
             self._settle_since if self._settle_since is not None else '',
             '' if self.first_threshold_pose is None else float(np.linalg.norm(self.tracking_pose[:2]-self.first_threshold_pose[:2])),
             float(self.tracking_velocity @ self.contact_direction), float(self.tracking_velocity @ self.tangent))))

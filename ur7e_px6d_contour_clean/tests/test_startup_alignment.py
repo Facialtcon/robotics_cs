@@ -35,12 +35,14 @@ def test_startup_lifts_aligns_translates_descends_with_stops(real, clock, capsys
     def confirm(_):
         text = capsys.readouterr().out
         assert devices.control_count == 0
+        if '零偏' not in _:
+            return ''
         for label in ('Current orientation:', 'Target scan orientation:', 'Orientation error:',
                       '1. VERTICAL_RETREAT', '2. ALIGN_PROBE_ORIENTATION',
                       '3. MOVE_ABOVE_START', '4. DESCEND_TO_START',
                       'Probe will be aligned to the calibrated scan orientation at safe height.'):
             assert label in text
-        return 'START'
+        return ''
     assert scan_startup.startup_scan(config, start, owner, Sensor(), None, lambda: None, confirm=confirm)
     assert len(moves) == 4
     fixed = config['continuous_calibration']['fixed_orientation']
@@ -214,7 +216,7 @@ def test_manual_return_uses_same_four_segment_alignment(config, clock, tmp_path)
     target = np.asarray(return_runtime.load_return_target(PROJECT_ROOT/'config.yaml', config)['pose'])
     devices = Devices(config, target)
     misalign(devices, target)
-    assert return_runtime.run(controller_factory=devices.controller, confirm=lambda _: 'RETURN', data_root=tmp_path) == 0
+    assert return_runtime.run(controller_factory=devices.controller, confirm=lambda _: '', data_root=tmp_path) == 0
     moves = [c[1] for c in devices.control.calls if c[0] == 'moveL']
     assert len(moves) == 4
     np.testing.assert_array_equal(moves[0][3:], np.zeros(3))

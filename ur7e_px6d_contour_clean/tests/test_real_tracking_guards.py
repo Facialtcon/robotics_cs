@@ -38,7 +38,6 @@ def clock(monkeypatch):
 
 @pytest.fixture
 def real(config):
-    config['force_direction_status'] = {'verified': True, 'reason': 'synthetic unit-test force axes'}
     robot_config, start = prepare_real(config, PROJECT_ROOT/'config.yaml')
     devices = Devices(config, start)
     owner = devices.controller(robot_config)
@@ -169,7 +168,7 @@ def test_noisy_startup_and_half_mm_p0_offset_succeed_without_return(real, clock)
     devices.receive.pose[0] += .0005
     sensor = Sensor()
     assert startup.startup_scan(config, start, owner, sensor, None, lambda: None,
-                                confirm=lambda _: 'START') is False
+                                confirm=lambda _: '') is False
     assert not any(call[0] == 'moveL' for call in devices.control.calls)
     runtime.check_start(owner, start, config)
     processor = WrenchPreprocessor.from_config(config['preprocessing'])
@@ -205,7 +204,7 @@ def test_obvious_motion_rejects_start_before_control(real, clock):
     config, start, devices, owner = real
     devices.receive.speed[0] = .002
     with pytest.raises(rtde.RobotError, match='did not settle'):
-        startup.startup_scan(config, start, owner, Sensor(), None, lambda: None, confirm=lambda _: 'START')
+        startup.startup_scan(config, start, owner, Sensor(), None, lambda: None, confirm=lambda _: '')
     assert devices.control_count == 0
     devices.receive.speed[:] = 0
     owner.close()

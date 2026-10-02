@@ -38,7 +38,6 @@ class TerminationReason(str, Enum):
     STOP_UNLOAD_NO_MOTION = "STOP_UNLOAD_NO_MOTION"
     STOP_UNLOAD_INEFFECTIVE = "STOP_UNLOAD_INEFFECTIVE"
     STOP_UNLOAD_BUDGET = "STOP_UNLOAD_BUDGET"
-    STOP_FORCE_DIRECTION_UNVERIFIED = "STOP_FORCE_DIRECTION_UNVERIFIED"
     STOP_UNKNOWN_REASON = "STOP_UNKNOWN_REASON"
     STOP_DIRECTION_UNCONFIRMED = "STOP_DIRECTION_UNCONFIRMED"
     STOP_DIRECTION_REVERSAL = "STOP_DIRECTION_REVERSAL"
@@ -137,8 +136,8 @@ def classify_stop_reason(detail="", exception=None, context=None):
         "two tracking probes and two returned recovery rays exercised": "SUCCESS",
         "operator stop": "STOP_USER_REQUEST", "operator normal stop": "STOP_USER_REQUEST",
         "Q normal stop": "STOP_USER_REQUEST", "ESC emergency stop": "STOP_USER_REQUEST",
-        "Ctrl+C": "STOP_USER_REQUEST", "START not confirmed": "STOP_USER_REQUEST",
-        "START_AIR not confirmed": "STOP_USER_REQUEST", "manual normal stop": "STOP_USER_REQUEST",
+        "Ctrl+C": "STOP_USER_REQUEST", "scan not confirmed": "STOP_USER_REQUEST",
+        "manual normal stop": "STOP_USER_REQUEST",
         "manual emergency stop": "STOP_USER_REQUEST", "finalized by operator": "STOP_USER_REQUEST",
         "operator stop in place": "STOP_USER_REQUEST",
         "unexpected contact during anchor transfer": "STOP_UNEXPECTED_CONTACT",

@@ -16,6 +16,7 @@ from calibration.reset_pose import (
     write_reset_pose,
 )
 from config.loader import load_config
+from app.operator_input import confirm_enter
 from robot.tcp_identity import read_tcp_offset_readonly, tcp_offsets_match
 
 
@@ -73,9 +74,8 @@ def main() -> int:
             print("警告：active TCP 与 config.yaml 不一致；正式扫描仍会被拒绝。")
             print("这个复位点会绑定当前 active TCP，因此仍可用于独立复位。")
         print("请确认此位置适合作为复位终点，且从现场可能位置到它的三段路径安全。")
-        answer = input("确认后输入 SAVE_RESET_POSE：").strip()
-        if answer != "SAVE_RESET_POSE":
-            print("未输入 SAVE_RESET_POSE，不保存。")
+        if not confirm_enter('即将保存当前静止位置为复位点。'):
+            print("已取消，不保存。")
             return 0
 
         # Re-read after confirmation so moving the robot during review cannot
@@ -90,6 +90,9 @@ def main() -> int:
         print(f"reset_tcp_pose={pose}")
         print(f"bound_active_tcp_offset={final_active_tcp}")
         return 0
+    except (KeyboardInterrupt, EOFError):
+        print('已取消，不保存。')
+        return 130
     except (ResetPoseError, OSError, RuntimeError, ValueError) as exc:
         print(f"复位点保存失败：{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

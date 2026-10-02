@@ -18,6 +18,7 @@ from calibration.scan_calibration import (
     write_scan_calibration,
 )
 from config.loader import load_config
+from app.operator_input import confirm_enter
 from robot.tcp_identity import read_tcp_offset_readonly, tcp_offsets_match
 
 
@@ -110,9 +111,8 @@ def main() -> int:
         print("每次保存时通过只读端口 30012 读取 active TCP，不创建 Control。")
         print("请先在示教器启用正确 TCP；菜单 9 可读取并保存本地 TCP 配置。")
         print("请使用 UR7e 示教器将 TCP 移动到扫描起点 P0。")
-        answer = input("就位并静止后请输入 SAVE_P0：").strip()
-        if answer != "SAVE_P0":
-            print("未输入 SAVE_P0，不保存。")
+        if not confirm_enter('P0 就位并静止；即将读取并保存扫描起点。'):
+            print("已取消，不保存。")
             return 0
         point_0, active_tcp = _read_teaching_point(
             receiver, robot_ip, "P0"
@@ -130,13 +130,9 @@ def main() -> int:
         print("\n请继续使用示教器，沿你希望机器人正式扫描的方向移动一小段距离，到达 P1。")
         print("P1 只用于定义初始扫描方向，不是第二个扫描点或轮廓采样点。")
         while True:
-            answer = input("P1 就位并静止后请输入 SAVE_DIRECTION（输入 CANCEL 取消）：").strip()
-            if answer == "CANCEL":
+            if not confirm_enter('P1 就位并静止；即将读取并保存扫描方向。'):
                 print("方向标定已取消；当前文件保持未完成状态，正式扫描将拒绝启动。")
                 return 0
-            if answer != "SAVE_DIRECTION":
-                print("请输入 SAVE_DIRECTION，或输入 CANCEL 取消。")
-                continue
             try:
                 point_1, active_tcp_at_p1 = _read_teaching_point(
                     receiver, robot_ip, "P1"
@@ -148,7 +144,7 @@ def main() -> int:
                 )
             except CalibrationError as exc:
                 print(f"方向标定无效：{exc}", file=sys.stderr)
-                print("请重新移动 P1 后再次输入 SAVE_DIRECTION。")
+                print("请重新移动 P1，停稳后再按 Enter 确认。")
                 continue
 
             payload = build_scan_calibration(
@@ -164,7 +160,7 @@ def main() -> int:
             print(f"INITIAL SCAN DIRECTION: {direction.tolist()}")
             print(f"双点扫描标定完成：{destination}")
             print("注意：当前 TCP 仍位于 P1。")
-            print("原离散菜单 12 可能先返回 P0 再等待 START；连续菜单 18 保留 START 后启动返回的流程。")
+            print("菜单 12/18 会显示返回 P0 的路径，采零和运动前分别按 Enter 确认。")
             print(f"P0：{point_0}")
             return 0
     except (KeyboardInterrupt, EOFError):

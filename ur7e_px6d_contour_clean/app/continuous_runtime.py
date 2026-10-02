@@ -10,7 +10,7 @@ import time
 
 import numpy as np
 
-from app.operator_input import OperatorKeyboard
+from app.operator_input import OperatorKeyboard, confirm_enter
 from config.loader import load_config
 from experiment_logging.data_logger import ExperimentLogger
 from experiment_logging.continuous_writer import ContinuousLogWriter
@@ -20,7 +20,6 @@ from robot.rtde_controller import URRTDEController, RobotError, SearchLimitReach
 from sensor.force_preprocess import WrenchPreprocessor
 from safety.force_guard import continuous_force_reason, raw_safety_reason
 from sensor.px6d_reader import PX6DError, PX6DReader
-from sensor.force_direction import load_direction_verification
 from simulation.continuous_session import SIMULATION_SAMPLE_FIELDS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +32,7 @@ TIMING_FIELDS = ('serial_read_start', 'serial_read_end', 'tcp_read_start', 'tcp_
 
 from app.configuration import prepare_real, calibration_summary, site_configuration_digest
 from app.scan_startup import (startup_scan, capture_stationary_bias,
-                             startup_position_tolerance, check_startup_stationary)
+                             startup_position_tolerance, check_startup_stationary, hold_startup_confirmation)
 from experiment_logging.paths import git_provenance
 
 def validate_cycle_timing(c, start, now, oldest_observation, previous_start=None, *, diagnostics=None):
@@ -115,13 +114,6 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             if getattr(args, 'enable_reacquire', False):
                 raise RobotError('--enable-reacquire is offline only')
             robot_config, start = prepare_real(config, args.config)
-            config['force_direction_status'] = load_direction_verification(config, args.config)
-            if not config['force_direction_status']['verified']:
-                detail = 'force direction verification required: '+config['force_direction_status']['reason']
-                termination.observe(phase='FORCE_DIRECTION_PREFLIGHT', force_direction_status=config['force_direction_status'])
-                termination.set_stop_reason(TerminationReason.STOP_FORCE_DIRECTION_UNVERIFIED, detail,
-                                            source='continuous.force_direction_preflight')
-                raise RobotError(detail)
             geometry = config['continuous_search_geometry']
             print(f"Search geometric distance to sandbox boundary: {geometry['geometric_distance_m']*1000:.4f} mm\n"
                   f"Search stopping margin: {geometry['stopping_margin_m']*1000:.4f} mm\n"
@@ -142,15 +134,10 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 print('WARNING: --duration applies to simulation only; real continuous execution has no runtime stop budget.', flush=True)
         dt = 1 / float(config["policy"]["control_rate_hz"])
         if args.execute:
-            # Physical display uses the measured convention record, independently
-            # of n/t arrows. Never infer installation rotation from TCP pose.
-            verified = config['force_direction_status']
-            config['force_display']=dict(schema_version=1,frame='Base',force_source='processed_wrench',
-                force_convention='environment_on_probe',estimate_method='quasistatic_planar_balance',
-                physical_sign_confirmed=True,base_frame_confirmed=True,physical_available=True,
-                reported_force_convention=verified['reported_force_convention'],
-                physical_force_multiplier=verified['physical_force_multiplier'],
-                calibration_reference=verified['reference'])
+            # Installation/sign are not inferred from the configured transform.
+            # Show processed forces and n/t without claiming physical calibration.
+            config['force_display'] = dict(schema_version=1, frame='Base', force_source='processed_wrench',
+                physical_sign_confirmed=False, base_frame_confirmed=False, physical_available=False)
             policy = ContinuousTrackingPolicy(config)  # validate before any connection
             controller = controller_factory(robot_config)
             s = config["sensor"]
@@ -188,12 +175,21 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 startup_return_done = startup_scan(config, start, controller, reader, logger,
                                                           keyboard.poll, confirm=keyboard.read_line)
                 robot = check_start(controller, start, config)
+                keyboard.on_wait = lambda: hold_startup_confirmation(config, start, controller)
             baseline = config["preprocessing"].get("baseline", {"capture_on_start": True, "sample_count": 100})
             if not args.execute:
                 session.capture_bias(keyboard.poll, termination.observe)
             elif baseline.get("capture_on_start", True):
+                if not confirm_enter('P0 处探针须脱离目标、静止空载；即将采集扫描零偏。', read_line=keyboard.read_line):
+                    raise KeyboardInterrupt('bias not confirmed')
                 capture_stationary_bias(config, reader, preprocessor, controller,
                     baseline['sample_count'], poll=keyboard.poll, logger=logger)
+            if args.execute:
+                if not confirm_enter('即将从 P0 沿保存方向开始扫描。', read_line=keyboard.read_line):
+                    raise KeyboardInterrupt('scan not confirmed')
+                hold_startup_confirmation(config, start, controller)
+                if not startup_return_done:
+                    controller.activate_control(confirmed=True)
         if args.execute and not startup_return_done and controller.config.get('continuous_require_watchdog'):
             controller.enable_watchdog(float(policy.c['watchdog_frequency_hz']))
         with OperatorKeyboard() as keyboard:
@@ -314,7 +310,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 logger.log_sample(now, raw, processed, robot, command, policy.contact_direction,
                                   policy.tangent, extra={**policy.telemetry(command), **timing,
                                       **(speed_diagnostics if args.execute else {}),
-                                      **({'sim_components_available': 0, 'physical_force_available': 1} if args.execute else sample.simulation_telemetry)})
+                                      **({'sim_components_available': 0, 'physical_force_available': 0} if args.execute else sample.simulation_telemetry)})
                 while policy.events:
                     if args.execute and policy.events[0].event_type == 'FIRST_CONTACT':
                         print('FIRST CONTACT CONFIRMED\n'
@@ -523,7 +519,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "config.yaml")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--execute", action="store_true", help="real UR7e + PX6D; requires P0 and START")
+    mode.add_argument("--execute", action="store_true", help="real UR7e + PX6D; requires P0 and Enter confirmation")
     mode.add_argument("--preview", action="store_true", help="interactive offline SIMULATION / SYNTHETIC FORCE")
     mode.add_argument("--dry-run", action="store_true", help="offline simulation (default)")
     parser.add_argument("--scene", type=Path, default=ROOT / "simulation/scene_continuous.yaml")

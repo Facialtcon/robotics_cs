@@ -52,8 +52,18 @@ def test_software_bias_only_uses_raw_then_reports_direction():
     sensor.read_wrench = lambda: next(readings)
     output = []
     assert tool.run(reader_factory=lambda *a: sensor, bias_samples=2, samples=1, emit=output.append,
-                    confirm=lambda _: 'UNLOADED') == 0
+                    confirm=lambda _: '') == 0
     assert any('normalized=[0.600000, 0.800000]' in line for line in output)
+
+
+def test_optional_direction_tool_cancel_prevents_connection_and_bias():
+    sensor = Sensor()
+    def forbidden():
+        raise AssertionError('cancelled bias must not open sensor')
+    sensor.connect = forbidden
+    assert tool.run(reader_factory=lambda *a: sensor, bias_samples=2, samples=1,
+                    confirm=lambda _: 'q', emit=lambda _: None) == 0
+    assert sensor.count == 0
 
 
 def test_tool_zero_force_is_finite():
@@ -87,3 +97,4 @@ assert not any(n.startswith(('rtde_', 'robot.')) for n in sys.modules)
     result = subprocess.run([sys.executable, '-c', code], cwd=PROJECT_ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert '--bias-samples' in result.stdout
+    assert '--verify' not in result.stdout and '--status' not in result.stdout

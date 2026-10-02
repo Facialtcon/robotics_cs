@@ -5,6 +5,17 @@ import run_project
 from experiment_logging.paths import PROJECT_ROOT,create_run
 
 
+@pytest.mark.parametrize('step', ['11', '12', '18'])
+@pytest.mark.parametrize('accepted', [True, False])
+def test_motion_menu_needs_enter_before_opening_child(monkeypatch, step, accepted):
+    launches = []
+    monkeypatch.setattr(run_project, 'check_dependency', lambda _: None)
+    monkeypatch.setattr(run_project, 'confirm_enter', lambda prompt: accepted)
+    monkeypatch.setattr(run_project, 'run_child', lambda command: launches.append(command) or 0)
+    assert run_project.run_step(step) == (0 if accepted else 130)
+    assert len(launches) == int(accepted)
+
+
 def test_all_twenty_steps_keep_semantics():
     assert set(run_project.STEPS)=={str(n) for n in range(1,21)}
     assert '--execute' in run_project.STEPS['12'][1] and 'main.py' in run_project.STEPS['12'][1]
