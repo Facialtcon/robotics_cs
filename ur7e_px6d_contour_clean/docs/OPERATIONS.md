@@ -33,7 +33,7 @@
 
 1. 优先读取 `reset_pose.yaml`，没有时读取绑定 TCP 的扫描 P0；检查机器人地址和配置 TCP 一致。
 2. 创建一个 owner，只连接 Receive，确认机器人无急停/保护停，读取新鲜实际 TCP 速度，持续确认静止。
-3. 显示当前位置、目标来源、目标姿态、抬升/平移/下降三段目标和速度。
+3. 显示当前位置、目标来源、姿态误差和抬升/对正姿态/平移/下降四段目标及速度。
 4. 明确显示：
 
    ```text
@@ -50,7 +50,11 @@
 
 ## 扫描
 
-12 和 18 共用 START 前的 Receive 预检与路径展示。PX6D 已连接，若离开 P0，则在静止处采临时偏置，并用带力监控的同一三段返回执行器回 P0。运动确认只发生一次，Control 不重建。18 默认关闭自定义 watchdog，周期/时效/日志检查只记 warning；UR 自带停止状态、设备错误和全局速度/沙箱边界仍有效。
+12 和 18 共用 START 前的 Receive 预检与路径展示。PX6D 已连接，若偏离 P0 或扫描姿态，则在静止处采临时偏置，并用带力监控的同一四段返回执行器回 P0。START 前打印当前姿态、目标扫描姿态、角度误差和四段路径；需要旋转时明确提示仅在安全高度对正。运动确认只发生一次，Control 不重建。18 默认关闭自定义 watchdog，周期/时效/日志检查只记 warning；UR 自带停止状态、设备错误和全局速度/沙箱边界仍有效。
+
+四段为 `VERTICAL_RETREAT → ALIGN_PROBE_ORIENTATION → MOVE_ABOVE_START → DESCEND_TO_START`。抬升保持当前姿态；严格停稳后才在安全高度旋转到保存的 `fixed_orientation`，然后保持该姿态平移、下降至完整 P0。已经对正则明确打印 `ALIGN_PROBE_ORIENTATION: already aligned; skipped`。菜单 11 共用该执行器，不读取 PX6D；存在 RESET 时使用保存的 RESET 姿态，否则使用 P0。水平返回为 27 mm/s，垂直 18 mm/s，全局最大速度 30 mm/s。
+
+1 mm/s / 0.01 rad/s 只用于运动前的预检与 bias。返回每段、FIRST_CONTACT 和最终 STOP 均需实际线速度 ≤0.1 mm/s、角速度 ≤0.005 rad/s 连续 80 ms；宽松 preflight 通过不等于运动后已经停稳。FIRST_CONTACT 成功转 tracking 时仅打印一次 Fxy、normal n、tangent t、follow hand 与 force_direction_sign。
 
 18 的 Q/Esc/Ctrl+C 均原地停止，不自动返回。12 的 Q 正常停止按 `safe_return.auto_return_after_normal_stop` 返回，Esc/Ctrl+C 和异常不返回。停止是否成功看日志中的新鲜速度确认，不只看 SDK 返回值或进程退出码。
 
@@ -64,8 +68,21 @@
 
 离线预演窗口需要图形桌面/可交互 Matplotlib backend；无桌面使用菜单 16。测试覆盖预演模型和 Agg 静态绘制，未声称实测桌面拖拽事件或硬件。
 
+## 只读 PX6D 力方向检查
+
+在 clean 工程目录中运行（现有 1～20 菜单编号不变）：
+
+```bash
+../.venv312/bin/python tools/check_force_direction.py
+```
+
+工具不连接任何 UR 接口、不发送机器人运动，不保存配置或标定。先由操作者将探针置于保存的扫描姿态，保持空载、静止；默认按配置采集 100 个 raw 样本建立仅存在内存中的软件零偏，然后提示从 Base +X、+Y 方向轻推并观察 Fx/Fy 正负。默认每秒显示 5 次 processed Fx/Fy、Fxy、normalized 和 configured n；normalized 未乘 sign，configured n 已乘当前 force_direction_sign。零力时方向显示 `[0, 0]`。Q/Esc/Ctrl+C 退出。
+
+当前 rotation_sensor_to_base 和 force_direction_sign 会先打印出来；数据只是按这套配置换算，并不代表 Base/sign 已经实测正确。需要人工据已知 Base 方向判断，两者都不会自动改写。`--samples 100` 可有限采样；`--bias-samples 0` 跳过新零偏采集，适用于明确要检查未置零结果的场景；`--display-hz 10` 只改变终端刷新率。力方向、坐标变换与 sign 的正确性仍需现场验证。
+
 ## 已执行的迁移验证
 
+- 四段返回 / 停稳判据分离 / 力方向入口：完整离线 pytest **199 项通过**（29.06 秒）。新增 20 项覆盖安全高度旋转、已对正跳过、抬升/ALIGN 失败后不继续、0.8 mm/s 与角速度过高时严格停稳等待、startup 0.3 mm/s 通过、水平返回 27 mm/s、手动共用路径、PX6D 的 3/4/5 单位方向和 sign/坐标变换显示。已有首次接触重试测试同时验证 FIRST CONTACT CONFIRMED 只打印一次。未连接真实 UR/PX6D；现场旋转净空、停稳噪声和 Base/sign 尚未验收。
 - startup / tracking 限制清理：完整离线 pytest **169 项通过**（26.77 秒）。新增 29 项覆盖启动与返回交接的 0.3 mm/s 噪声、0.5 mm P0 偏差、明显运动拒绝、返回 processed 9 N warning 与 raw 极限、接触丢失后恢复、超过 120 s 的 fake runtime、overload 向外修正、轻微/明显位姿漂移及方向重试。真实驱动构造受测试 fixture 禁止；未连接 UR/PX6D。扫描停车状态转换和 FIRST_CONTACT gate、导纳/切向/法向公式、保存的标定和 reset 文件与本轮基线一致。
 - 本轮软件限制简化：完整离线 pytest **140 项通过**。覆盖 35/60 ms 周期抖动、低接触力高 force-rate、processed 超阈值、默认 watchdog 零调用、raw=15 N bias、raw 60/65 N 与 torque 5 Nm、polygon 边界、全局超速、UR 停止状态、PX6D/RTDE 异常、日志积压及 FIRST_CONTACT；同时对照导纳输出与原算法一致。原配置数值、标定文件及停车状态机已检查保持不变。
 - 本轮搜索范围 / STOPPING 修复：完整离线 pytest **113 项通过**。新增覆盖斜四边形射线、130 mm P1、预测步及执行前新鲜位姿复查、超过 100 ms 的逐周期刹停、watchdog、FIRST_CONTACT、API False、有限停车超时、停止期间力/数据故障和返回段停稳。测试构造真实设备接口会直接失败；未执行真机验收。

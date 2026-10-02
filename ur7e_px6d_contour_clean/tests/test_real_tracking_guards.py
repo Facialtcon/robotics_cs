@@ -460,7 +460,7 @@ def test_fake_runtime_contact_loss_recovers_without_terminal_stop(config, monkey
 
 
 @pytest.mark.parametrize('stop_value', [True, False])
-def test_fake_runtime_first_contact_loss_brakes_retries_and_tracks(config, monkeypatch, tmp_path, clock, stop_value):
+def test_fake_runtime_first_contact_loss_brakes_retries_and_tracks(config, monkeypatch, tmp_path, clock, stop_value, capsys):
     import test_stopping_cycles as stopping
     monkeypatch.setattr(stopping, 'time', clock)
     target = prepare(config, monkeypatch)
@@ -498,6 +498,10 @@ def test_fake_runtime_first_contact_loss_brakes_retries_and_tracks(config, monke
     assert runtime.run(args(tmp_path), controller_factory=factory, reader_factory=TransientContactSensor) == 0
     assert stage == 'done'
     assert transitions.count(('TARGET_SEARCH', 'FIRST_CONTACT')) == 2
+    output = capsys.readouterr().out
+    assert output.count('FIRST CONTACT CONFIRMED') == 1
+    for label in ('Fxy = ', 'contact normal n = ', 'tangent t = ', 'follow hand = ', 'force_direction_sign = '):
+        assert label in output
     assert transitions.count(('FIRST_CONTACT', 'TARGET_SEARCH')) == 1
     assert ('FIRST_CONTACT', 'CONTINUOUS_TRACKING') in transitions
     assert len(braking['mode_exits']) >= 2
@@ -519,7 +523,8 @@ def test_startup_noise_survives_return_and_first_search_command(config, monkeypa
     speed = devices.receive.getActualTCPSpeed
     def noisy_speed():
         value = speed()
-        if not devices.owner._scan_motion_started:
+        if (not devices.owner._scan_motion_started and not devices.owner._return_mode
+                and not devices.owner._stop_pending):
             value[0] += .0003
             value[3] += .007
         return value

@@ -1,7 +1,7 @@
 # Mock + dry-run remains the default. Execute mode has no boolean confirmation gate.
 robot:
   robot_ip: 192.168.1.10
-  max_tcp_speed: 0.030          # m/s; covers the 0.030 m/s safe-return horizontal speed
+  max_tcp_speed: 0.030          # m/s; unchanged global limit, return uses 0.027 m/s
   speed_acceleration: 0.050     # m/s^2; MUST CONFIRM on site
   stop_deceleration: 0.200      # m/s^2; MUST CONFIRM on site
   fixed_z: null                 # null = latch actual start Z; verify before execute
@@ -134,8 +134,8 @@ safe_return:
   # +Z clearance used to choose a transit height safe for both stop and target Z.
   return_lift_distance: 0.030
   startup_bias_sample_count: 100
-  # Horizontal and vertical return speeds doubled; acceleration is unchanged.
-  return_speed: 0.030
+  # Horizontal return keeps 3 mm/s below the global TCP speed limit.
+  return_speed: 0.027
   return_vertical_speed: 0.018
   return_acceleration: 0.030
   return_force_limit: 8.0

@@ -242,6 +242,7 @@ class URRTDEController:
         self._stop_method = "speedStop"
         self._return_mode = False
         self._startup_preflight = False
+        self._standstill_wait_active = False
         self._scan_motion_started = False
         self.motion_fault = ''
         self._stop_pending = False
@@ -796,10 +797,14 @@ class URRTDEController:
         self._settled_stamp = stamp
         translation_limit = float(self.config.get('continuous_settle_speed_mps', 1e-4))
         angular_limit = .005
-        startup = self.config.get('continuous_real_execution') and (
-            self._return_mode or (self._startup_preflight and not self._stop_pending) or
-            (not self._scan_motion_started and self.continuous_phase in ('READY', 'TARGET_SEARCH')
-             and self.stop_state != 'STOPPING'))
+        # Return observations and ALL pending/confirmed motion stops use the
+        # strict limits, including after STOPPED. A default wait is strict even
+        # before the first scan command; startup=True is an explicit preflight.
+        startup = (self.config.get('continuous_real_execution') and
+                   not self._return_mode and not self._stop_pending and not self._scan_motion_started and
+                   (self._startup_preflight or
+                    (not self._standstill_wait_active and
+                     self.continuous_phase in ('READY', 'TARGET_SEARCH'))))
         if startup:
             if np.linalg.norm(speed[:3]) > translation_limit or np.linalg.norm(speed[3:]) > angular_limit:
                 self.diagnostics['startup_stationary'] = 'WARNING: small TCP velocity during startup preflight'
@@ -814,6 +819,7 @@ class URRTDEController:
 
     def wait_for_standstill(self, *, observe=None, timeout=None, startup=False):
         """Fresh device timestamps + held actual TCP speed are the sole authority."""
+        self._standstill_wait_active = True
         self._startup_preflight = bool(startup and self.config.get('continuous_real_execution') and not self._stop_pending)
         self.standstill_confirmed = False
         self._settled_since = self._settled_stamp = None
@@ -832,6 +838,7 @@ class URRTDEController:
             raise
         finally:
             self._startup_preflight = False
+            self._standstill_wait_active = False
 
     def stop(self):
         return self.request_stop()

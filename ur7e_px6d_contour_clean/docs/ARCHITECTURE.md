@@ -13,7 +13,7 @@
 | `robot/rtde_controller.py` | 唯一 Control owner；Receive、运动边界、stop 与停稳 |
 | `sensor/` | PX6D 协议、预处理和力特征 |
 | `policy/` | 保留的连续/离散数值算法及其必要依赖 |
-| `safety/safe_return.py` | 唯一三段返回轨迹/执行器；可选 `PX6DForceMonitor` |
+| `safety/safe_return.py` | 唯一四段返回轨迹/执行器，安全高度对正姿态；可选 `PX6DForceMonitor` |
 | `experiment_logging/paths.py` | 唯一 run 路径分配与 metadata 来源 |
 | `experiment_logging/` | 按需 CSV、连续异步 writer、终止诊断 |
 | `workspace/` | 原标定几何及离线投影 |
@@ -37,7 +37,7 @@ ur-rtde 1.6.5 的 `speedStop(a)` 没有异步参数，其控制脚本同步执�
 
 接口依据：[SDU Robotics 接口说明](https://sdurobotics.gitlab.io/ur_rtde/introduction/introduction.html)、[控制脚本](https://gitlab.com/sdurobotics/ur_rtde/-/blob/master/scripts/rtde_control.script)。停稳后的 SDK 模式退出仍有通信往返开销，继续记录周期时长；真实 continuous 的 30 ms 现在是诊断阈值，单次超过不触发 STOP。
 
-停车确认要求设备 timestamp 向前更新、实际速度持续低于阈值。扫描中的 `poll_stop()` 和 FIRST_CONTACT 仍使用线速度 0.1 mm/s、角速度 0.005 rad/s、hold 80 ms 及有限停车超时；扫描循环不调用阻塞等待。真实 continuous 的启动预检、启动返回及首次搜索命令前的交接使用 1 mm/s、0.01 rad/s。发送第一条扫描运动后不再使用启动容差；FIRST_CONTACT 即使发生在第一条运动前也使用原严格判据。返回仍逐周期确认实际停稳，保留 hold 和有限停车超时。重复读取同一缓存包不能累计静止时间。
+停车确认要求设备 timestamp 向前更新、实际速度持续低于阈值。所有 motion braking/settling（包括 return 每段、FIRST_CONTACT 和最终 STOP）使用线速度 0.1 mm/s、角速度 0.005 rad/s、hold 80 ms 及有限停车超时。只有真实 continuous 运动前的启动预检/bias/确认使用 1 mm/s、0.01 rad/s。`wait_for_standstill(startup=False)` 始终严格；`startup=True` 只适用于运动前的预检，不能放宽已开始的扫描或任何 stop request。`_return_mode` 不再授权宽松停稳；返回段间继续非阻塞地 request_stop/poll_stop，扫描循环不增加阻塞等待。重复读取同一缓存包不能累计静止时间。
 
 `speedStop == False` 或 SDK 异常只产生 API anomaly。若新鲜速度证明已停稳，记录 `physical_stop=confirmed`；若持续运动超时则报 `STOP_MOTION_ERROR`，若观测失效则记录观测错误。API 返回值不替代物理结论。下一次运动不会改写前一次 stop 报告。
 
@@ -68,6 +68,12 @@ processed force 12 N / torque 1 Nm、force-rate、方向跳变/反转/相干度/
 ## return
 
 唯一 `SafeReturnExecutor` 负责轨迹、异步 moveL、每段停稳和最终误差检查。
+
+四段依次为 `VERTICAL_RETREAT → ALIGN_PROBE_ORIENTATION → MOVE_ABOVE_START → DESCEND_TO_START`。第一段沿 Base +Z 抬升，保持实际起始姿态。到达原 safe_z 并严格停稳后，在实测 TCP 位置只对正姿态；随后保持目标姿态平移和下降。姿态误差已在 `return_orientation_tolerance` 内则打印 skipped 并不发 ALIGN moveL。抬升未完成、低于安全高度或停稳失败不得旋转；ALIGN 失败不得平移或下降。返回水平速度为 27 mm/s，垂直仍为 18 mm/s，全局 TCP 上限仍为 30 mm/s。
+
+扫描所称“探针垂直向下”直接定义为已保存的 `scan_calibration.yaml.fixed_orientation`，不重新推算 rotation vector；加载器保证它等于完整 P0 pose 的姿态。手动返回复用同一路径与执行器，RESET 使用保存的 reset 姿态，P0 回退使用扫描姿态；均保留完整目标 pose。两者仅在有无 PX6D monitor 等已有任务配置上区分，不复制路径实现。
+
+真实 FIRST_CONTACT 成功转为 tracking 时，runtime 消费该转换事件并打印一次 Fxy、控制 normal n、tangent t、follow hand 和 force_direction_sign；算法公式及正常周期输出不变。`tools/check_force_direction.py` 独立使用 PX6D 与现有预处理，只展示配置换算后的 Fx/Fy/Fxy、未乘 sign 的单位力方向和乘 sign 的候选 n，不导入/连接机器人驱动、不修改配置。
 
 真实 continuous startup return 的 processed 8 N / 0.7 Nm 只 warning，raw >= 60 N / 5 Nm 和非有限值仍终止；PX6D samples、warning 和 return_status 均保留。返回段软件时间预算只 warning，保持观测并接受人工停止；返回末尾仍必须满足 1 mm 启动位置容差。手动返回和 discrete 保留原行为。
 

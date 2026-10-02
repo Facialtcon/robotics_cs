@@ -4,7 +4,7 @@ import numpy as np
 
 from robot.rtde_controller import RobotError, _orientation_distance
 from safety.force_guard import raw_safety_reason
-from safety.safe_return import SafeReturnExecutor, PX6DForceMonitor, return_trajectory
+from safety.safe_return import SafeReturnExecutor, PX6DForceMonitor, return_trajectory, print_return_plan
 from sensor.force_preprocess import WrenchPreprocessor
 
 
@@ -67,9 +67,9 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
             _orientation_distance(current.pose[3:], start[3:]) > config['safe_return']['return_orientation_tolerance'])
     print(f'当前 TCP: {current.pose.tolist()}\n扫描 P0: {start.tolist()}')
     print(f'初始方向 P0 -> P1: {config["policy"]["search_direction_xy"]}')
-    if away:
-        for phase, point, speed in segments:
-            print(f'{phase}: {point.tolist()}, speed={speed} m/s')
+    print_return_plan(config, current.pose, start, segments, scan=True)
+    if not away:
+        print('Startup return: already at P0 and aligned; no return motion required.')
     print('PX6D 力监控参与扫描与返回；请确认空载零偏、力方向、完整路径和现场急停。')
     if (confirm or input)('输入 START 执行必要的启动返回并开始扫描：').strip() != 'START':
         raise KeyboardInterrupt('START not confirmed')

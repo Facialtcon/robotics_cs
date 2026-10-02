@@ -295,6 +295,13 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                                       **(speed_diagnostics if args.execute else {}),
                                       **({'sim_components_available': 0, 'physical_force_available': 0} if args.execute else sample.simulation_telemetry)})
                 while policy.events:
+                    if args.execute and policy.events[0].event_type == 'FIRST_CONTACT':
+                        print('FIRST CONTACT CONFIRMED\n'
+                              f'Fxy = {policy.fxy:.6f} N\n'
+                              f'contact normal n = {policy.contact_direction.tolist()}\n'
+                              f'tangent t = {policy.tangent.tolist()}\n'
+                              f'follow hand = {policy.follow_hand}\n'
+                              f'force_direction_sign = {policy.c["force_direction_sign"]}', flush=True)
                     logger.log_waypoint(policy.events[0])
                     # If a later enqueue fails, finalization writes only the
                     # unaccepted suffix, without duplicating persisted events.

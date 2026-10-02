@@ -81,7 +81,12 @@ def return_trajectory(config, current, target):
     z = calculate_safe_return_z(current[2], target[2], s['return_lift_distance'], s['return_position_tolerance'])
     lifted, above = current.copy(), target.copy()
     lifted[2] = above[2] = z
+    aligned = lifted.copy()
+    # Scan P0 orientation equals scan_calibration.fixed_orientation (checked
+    # when loading calibration). Manual RESET retains its saved target pose.
+    aligned[3:] = target[3:]
     segments = [('VERTICAL_RETREAT', lifted, s['return_vertical_speed']),
+                ('ALIGN_PROBE_ORIENTATION', aligned, s['return_vertical_speed']),
                 ('MOVE_ABOVE_START', above, s['return_speed']),
                 ('DESCEND_TO_START', target.copy(), s['return_vertical_speed'])]
     from robot.rtde_controller import check_continuous_xy
@@ -96,6 +101,23 @@ def return_trajectory(config, current, target):
                     raise RobotError(f'return trajectory outside workspace: {axis}')
         check_continuous_xy(robot_config, pose[:2])
     return segments
+
+
+def print_return_plan(config, current, target, segments, *, scan=False):
+    current, target = np.asarray(current), np.asarray(target)
+    error = _orientation_distance(current[3:], target[3:])
+    print(f'Current orientation: {current[3:].tolist()}')
+    label = 'Target scan orientation' if scan else 'Target return orientation'
+    print(f'{label}: {target[3:].tolist()}\nOrientation error: {np.rad2deg(error):.3f} deg')
+    print('\nStartup path:' if scan else '\nReturn path:')
+    for index, (phase, point, speed) in enumerate(segments, 1):
+        print(f'{index}. {phase}: {point.tolist()}, speed={speed} m/s')
+    if error <= float(config['safe_return']['return_orientation_tolerance']):
+        print('ALIGN_PROBE_ORIENTATION: already aligned; skipped')
+    elif scan:
+        print('Probe will be aligned to the calibrated scan orientation at safe height.')
+    else:
+        print('Probe will be aligned to the saved return orientation at safe height.')
 
 
 class PX6DForceMonitor:
@@ -227,6 +249,19 @@ class SafeReturnExecutor:
             for self.phase, self.target, speed in segments:
                 self.command_speed = 0.
                 state = self.observe()
+                if self.phase == 'ALIGN_PROBE_ORIENTATION':
+                    # A failed retreat/stop exits above; alignment also rechecks
+                    # achieved height and strict standstill before any rotation.
+                    state = self._settle()
+                    if _orientation_distance(state.pose[3:], self.target[3:]) <= float(self.settings['return_orientation_tolerance']):
+                        print('ALIGN_PROBE_ORIENTATION: already aligned; skipped')
+                        continue
+                    safe_z = segments[0][1][2]
+                    if state.pose[2] < safe_z-float(self.settings['return_position_tolerance']):
+                        raise ReturnAborted('ALIGN_PROBE_ORIENTATION requires the safe retreat height')
+                    # Rotate about the actual settled TCP without adding XYZ
+                    # corrections for small retreat endpoint errors.
+                    self.target = np.r_[state.pose[:3], self.target[3:]]
                 if self._at_target(state):
                     continue
                 self.command_speed = float(speed)

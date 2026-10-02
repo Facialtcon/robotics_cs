@@ -13,7 +13,7 @@ from config.loader import load_config, runtime_robot_config
 from experiment_logging.paths import PROJECT_ROOT, create_run, read_metadata
 from robot.rtde_controller import RobotError, URRTDEController, _orientation_distance
 from robot.tcp_identity import tcp_offsets_match
-from safety.safe_return import SafeReturnExecutor, return_trajectory
+from safety.safe_return import SafeReturnExecutor, return_trajectory, print_return_plan
 from app.operator_input import OperatorKeyboard
 
 
@@ -70,9 +70,8 @@ def run(config_path=PROJECT_ROOT/'config.yaml', *, controller_factory=URRTDECont
         print('UR-only return:\n没有 PX6D 外部力监控。\n依赖现场确认及 UR 自身安全系统。')
         print(f'当前 TCP: {current.pose.tolist()}\n目标 {target["label"]}: {target["pose"]}\n来源: {target["source"]}')
         segments = return_trajectory(config, current.pose, target['pose'])
-        for name, point, speed in segments:
-            print(f'{name}: {point.tolist()}, speed={speed} m/s')
-        if (confirm or input)('确认完整三段路径后输入 RETURN：').strip() != 'RETURN':
+        print_return_plan(config, current.pose, target['pose'], segments)
+        if (confirm or input)('确认完整四段路径后输入 RETURN：').strip() != 'RETURN':
             result, status, reason = 0, 'cancelled', 'RETURN not confirmed'
         else:
             fresh = controller.wait_for_standstill()

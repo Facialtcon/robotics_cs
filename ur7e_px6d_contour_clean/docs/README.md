@@ -27,4 +27,4 @@ MPLBACKEND=Agg python run_simulation.py --no-gui
 
 数据从空目录开始。新实验由 `experiment_logging/paths.py` 分配到 `data/{real|simulation}/{continuous|discrete|return}/run_*`；每个 run 先写 `metadata.json`。默认相对路径不受启动时的工作目录影响。数据、Python 缓存和 pytest 缓存由本目录 `.gitignore` 排除；现场配置和标定正常受版本管理。
 
-迁移验收只使用设备替身、仿真、离线回放和 pytest。真实 Control/PX6D、实际停止距离、watchdog 实际响应、30012 只读状态读取和现场三段返回均尚未真机验证。
+迁移验收只使用设备替身、仿真、离线回放和 pytest。真实 Control/PX6D、实际停止距离、watchdog 实际响应、30012 只读状态读取、现场四段返回/安全高度姿态对正及力方向/Base/sign 均尚未真机验证。
