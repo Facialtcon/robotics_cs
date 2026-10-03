@@ -1,0 +1,85 @@
+{
+  "mode": "execute",
+  "config_path": "/home/user-linux/robotics_cs/ur7e_px6d_contour_clean/config.yaml",
+  "config_sha256": "c4b4e210440c9b38fd61e1519cfc68e4d7fb7ab5900cd80652397611b607adb6",
+  "motion_limits": {
+    "max_translation_m": 0.002,
+    "max_tilt_rad": 0.4537856055185257,
+    "max_linear_speed": 0.005,
+    "max_angular_speed": 0.04,
+    "max_joint_speed": 0.15,
+    "command_speed": 0.005,
+    "acceleration": 0.03,
+    "stop_deceleration": 0.2,
+    "observation_timeout_sec": 0.08,
+    "sample_period_sec": 0.01,
+    "joint_step_rad": 0.12,
+    "joint_excursion_rad": 0.8,
+    "segment_timeout_sec": 120.0,
+    "total_timeout_sec": 2700.0,
+    "settle_hold_sec": 0.7,
+    "settle_linear_speed": 0.0001,
+    "settle_angular_speed": 0.001,
+    "position_tolerance_m": 0.0005,
+    "orientation_tolerance_rad": 0.003,
+    "samples_per_pose": 80
+  },
+  "gravity_base_unit": [
+    0,
+    0,
+    -1
+  ],
+  "transform_convention": "R_base_sensor = R_base_tool @ rotation_sensor_to_tool",
+  "status": "rejected_or_stopped",
+  "reason": "PX6DError: cannot initialize PX6D at /dev/serial/by-id/usb-GigaDevice_GD32-CDC_ACM_1B556A774A92-if00: [Errno 2] could not open port /dev/serial/by-id/usb-GigaDevice_GD32-CDC_ACM_1B556A774A92-if00: [Errno 2] No such file or directory: '/dev/serial/by-id/usb-GigaDevice_GD32-CDC_ACM_1B556A774A92-if00'",
+  "diagnostics": {},
+  "configuration_saved": false,
+  "cleanup_errors": [],
+  "logging": {
+    "mode": "async",
+    "state": "finished",
+    "worker_alive": false,
+    "error": null,
+    "queue_capacity": 512,
+    "queue_depth": 0,
+    "queue_highwater": 0,
+    "oldest_pending_age_sec": 0.0,
+    "max_backlog_sec": 2.0,
+    "flush_interval_sec": 0.25,
+    "batch_size": 64,
+    "accepted": {
+      "raw": 0,
+      "timing": 0,
+      "metadata": 0
+    },
+    "written": {
+      "raw": 0,
+      "timing": 0,
+      "metadata": 0
+    },
+    "durable": true,
+    "worker_io": {
+      "write": {
+        "count": 0,
+        "last_sec": 0.0,
+        "max_sec": 0.0
+      },
+      "fsync": {
+        "count": 0,
+        "last_sec": 0.0,
+        "max_sec": 0.0
+      }
+    }
+  },
+  "hardware": {
+    "watchdog_hz": 10.0,
+    "effective_moveL_speed_mps": 0.005,
+    "actual_angular_speed_limit_rad_s": 0.04,
+    "effective_acceleration": 0.03,
+    "absolute_raw_force_threshold_N": 60.0,
+    "absolute_raw_torque_threshold_Nm": 5.0,
+    "robot_status_reference": "https://docs.universal-robots.com/tutorials/communication-protocol-tutorials/rtde-guide.html",
+    "collision_check": "UR safety + sampled IK; external obstacles and cable clearance require operator inspection"
+  },
+  "last_observation_timing": {}
+}

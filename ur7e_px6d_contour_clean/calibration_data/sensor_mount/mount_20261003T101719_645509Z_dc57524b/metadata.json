@@ -1,0 +1,669 @@
+{
+  "mode": "execute",
+  "config_path": "/home/user-linux/robotics_cs/ur7e_px6d_contour_clean/config.yaml",
+  "config_sha256": "c4b4e210440c9b38fd61e1519cfc68e4d7fb7ab5900cd80652397611b607adb6",
+  "motion_limits": {
+    "max_translation_m": 0.002,
+    "max_tilt_rad": 0.4537856055185257,
+    "max_linear_speed": 0.005,
+    "max_angular_speed": 0.04,
+    "max_joint_speed": 0.15,
+    "command_speed": 0.005,
+    "acceleration": 0.03,
+    "stop_deceleration": 0.2,
+    "observation_timeout_sec": 0.08,
+    "sample_period_sec": 0.01,
+    "joint_step_rad": 0.12,
+    "joint_excursion_rad": 0.8,
+    "segment_timeout_sec": 120.0,
+    "total_timeout_sec": 2700.0,
+    "settle_hold_sec": 0.7,
+    "settle_linear_speed": 0.0001,
+    "settle_angular_speed": 0.001,
+    "position_tolerance_m": 0.0005,
+    "orientation_tolerance_rad": 0.003,
+    "samples_per_pose": 80
+  },
+  "gravity_base_unit": [
+    0,
+    0,
+    -1
+  ],
+  "transform_convention": "R_base_sensor = R_base_tool @ rotation_sensor_to_tool",
+  "status": "rejected_or_stopped",
+  "start_pose": [
+    0.649463406576206,
+    0.1791951591807935,
+    0.32893740710844055,
+    -1.4766225618035682,
+    2.2842479691105577,
+    -0.3118629702809369
+  ],
+  "plan": [
+    {
+      "pose_id": 0,
+      "split": "fit",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": 1,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.37039251679778,
+        2.2396748738470995,
+        -0.06938258164153153
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 2,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 45.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4679062027011398,
+        2.3647907768648366,
+        -0.03257184745554346
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 3,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 90.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.5750820058417316,
+        2.4451107840832953,
+        -0.16348087991581944
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 4,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 135.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.6216446932524102,
+        2.422520534874432,
+        -0.39123327410546693
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 5,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 180.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.5750633813845383,
+        2.309445228390451,
+        -0.5661597514828264
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 6,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 225.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4709457512715094,
+        2.1835732629858886,
+        -0.5818188352071433
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 7,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 270.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.3743321363103953,
+        2.118210018184822,
+        -0.44457605559509256
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 8,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 315.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.334409577594675,
+        2.1415802412923193,
+        -0.23803596874406008
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 9,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.2478429896435057,
+        2.1714673650114307,
+        0.1795042870401613
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 10,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 45.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4417143688739003,
+        2.4278131142947776,
+        0.27848090914133977
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 11,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 90.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.6764519133420113,
+        2.6121197984629814,
+        0.01680655754918114
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 12,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 135.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        1.7593333306106531,
+        -2.5334074405381704,
+        0.4781390903736844
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 13,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 180.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.6713852208964775,
+        2.3126929944601264,
+        -0.854316165361839
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 14,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 225.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4490990914962971,
+        2.05330269561856,
+        -0.861880208835448
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 15,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 270.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.2599568471132,
+        1.9336046521653147,
+        -0.5722213607848193
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 16,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 315.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.1832109186248017,
+        1.982743747071772,
+        -0.16359585098864846
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649463406576206,
+        0.1791951591807935,
+        0.32893740710844055,
+        -1.4766225618035682,
+        2.2842479691105577,
+        -0.3118629702809369
+      ],
+      "acquire": false
+    }
+  ],
+  "hardware": {
+    "watchdog_hz": 10.0,
+    "effective_moveL_speed_mps": 0.005,
+    "actual_angular_speed_limit_rad_s": 0.04,
+    "effective_acceleration": 0.03,
+    "absolute_raw_force_threshold_N": 60.0,
+    "absolute_raw_torque_threshold_Nm": 5.0,
+    "robot_status_reference": "https://docs.universal-robots.com/tutorials/communication-protocol-tutorials/rtde-guide.html",
+    "collision_check": "UR safety + sampled IK; external obstacles and cable clearance require operator inspection",
+    "last_read_diagnostics": {
+      "hardware_read_started_monotonic": 1328209.14884403,
+      "sensor_read_duration_sec": 0.05018048803322017,
+      "rtde_read_duration_sec": 0.0,
+      "watchdog_duration_sec": 0.0,
+      "hardware_read_stage": "sensor_read",
+      "raw_read_started_monotonic": 1328209.148849186,
+      "hardware_read_ended_monotonic": 1328209.199029674,
+      "hardware_read_duration_sec": 0.05018564406782389,
+      "read_completed": false,
+      "raw_read_ended_monotonic": 1328209.199029674
+    },
+    "start_pose": [
+      0.6494578472304994,
+      0.17919598365020095,
+      0.3289438939210625,
+      -1.4766404969939302,
+      2.284226106224337,
+      -0.31187003943997843
+    ],
+    "start_joints": [
+      -3.0753091017352503,
+      -1.5246215996197243,
+      1.4963963667498987,
+      4.279309912318848,
+      -1.5703662077533167,
+      0.4887978434562683
+    ],
+    "sensor_firmware": "v1.0.1",
+    "active_tcp_offset": [
+      -0.0032432415690885757,
+      -6.266874371089332e-05,
+      0.25230436187631455,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "preflight_progress": {
+      "completed_points": 515,
+      "estimated_points": 611,
+      "completed_segments": 28,
+      "total_segments": 32,
+      "current_segment": 29
+    }
+  },
+  "base_level_confirmed": true,
+  "reason": "PX6DTimeout: PX6D response timeout: budget 0.050 s, actual request 0.050156 s, phase=read",
+  "diagnostics": {
+    "hardware_read_timing": {
+      "hardware_read_started_monotonic": 1328209.14884403,
+      "sensor_read_duration_sec": 0.05018048803322017,
+      "rtde_read_duration_sec": 0.0,
+      "watchdog_duration_sec": 0.0,
+      "hardware_read_stage": "sensor_read",
+      "raw_read_started_monotonic": 1328209.148849186,
+      "hardware_read_ended_monotonic": 1328209.199029674,
+      "hardware_read_duration_sec": 0.05018564406782389,
+      "read_completed": false,
+      "raw_read_ended_monotonic": 1328209.199029674
+    },
+    "observation_timing": {
+      "kind": "observation_failure",
+      "phase": "preflight",
+      "pose_id": -1,
+      "observe_started_monotonic": 1328209.14884082,
+      "stage": "hardware_read",
+      "observation_limit_sec": 0.08,
+      "error": "PX6DTimeout: PX6D response timeout: budget 0.050 s, actual request 0.050156 s, phase=read",
+      "observe_duration_sec": 0.053373842034488916
+    },
+    "calibration_stage": "preflight",
+    "motion_context": null
+  },
+  "configuration_saved": false,
+  "cleanup_errors": [],
+  "logging": {
+    "mode": "async",
+    "state": "finished",
+    "worker_alive": false,
+    "error": null,
+    "queue_capacity": 512,
+    "queue_depth": 0,
+    "queue_highwater": 44,
+    "oldest_pending_age_sec": 0.0,
+    "max_backlog_sec": 2.0,
+    "flush_interval_sec": 0.25,
+    "batch_size": 64,
+    "accepted": {
+      "raw": 4449,
+      "timing": 4450,
+      "metadata": 2
+    },
+    "written": {
+      "raw": 4449,
+      "timing": 4450,
+      "metadata": 2
+    },
+    "durable": true,
+    "worker_io": {
+      "write": {
+        "count": 8901,
+        "last_sec": 6.461050361394882e-07,
+        "max_sec": 0.00022376608103513718
+      },
+      "fsync": {
+        "count": 321,
+        "last_sec": 0.0019917888566851616,
+        "max_sec": 0.22537615103647113
+      }
+    }
+  },
+  "last_observation_timing": {
+    "kind": "observation_failure",
+    "phase": "preflight",
+    "pose_id": -1,
+    "observe_started_monotonic": 1328209.14884082,
+    "stage": "hardware_read",
+    "observation_limit_sec": 0.08,
+    "error": "PX6DTimeout: PX6D response timeout: budget 0.050 s, actual request 0.050156 s, phase=read",
+    "observe_duration_sec": 0.053373842034488916
+  }
+}

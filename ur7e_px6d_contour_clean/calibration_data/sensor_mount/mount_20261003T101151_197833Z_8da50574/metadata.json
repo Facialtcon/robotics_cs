@@ -1,0 +1,662 @@
+{
+  "mode": "execute",
+  "config_path": "/home/user-linux/robotics_cs/ur7e_px6d_contour_clean/config.yaml",
+  "config_sha256": "c4b4e210440c9b38fd61e1519cfc68e4d7fb7ab5900cd80652397611b607adb6",
+  "motion_limits": {
+    "max_translation_m": 0.002,
+    "max_tilt_rad": 0.4537856055185257,
+    "max_linear_speed": 0.005,
+    "max_angular_speed": 0.04,
+    "max_joint_speed": 0.15,
+    "command_speed": 0.005,
+    "acceleration": 0.03,
+    "stop_deceleration": 0.2,
+    "observation_timeout_sec": 0.08,
+    "sample_period_sec": 0.01,
+    "joint_step_rad": 0.12,
+    "joint_excursion_rad": 0.8,
+    "segment_timeout_sec": 120.0,
+    "total_timeout_sec": 2700.0,
+    "settle_hold_sec": 0.7,
+    "settle_linear_speed": 0.0001,
+    "settle_angular_speed": 0.001,
+    "position_tolerance_m": 0.0005,
+    "orientation_tolerance_rad": 0.003,
+    "samples_per_pose": 80
+  },
+  "gravity_base_unit": [
+    0,
+    0,
+    -1
+  ],
+  "transform_convention": "R_base_sensor = R_base_tool @ rotation_sensor_to_tool",
+  "status": "rejected_or_stopped",
+  "start_pose": [
+    0.649469973151161,
+    0.17917640398471546,
+    0.32893534151520093,
+    -1.4765319472248166,
+    2.284281905371867,
+    -0.3118404465023658
+  ],
+  "plan": [
+    {
+      "pose_id": 0,
+      "split": "fit",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": 1,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.3703045927958553,
+        2.2397095323871636,
+        -0.0693574903361778
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 2,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 45.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4678138200577429,
+        2.364829616040058,
+        -0.032553471971196526
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 3,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 90.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.5749859628448504,
+        2.4451508241778783,
+        -0.16346741666391304
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 4,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 135.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.6215481865681471,
+        2.4225577782120324,
+        -0.39121892461331864
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 5,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 180.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.5749703943037394,
+        2.309477944103234,
+        -0.5661391977224779
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 6,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 225.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4708578381124842,
+        2.1836025593700783,
+        -0.5817915522102567
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 7,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 270.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.3742474553311395,
+        2.118238443158049,
+        -0.44454533002857305
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 8,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 315.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.334324739431813,
+        2.1416106953404705,
+        -0.23800614644093418
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 9,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.2477582645514724,
+        2.171502185085909,
+        0.1795326825072828
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 10,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 45.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4416210896216155,
+        2.427857429422306,
+        0.27849566277822685
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 11,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 90.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.6763507003719917,
+        2.612167257265843,
+        0.016809223286853688
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 12,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 135.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        1.7592605127807543,
+        -2.533489152994247,
+        0.4781426194135707
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 13,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 180.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.671290123161185,
+        2.3127239125196186,
+        -0.8542969113505138
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 14,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 225.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4490151761636403,
+        2.053327362857484,
+        -0.8618472721960406
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 15,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 270.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.2598790511474602,
+        1.9336276619925956,
+        -0.5721826927725274
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 16,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 315.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.183132241382499,
+        1.9827702630219513,
+        -0.16355901413033075
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.649469973151161,
+        0.17917640398471546,
+        0.32893534151520093,
+        -1.4765319472248166,
+        2.284281905371867,
+        -0.3118404465023658
+      ],
+      "acquire": false
+    }
+  ],
+  "hardware": {
+    "watchdog_hz": 10.0,
+    "effective_moveL_speed_mps": 0.005,
+    "actual_angular_speed_limit_rad_s": 0.04,
+    "effective_acceleration": 0.03,
+    "absolute_raw_force_threshold_N": 60.0,
+    "absolute_raw_torque_threshold_Nm": 5.0,
+    "robot_status_reference": "https://docs.universal-robots.com/tutorials/communication-protocol-tutorials/rtde-guide.html",
+    "collision_check": "UR safety + sampled IK; external obstacles and cable clearance require operator inspection",
+    "last_read_diagnostics": {
+      "hardware_read_started_monotonic": 1327855.201129269,
+      "sensor_read_duration_sec": 0.004319982836022973,
+      "rtde_read_duration_sec": 7.750699296593666e-05,
+      "watchdog_duration_sec": 4.692934453487396e-06,
+      "hardware_read_stage": "completed",
+      "raw_read_started_monotonic": 1327855.201132575,
+      "raw_read_ended_monotonic": 1327855.205452558,
+      "rtde_read_started_monotonic": 1327855.205455637,
+      "rtde_read_ended_monotonic": 1327855.205533144,
+      "pair_read_duration_sec": 0.0044038749765604734,
+      "host_monotonic": 1327855.205533144,
+      "watchdog_started_monotonic": 1327855.20553391,
+      "watchdog_ended_monotonic": 1327855.205538603,
+      "hardware_read_ended_monotonic": 1327855.205543076,
+      "hardware_read_duration_sec": 0.0044138068333268166,
+      "read_completed": true
+    },
+    "start_pose": [
+      0.6494696738275403,
+      0.1791787522479961,
+      0.32890079786600934,
+      -1.4765482085448411,
+      2.284336624128307,
+      -0.3117996202236744
+    ],
+    "start_joints": [
+      -3.0753329435931605,
+      -1.5245976646295567,
+      1.4964259306537073,
+      4.279309912318848,
+      -1.5703423658954065,
+      0.4888528883457184
+    ],
+    "sensor_firmware": "v1.0.1",
+    "active_tcp_offset": [
+      -0.0032432415690885757,
+      -6.266874371089332e-05,
+      0.25230436187631455,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "preflight_progress": {
+      "completed_points": 161,
+      "estimated_points": 604,
+      "completed_segments": 12,
+      "total_segments": 32,
+      "current_segment": 13
+    }
+  },
+  "base_level_confirmed": true,
+  "reason": "CalibrationStopped: robot moved during stationary preflight",
+  "diagnostics": {
+    "calibration_stage": "preflight",
+    "motion_context": null
+  },
+  "configuration_saved": false,
+  "cleanup_errors": [],
+  "logging": {
+    "mode": "async",
+    "state": "finished",
+    "worker_alive": false,
+    "error": null,
+    "queue_capacity": 512,
+    "queue_depth": 0,
+    "queue_highwater": 18,
+    "oldest_pending_age_sec": 0.0,
+    "max_backlog_sec": 2.0,
+    "flush_interval_sec": 0.25,
+    "batch_size": 64,
+    "accepted": {
+      "raw": 1895,
+      "timing": 1895,
+      "metadata": 2
+    },
+    "written": {
+      "raw": 1895,
+      "timing": 1895,
+      "metadata": 2
+    },
+    "durable": true,
+    "worker_io": {
+      "write": {
+        "count": 3792,
+        "last_sec": 2.5890767574310303e-07,
+        "max_sec": 0.00034691113978624344
+      },
+      "fsync": {
+        "count": 145,
+        "last_sec": 0.0017425399273633957,
+        "max_sec": 0.07103123608976603
+      }
+    }
+  },
+  "last_observation_timing": {
+    "kind": "observation",
+    "phase": "preflight",
+    "pose_id": -1,
+    "observe_started_monotonic": 1327855.201128804,
+    "stage": "complete",
+    "observation_limit_sec": 0.08,
+    "hardware_read_wall_sec": 0.004420379176735878,
+    "robot_timestamp": 91294.81999999999,
+    "sample_host_monotonic": 1327855.205533144,
+    "sensor_read_duration_sec": 0.004319982836022973,
+    "rtde_read_duration_sec": 7.750699296593666e-05,
+    "watchdog_duration_sec": 4.692934453487396e-06,
+    "hardware_read_duration_sec": 0.0044138068333268166,
+    "raw_enqueue_duration_sec": 3.161793574690819e-05,
+    "safety_checks_duration_sec": 2.9511982575058937e-05,
+    "observe_to_timing_enqueue_sec": 0.004488704027608037,
+    "observe_duration_sec": 0.004499516217038035
+  }
+}

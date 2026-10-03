@@ -1,0 +1,669 @@
+{
+  "mode": "execute",
+  "config_path": "/home/user-linux/robotics_cs/ur7e_px6d_contour_clean/config.yaml",
+  "config_sha256": "c4b4e210440c9b38fd61e1519cfc68e4d7fb7ab5900cd80652397611b607adb6",
+  "motion_limits": {
+    "max_translation_m": 0.002,
+    "max_tilt_rad": 0.4537856055185257,
+    "max_linear_speed": 0.005,
+    "max_angular_speed": 0.04,
+    "max_joint_speed": 0.15,
+    "command_speed": 0.005,
+    "acceleration": 0.03,
+    "stop_deceleration": 0.2,
+    "observation_timeout_sec": 0.08,
+    "sample_period_sec": 0.01,
+    "joint_step_rad": 0.12,
+    "joint_excursion_rad": 0.8,
+    "segment_timeout_sec": 120.0,
+    "total_timeout_sec": 2700.0,
+    "settle_hold_sec": 0.7,
+    "settle_linear_speed": 0.0001,
+    "settle_angular_speed": 0.001,
+    "position_tolerance_m": 0.0005,
+    "orientation_tolerance_rad": 0.003,
+    "samples_per_pose": 80
+  },
+  "gravity_base_unit": [
+    0,
+    0,
+    -1
+  ],
+  "transform_convention": "R_base_sensor = R_base_tool @ rotation_sensor_to_tool",
+  "status": "rejected_or_stopped",
+  "start_pose": [
+    0.6494613235199007,
+    0.1791968542909759,
+    0.328933860681498,
+    -1.476627612501087,
+    2.284244824539239,
+    -0.31184091576322864
+  ],
+  "plan": [
+    {
+      "pose_id": 0,
+      "split": "fit",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": 1,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.3703969811295647,
+        2.239669400028236,
+        -0.06936157686703416
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 2,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 45.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.4679092424010638,
+        2.3647859007881435,
+        -0.032549498911952815
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 3,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 90.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.5750847335185436,
+        2.4451076334380364,
+        -0.1634572988909023
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 4,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 135.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.6216485384644423,
+        2.422519219910316,
+        -0.39120943764203975
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 5,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 180.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.5750690376426564,
+        2.3094446120671717,
+        -0.5661368467945938
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 6,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 225.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.470952725857577,
+        2.1835718298092535,
+        -0.5817973464667789
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 7,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 270.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.3743392521986306,
+        2.118206887367109,
+        -0.44455560113047904
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 8,
+      "split": "fit",
+      "tilt_deg": 12.0,
+      "azimuth_deg": 315.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.3344156825040392,
+        2.1415754948600294,
+        -0.2380156968020177
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 9,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.2478468403077485,
+        2.1714595919279316,
+        0.1795239637003681
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 10,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 45.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.4417151513912445,
+        2.4278063637670417,
+        0.278503257454423
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 11,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 90.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.6764518038839413,
+        2.6121166531920124,
+        0.016831688258759414
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 12,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 135.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        1.75933770622396,
+        -2.533411358738281,
+        0.4781142195379746
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 13,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 180.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.671391553668911,
+        2.312695338719297,
+        -0.854292604462554
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 14,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 225.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.4491080338388358,
+        2.053303071672055,
+        -0.8618596251836665
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 15,
+      "split": "fit",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 270.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.2599659343445402,
+        1.9336015426541766,
+        -0.572202706143487
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    },
+    {
+      "pose_id": 16,
+      "split": "validation",
+      "tilt_deg": 25.0,
+      "azimuth_deg": 315.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.183218011247406,
+        1.98273748802749,
+        -0.16357750804060703
+      ],
+      "acquire": true
+    },
+    {
+      "pose_id": -1,
+      "split": "motion",
+      "tilt_deg": 0.0,
+      "azimuth_deg": 0.0,
+      "target": [
+        0.6494613235199007,
+        0.1791968542909759,
+        0.328933860681498,
+        -1.476627612501087,
+        2.284244824539239,
+        -0.31184091576322864
+      ],
+      "acquire": false
+    }
+  ],
+  "hardware": {
+    "watchdog_hz": 10.0,
+    "effective_moveL_speed_mps": 0.005,
+    "actual_angular_speed_limit_rad_s": 0.04,
+    "effective_acceleration": 0.03,
+    "absolute_raw_force_threshold_N": 60.0,
+    "absolute_raw_torque_threshold_Nm": 5.0,
+    "robot_status_reference": "https://docs.universal-robots.com/tutorials/communication-protocol-tutorials/rtde-guide.html",
+    "collision_check": "UR safety + sampled IK; external obstacles and cable clearance require operator inspection",
+    "last_read_diagnostics": {
+      "hardware_read_started_monotonic": 1328105.647752818,
+      "sensor_read_duration_sec": 0.00910650403238833,
+      "rtde_read_duration_sec": 0.0,
+      "watchdog_duration_sec": 0.0,
+      "hardware_read_stage": "sensor_read",
+      "raw_read_started_monotonic": 1328105.647757878,
+      "hardware_read_ended_monotonic": 1328105.656864382,
+      "hardware_read_duration_sec": 0.009111564140766859,
+      "read_completed": false,
+      "raw_read_ended_monotonic": 1328105.656864382
+    },
+    "start_pose": [
+      0.6494698688973025,
+      0.1792142322763155,
+      0.3289515385760037,
+      -1.476630113168221,
+      2.2841849426206458,
+      -0.3118491419328315
+    ],
+    "start_joints": [
+      -3.0752812067614954,
+      -1.524628372197487,
+      1.4963839689837855,
+      4.279295130366943,
+      -1.5703390280352991,
+      0.4887942671775818
+    ],
+    "sensor_firmware": "v1.0.1",
+    "active_tcp_offset": [
+      -0.0032432415690885757,
+      -6.266874371089332e-05,
+      0.25230436187631455,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "preflight_progress": {
+      "completed_points": 259,
+      "estimated_points": 607,
+      "completed_segments": 18,
+      "total_segments": 32,
+      "current_segment": 19
+    }
+  },
+  "base_level_confirmed": true,
+  "reason": "PX6DError: PX6D serial preflight failed: [Errno 5] Input/output error",
+  "diagnostics": {
+    "hardware_read_timing": {
+      "hardware_read_started_monotonic": 1328105.647752818,
+      "sensor_read_duration_sec": 0.00910650403238833,
+      "rtde_read_duration_sec": 0.0,
+      "watchdog_duration_sec": 0.0,
+      "hardware_read_stage": "sensor_read",
+      "raw_read_started_monotonic": 1328105.647757878,
+      "hardware_read_ended_monotonic": 1328105.656864382,
+      "hardware_read_duration_sec": 0.009111564140766859,
+      "read_completed": false,
+      "raw_read_ended_monotonic": 1328105.656864382
+    },
+    "observation_timing": {
+      "kind": "observation_failure",
+      "phase": "preflight",
+      "pose_id": -1,
+      "observe_started_monotonic": 1328105.647752205,
+      "stage": "hardware_read",
+      "observation_limit_sec": 0.08,
+      "error": "PX6DError: PX6D serial preflight failed: [Errno 5] Input/output error",
+      "observe_duration_sec": 0.012268000049516559
+    },
+    "calibration_stage": "preflight",
+    "motion_context": null
+  },
+  "configuration_saved": false,
+  "cleanup_errors": [],
+  "logging": {
+    "mode": "async",
+    "state": "finished",
+    "worker_alive": false,
+    "error": null,
+    "queue_capacity": 512,
+    "queue_depth": 0,
+    "queue_highwater": 32,
+    "oldest_pending_age_sec": 0.0,
+    "max_backlog_sec": 2.0,
+    "flush_interval_sec": 0.25,
+    "batch_size": 64,
+    "accepted": {
+      "raw": 2239,
+      "timing": 2240,
+      "metadata": 2
+    },
+    "written": {
+      "raw": 2239,
+      "timing": 2240,
+      "metadata": 2
+    },
+    "durable": true,
+    "worker_io": {
+      "write": {
+        "count": 4481,
+        "last_sec": 4.6568457037210464e-06,
+        "max_sec": 0.00022267294116318226
+      },
+      "fsync": {
+        "count": 161,
+        "last_sec": 0.08143654908053577,
+        "max_sec": 0.11197239486500621
+      }
+    }
+  },
+  "last_observation_timing": {
+    "kind": "observation_failure",
+    "phase": "preflight",
+    "pose_id": -1,
+    "observe_started_monotonic": 1328105.647752205,
+    "stage": "hardware_read",
+    "observation_limit_sec": 0.08,
+    "error": "PX6DError: PX6D serial preflight failed: [Errno 5] Input/output error",
+    "observe_duration_sec": 0.012268000049516559
+  }
+}
