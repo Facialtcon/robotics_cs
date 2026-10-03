@@ -9,6 +9,9 @@ log/
 *.log
 *.log.*
 
+# Keep this large calibration recording local.
+/calibration_data/sensor_mount/mount_20261003T084634_652687Z_0da44417/raw.jsonl
+
 # Python, test and analysis caches
 __pycache__/
 *.py[cod]
