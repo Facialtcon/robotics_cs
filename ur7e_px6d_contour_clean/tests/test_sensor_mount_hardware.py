@@ -10,14 +10,14 @@ import pytest
 
 from core.models import Wrench
 from doubles import Devices, Sensor
-from robot.rtde_controller import RobotError, _orientation_distance
+from robot.rtde_controller import RobotError, _orientation_distance, _rotvec_to_matrix
 from sensor.px6d_reader import PX6DTimeout
 from tools.sensor_mount_calibration import hardware as hardware_module
 from tools.sensor_mount_calibration.hardware import Hardware, HardwareError, interpolate_poses
-from tools.sensor_mount_calibration.plan import Limits
+from tools.sensor_mount_calibration.plan import Limits, make_plan, matrix_to_rotvec
 
 
-def rig(config):
+def rig(config, limits=None):
     devices = Devices(config, config['dry_run']['start_pose'])
     receive, control = devices.receive, devices.control
     receive.q = np.array([-.5, -1., 1., -1., 1.2, .3])
@@ -47,13 +47,13 @@ def rig(config):
         runtime['settle_hold_sec'] = .001
         return devices.controller(runtime)
 
-    hardware = Hardware(config, replace(Limits(), sample_period_sec=.001),
+    hardware = Hardware(config, replace(limits or Limits(), sample_period_sec=.001),
                         controller_factory=owner, sensor_factory=lambda **kw: sensor)
     return hardware, devices, sensor
 
 
-def ready(config):
-    hardware, devices, sensor = rig(config)
+def ready(config, limits=None):
+    hardware, devices, sensor = rig(config, limits)
     hardware.connect()
     hardware.activate()
     return hardware, devices, sensor
@@ -236,6 +236,82 @@ def test_watchdog_deadline_cannot_be_revived_by_new_data(config):
     with pytest.raises(HardwareError, match='watchdog deadline'):
         hardware.read()
     assert not kicks
+    hardware.close()
+
+
+def wide_motion_limits():
+    return replace(Limits(), inner_tilt_deg=20., outer_tilt_deg=45.,
+                   interleave_tilts=True, max_tilt_rad=np.deg2rad(46.),
+                   joint_excursion_rad=1.5)
+
+
+def test_wide_tilt_requires_full_preflight_and_keeps_motion_rates(config):
+    hardware, devices, sensor = ready(config, wide_motion_limits())
+    target = make_plan(hardware.origin_pose, hardware.limits)[3]['target']
+    checked = []
+    devices.control.isPoseWithinSafetyLimits = lambda pose: checked.append(pose) or True
+    report = hardware.preflight([target, hardware.origin_pose], hardware.read)
+    assert 90 <= report['sample_count'] <= 94
+    assert len(checked) == report['sample_count']
+    hardware.command(target)
+    sample = hardware.read()
+    assert _orientation_distance(hardware.origin_pose[3:], sample['actual_tcp_pose'][3:]) == pytest.approx(np.deg2rad(45.))
+    hardware.command(hardware.origin_pose)
+    assert hardware.command_speed == .005
+    assert hardware.acceleration == .03
+    assert hardware.limits.max_translation_m == .002
+    assert hardware.WATCHDOG_HZ == 10.
+    assert sum(call[0] == 'moveL' for call in devices.control.calls) == 2
+    hardware.close()
+
+
+def test_wide_measured_tilt_beyond_hard_limit_stops_without_return(config):
+    hardware, devices, sensor = ready(config, wide_motion_limits())
+    origin_rotation = _rotvec_to_matrix(hardware.origin_pose[3:])
+    devices.receive.pose[3:] = matrix_to_rotvec(
+        _rotvec_to_matrix([np.deg2rad(46.01), 0., 0.]) @ origin_rotation)
+    with pytest.raises(RobotError, match='orientation drift|tilt bound'):
+        hardware.read()
+    assert devices.control.calls[-1] == ('stopL', True)
+    with pytest.raises(HardwareError, match='forbidden'):
+        hardware.command(hardware.origin_pose)
+    assert not any(call[0] == 'moveL' for call in devices.control.calls)
+    hardware.close()
+
+
+def test_wide_joint_excursion_is_finite_even_when_each_step_is_continuous(config):
+    hardware, devices, sensor = ready(config, wide_motion_limits())
+    for step in range(1, 16):
+        devices.receive.q[0] = hardware.origin_q[0] + step * .099
+        hardware.read()
+    devices.receive.q[0] = hardware.origin_q[0] + 1.51
+    with pytest.raises(HardwareError, match='joint excursion'):
+        hardware.read()
+    assert devices.control.calls[-1] == ('stopL', True)
+    with pytest.raises(HardwareError, match='forbidden'):
+        hardware.command(hardware.origin_pose)
+    hardware.close()
+
+
+@pytest.mark.parametrize('fault', ['pose_safety', 'ik', 'joint_safety', 'joint_excursion'])
+def test_wide_preflight_still_rejects_unsafe_or_unreachable_paths_before_motion(config, fault):
+    hardware, devices, sensor = ready(config, wide_motion_limits())
+    control = devices.control
+    if fault == 'pose_safety':
+        control.isPoseWithinSafetyLimits = lambda pose: False
+    elif fault == 'ik':
+        control.getInverseKinematicsHasSolution = lambda pose, joints: False
+    elif fault == 'joint_safety':
+        control.isJointsWithinSafetyLimits = lambda joints: False
+    else:
+        control.getInverseKinematics = lambda pose, joints: np.array(joints) + [.04, 0., 0., 0., 0., 0.]
+    target = make_plan(hardware.origin_pose, hardware.limits)[3]['target']
+    with pytest.raises(HardwareError):
+        hardware.preflight([target], hardware.read)
+    assert not any(call[0] == 'moveL' for call in control.calls)
+    assert control.calls[-1] == ('stopL', True)
+    with pytest.raises(HardwareError, match='forbidden'):
+        hardware.command(target)
     hardware.close()
 
 

@@ -25,10 +25,14 @@ from tools.sensor_mount_calibration.storage import RunStore, preview_config_upda
 from tools.sensor_mount_calibration.progress import ProgressReporter
 from tools.sensor_mount_calibration.stability import check_recorded_stability
 from tools.sensor_mount_calibration.diagnostics import analyze_failure_records
+from tools.sensor_mount_calibration.profiles import get_profile
 
 
 def report(result):
     print(f"拟合姿态 RMSE: {result['fit_rmse_N']:.5f} N；独立姿态 RMSE: {result['validation_rmse_N']:.5f} N")
+    angle_bound = result.get('estimated_rotation_95_bound_deg')
+    if angle_bound is not None:
+        print(f'局部 95% 安装角不确定度估计：{angle_bound:.2f}°；基于固定零偏模型，不是绝对精度保证。')
     print('rotation_sensor_to_tool（列为 Sensor 轴在当前 TCP 中的方向）：')
     print(np.array2string(np.asarray(result['rotation_sensor_to_tool']), precision=10))
     print(f"det={np.linalg.det(result['rotation_sensor_to_tool']):.10f}；力作用方符号={result['force_sign']:+d}")
@@ -39,6 +43,9 @@ def report(result):
 def report_failure(exc):
     """Explain numerical rejection only after robot shutdown, without installing candidates."""
     diagnostics = getattr(exc, 'diagnostics', {})
+    angle_bound = diagnostics.get('estimated_rotation_95_bound_deg')
+    if angle_bound is not None:
+        print(f'本次局部 95% 安装角不确定度估计：{angle_bound:.2f}°（未保存安装结果）。', flush=True)
     context = diagnostics.get('motion_context') or {}
     if context.get('is_return'):
         print(f'失败路段：姿态编号 {context.get("after_pose_id")} 后回中，'
@@ -89,27 +96,32 @@ def attach_failure_analysis(exc, records):
         exc.add_note(f'raw failure analysis unavailable: {type(analysis_exc).__name__}: {analysis_exc}')
 
 
-def _metadata(config_path, limits, mode):
+def _metadata(config_path, limits, mode, profile=None):
+    profile = profile or get_profile()
     return dict(mode=mode, config_path=str(config_path),
                 config_sha256=hashlib.sha256(Path(config_path).read_bytes()).hexdigest(),
-                motion_limits=limits.as_dict(), gravity_base_unit=[0, 0, -1],
+                motion_limits=limits.as_dict(), calibration_profile=profile.as_dict(), gravity_base_unit=[0, 0, -1],
                 transform_convention='R_base_sensor = R_base_tool @ rotation_sensor_to_tool',
                 status='started')
 
 
-def offline(raw_path, config_path, data_root, limits):
+def offline(raw_path, config_path, data_root, limits, profile=None):
+    profile = profile or get_profile()
     records = [json.loads(line) for line in Path(raw_path).read_text().splitlines() if line.strip()]
     selected = [r for r in records if r.get('split') in ('fit', 'validation')]
-    store = RunStore.create(data_root, {**_metadata(config_path, limits, 'offline_replay'),
+    store = RunStore.create(data_root, {**_metadata(config_path, limits, 'offline_replay', profile),
                                        'source_raw': str(Path(raw_path).resolve())})
     for record in records:
         store.append_raw(record)
     try:
         print(f'离线解算：读取 {len(records)} 帧，拟合/验证采样 {len(selected)} 帧；检查原地趋势与回中重复性。', flush=True)
-        stability = check_recorded_stability(records)
+        stability = check_recorded_stability(records, profile.stability)
         store.write_metadata({'recorded_stability': stability})
+        for check in [stability.get('preflight') or {}, *stability.get('references', [])]:
+            for warning in check.get('warnings', []):
+                print('质量提示：' + warning, flush=True)
         print('开始固定零偏重力拟合及完整姿态验证。', flush=True)
-        result = calibrate(selected)
+        result = calibrate(selected, profile.fit)
     except CalibrationError as exc:
         attach_failure_analysis(exc, records)
         store.write_metadata(dict(status='rejected', reason=str(exc), diagnostics=exc.diagnostics))
@@ -117,6 +129,7 @@ def offline(raw_path, config_path, data_root, limits):
         report_failure(exc)
         return 2
     result['configuration_saved'] = False
+    result['calibration_profile'] = profile.as_dict()
     store.write_result(result)
     store.write_metadata(dict(status='validated_offline'))
     report(result)
@@ -124,16 +137,18 @@ def offline(raw_path, config_path, data_root, limits):
     return 0
 
 
-def execute(config, config_path, data_root, limits):
+def execute(config, config_path, data_root, limits, profile=None):
+    profile = profile or get_profile()
     # Hardware imports and construction occur exclusively under --execute.
     from tools.sensor_mount_calibration.hardware import Hardware
 
     with OperatorKeyboard() as keyboard:
         if not keyboard.enabled:
             raise ValueError('--execute 需要前台交互终端，禁止管道预先输入 Enter')
-        store = RunStore.create(data_root, _metadata(config_path, limits, 'execute'))
+        store = RunStore.create(data_root, _metadata(config_path, limits, 'execute', profile))
         hardware = Hardware(config, limits)
         session = Session(hardware, store, keyboard, limits)
+        session.stability_limits = profile.stability
         config_saved = False
         failure = None
         logging_finish_attempted = False
@@ -149,7 +164,7 @@ def execute(config, config_path, data_root, limits):
             initial = session.observe()
             start = initial['actual_tcp_pose']
             session.origin = np.asarray(start, dtype=float)
-            plan = make_plan(start)
+            plan = make_plan(start, limits)
             store.write_metadata(dict(start_pose=start, plan=plan, hardware=hardware.metadata))
             print(describe_plan(start, plan, limits, config['tcp']['offset']), flush=True)
             print(f"原始力/矩硬限：{config['policy']['absolute_raw_force_threshold']:g} N / "
@@ -176,9 +191,9 @@ def execute(config, config_path, data_root, limits):
                                       last_observation_timing=getattr(session, 'last_observation_timing', {})))
             progress.close(timeout_sec=.5)
             print(f'数据已落盘：{len(records)} 帧拟合/验证采样。正在联合求安装旋转、固定零偏、重量及作用方符号，并验证留出姿态。', flush=True)
-            result = calibrate(records)
+            result = calibrate(records, profile.fit)
             print('拟合及独立姿态验证通过，准备配置差异。', flush=True)
-            result.update(configuration_saved=False, actual_start_pose=start,
+            result.update(configuration_saved=False, actual_start_pose=start, calibration_profile=profile.as_dict(),
                           active_tcp_offset=hardware.metadata.get('active_tcp_offset'),
                           base_level_confirmed=True)
             update = preview_config_update(config_path, result['rotation_sensor_to_tool'])
@@ -267,19 +282,29 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--execute', action='store_true', help='连接设备，Enter 后执行已展示的有限计划')
     mode.add_argument('--offline', type=Path, metavar='RAW_JSONL', help='只重算已有原始数据；不连接设备或写配置')
+    parser.add_argument('--profile', choices=('standard', 'wide'), default=None,
+                        help='standard:12°/25°保守档（默认）；wide:20°/45°、约5°粗标定。离线未指定时沿用原记录档位')
     parser.add_argument('--config', type=Path, default=ROOT / 'config.yaml')
     parser.add_argument('--data-dir', type=Path, default=ROOT / 'calibration_data' / 'sensor_mount')
     args = parser.parse_args(argv)
-    limits = Limits()
     try:
+        profile_name = args.profile
+        if profile_name is None and args.offline:
+            source_metadata = args.offline.parent / 'metadata.json'
+            if source_metadata.exists():
+                saved = json.loads(source_metadata.read_text())
+                profile_name = saved.get('calibration_profile', {}).get('name')
+        profile = get_profile(profile_name or 'standard')
+        limits = profile.motion
+        print(profile.describe(), flush=True)
         config = load_config(args.config)
         if args.offline:
-            return offline(args.offline, args.config, args.data_dir, limits)
+            return offline(args.offline, args.config, args.data_dir, limits, profile)
         if args.execute:
-            return execute(config, args.config, args.data_dir, limits)
+            return execute(config, args.config, args.data_dir, limits, profile)
         start = config['dry_run']['start_pose']
         print('默认离线预览：以下是示例 TCP，非实际姿态；未连接设备，不会运动或修改配置。')
-        print(describe_plan(start, make_plan(start), limits, config['tcp']['offset']))
+        print(describe_plan(start, make_plan(start, limits), limits, config['tcp']['offset']))
         print('真机入口：在同一命令后加 --execute；实际计划将根据读取的 TCP 重新生成。')
         return 0
     except (KeyboardInterrupt, EOFError):

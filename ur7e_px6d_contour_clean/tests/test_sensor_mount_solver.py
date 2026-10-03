@@ -291,3 +291,139 @@ def test_ambiguous_sign_keeps_independent_validation_diagnostics_without_selecti
         assert original['weight_N'] == altered['weight_N']
         assert altered['validation_rmse_N'] > original['validation_rmse_N']
     assert len(changed_candidates[0]['validation_pose_errors_N']) == 4
+
+
+def wide_records(*, mount=None, sign=1, weight=2., pose_noise=.025,
+                 sample_noise=.015, seed=73, angles=(20., 45.)):
+    """Whole-pose errors remain after averaging: small tools need real coverage."""
+    mount = rotation_from_rotvec([1.4, -.7, 2.1]) if mount is None else mount
+    bias = np.array([.8, -1.3, 2.1])
+    records = synthetic_records(mount=mount, sign=sign, weight=weight,
+                                noise=sample_noise, seed=seed)
+    rng = np.random.default_rng(seed + 500)
+    offsets = rng.normal(0., pose_noise, (17, 3))
+    for record in records:
+        vector = np.asarray(record['actual_tcp_pose'][3:])
+        old_gravity = rotation_from_rotvec(vector).T @ [0., 0., -1.]
+        if np.linalg.norm(vector) > 1e-12:
+            inner = np.isclose(np.linalg.norm(vector), np.radians(12.))
+            vector *= np.radians(angles[0] if inner else angles[1]) / np.linalg.norm(vector)
+        gravity = rotation_from_rotvec(vector).T @ [0., 0., -1.]
+        record['actual_tcp_pose'][3:] = vector.tolist()
+        force = (np.asarray(record['raw_wrench'][:3])
+                 + sign * weight * mount.T @ (gravity - old_gravity)
+                 + offsets[record['pose_id']])
+        record['raw_wrench'][:3] = force.tolist()
+    return records
+
+
+def wide_limits(**changes):
+    limits = replace(CalibrationLimits(), max_fit_rmse_n=.20,
+                     max_fit_pose_error_n=.40, max_relative_fit_error=.20,
+                     max_validation_rmse_n=.25, max_validation_pose_error_n=.50,
+                     max_relative_validation_error=.25,
+                     max_rotation_uncertainty_deg=5.)
+    return replace(limits, **changes)
+
+
+@pytest.mark.parametrize('sign', [1, -1])
+@pytest.mark.parametrize('rotvec', [[0., 0., 0.], [1.4, -.7, 2.1],
+                                  [-2.3, .9, -.45], [np.pi, 0., 0.]])
+def test_wide_plan_small_weight_arbitrary_mount_and_pose_errors(sign, rotvec):
+    mount = rotation_from_rotvec(rotvec)
+    records = wide_records(mount=mount, sign=sign)
+    untouched = copy.deepcopy(records)
+    result = calibrate(records, wide_limits())
+    assert result['force_sign'] == sign
+    assert result['weight_N'] == pytest.approx(2., abs=.07)
+    assert rotation_error_deg(result['rotation_sensor_to_tool'], mount) < 5.
+    assert 0. < result['estimated_rotation_95_bound_deg'] < 5.
+    assert result['estimated_rotation_95_bound_deg'] == result['diagnostics']['estimated_rotation_95_bound_deg']
+    assert 'not an absolute accuracy guarantee' in result['rotation_uncertainty_assumptions']
+    np.testing.assert_allclose(result['bias_sensor_N'], [.8, -1.3, 2.1], atol=.07)
+    np.testing.assert_allclose(np.linalg.det(result['rotation_sensor_to_tool']), 1., atol=1e-12)
+    assert len(result['diagnostics']['validation_pose_ids']) == 4
+    assert records == untouched
+    json.dumps(result, allow_nan=False)
+
+
+def test_wider_angles_increase_weak_signal_and_reduce_rotation_uncertainty():
+    narrow = calibrate(wide_records(angles=(12., 25.), pose_noise=0.), wide_limits())
+    wide = calibrate(wide_records(pose_noise=0.), wide_limits())
+    assert (wide['diagnostics']['weak_axis_force_signal_N']
+            > 3.1 * narrow['diagnostics']['weak_axis_force_signal_N'])
+    assert wide['estimated_rotation_95_bound_deg'] < .65 * narrow['estimated_rotation_95_bound_deg']
+    assert wide['diagnostics']['sign_rmse_gap_N'] > 3. * narrow['diagnostics']['sign_rmse_gap_N']
+
+
+def test_rotation_precision_target_rejects_otherwise_acceptable_wide_data():
+    records = wide_records(pose_noise=.075, seed=0)
+    unconstrained = calibrate(records, wide_limits(max_rotation_uncertainty_deg=None))
+    assert unconstrained['estimated_rotation_95_bound_deg'] > 5.
+    with pytest.raises(CalibrationError, match='excessive estimated rotation uncertainty') as caught:
+        calibrate(records, wide_limits())
+    assert caught.value.diagnostics['failure_reasons'] == [
+        'excessive estimated rotation uncertainty '
+        f"({unconstrained['estimated_rotation_95_bound_deg']:.2f} deg > 5 deg; "
+        'local model estimate, not guaranteed accuracy)']
+    candidate = caught.value.diagnostics['sign_candidates'][0]
+    assert candidate['rotation_sensor_to_tool'] == unconstrained['rotation_sensor_to_tool']
+    assert candidate['force_sign'] == unconstrained['force_sign']
+
+
+def test_wide_quality_limits_do_not_disable_force_sign_identification():
+    records = wide_records(weight=.5, pose_noise=.035, seed=19)
+    with pytest.raises(CalibrationError, match='sign is ambiguous'):
+        calibrate(records, wide_limits())
+
+
+def test_wide_validation_corruption_cannot_refit_or_reselect_sign():
+    records = wide_records()
+    result = calibrate(records, wide_limits())
+    baseline_uncertainty = result['estimated_rotation_95_bound_deg']
+    for record in records:
+        if record['split'] == 'validation':
+            record['raw_wrench'][1] += .45
+    with pytest.raises(CalibrationError, match='independent complete-pose validation error') as caught:
+        calibrate(records, wide_limits())
+    candidate = caught.value.diagnostics['sign_candidates'][0]
+    for field in ('rotation_sensor_to_tool', 'bias_sensor_N', 'weight_N', 'force_sign'):
+        assert candidate[field] == result[field]
+    assert caught.value.diagnostics['estimated_rotation_95_bound_deg'] > baseline_uncertainty
+
+
+def test_uncertainty_uses_joint_parameter_covariance_and_complete_pose_noise():
+    result = calibrate(wide_records(), wide_limits())
+    detail = result['diagnostics']['rotation_uncertainty']
+    assert detail['parameter_count'] == 7
+    assert detail['fit_observation_count'] == 39
+    assert detail['residual_degrees_of_freedom'] == 32
+    assert detail['applied_variance_N2'] == max(detail['fit_variance_N2'],
+                                             detail['validation_variance_N2'],
+                                             detail['sampling_variance_floor_N2'])
+    covariance = np.asarray(detail['angular_covariance_rad2'])
+    assert np.linalg.eigvalsh(covariance).min() > 0.
+    np.testing.assert_allclose(covariance, covariance.T, atol=1e-15)
+    assert detail['is_accuracy_guarantee'] is False
+
+
+def test_nonzero_sampling_noise_prevents_zero_uncertainty_from_exact_pose_means():
+    records = wide_records(pose_noise=0., sample_noise=0.)
+    for index, record in enumerate(records):
+        # Each pose has an exactly zero-mean perturbation, yet its measured
+        # sample variance still supplies uncertainty for that pose's mean.
+        delta = np.array([.03, -.04, .02]) * (-1. if index % 2 else 1.)
+        record['raw_wrench'][:3] = (np.asarray(record['raw_wrench'][:3]) + delta).tolist()
+    result = calibrate(records, wide_limits())
+    detail = result['diagnostics']['rotation_uncertainty']
+    assert result['fit_rmse_N'] < 1e-12
+    assert result['validation_rmse_N'] < 1e-12
+    assert detail['sampling_variance_floor_N2'] > 0.
+    assert detail['applied_variance_N2'] == detail['sampling_variance_floor_N2']
+    assert result['estimated_rotation_95_bound_deg'] > 0.
+
+
+@pytest.mark.parametrize('invalid', [0., -1., np.inf, np.nan])
+def test_invalid_rotation_precision_target_is_rejected(invalid):
+    with pytest.raises(CalibrationError, match='invalid positive calibration limit: max_rotation_uncertainty_deg'):
+        calibrate(wide_records(), wide_limits(max_rotation_uncertainty_deg=invalid))

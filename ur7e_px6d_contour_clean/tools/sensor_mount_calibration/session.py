@@ -7,7 +7,7 @@ import numpy as np
 
 from robot.rtde_controller import _orientation_distance
 from .plan import at_target
-from .stability import check_stationary_trend, make_reference, check_reference
+from .stability import StabilityLimits, check_stationary_trend, make_reference, check_reference
 
 
 class CalibrationStopped(RuntimeError):
@@ -29,6 +29,7 @@ class Session:
         self.reference = None
         self.reference_checks = []
         self.motion_context = None
+        self.stability_limits = StabilityLimits()
 
     def emit(self, message, *, key=None, force=False):
         if self.progress is not None:
@@ -223,12 +224,18 @@ class Session:
             self.store.write_metadata({'preflight': preflight})
             self.stage = 'stationary_trend'
             self.emit('检查预检期间同一姿态的原始力趋势，确认固定零偏稳定性。', force=True)
-            trend = self._stability_check(check_stationary_trend, list(preflight_samples), target=start)
+            trend = self._stability_check(check_stationary_trend, list(preflight_samples),
+                                          self.stability_limits, target=start)
             self.store.write_metadata({'preflight_stability': trend})
             if trend.get('status') == 'insufficient_duration':
                 self.emit('原地趋势窗口不足，后续每次回中均检查原始力重复性。', force=True)
+            elif trend.get('status') == 'within_coarse_budget':
+                self.emit(f'粗标定原地趋势：{trend["force_slope_norm_N_per_s"]*60:.4f} N/min，'
+                          f'首尾变化 {trend["endpoint_force_delta_norm_N"]:.4f} N。', force=True)
             else:
                 self.emit('原地趋势检查通过；开始多姿态采样。', force=True)
+            for warning in trend.get('warnings', []):
+                self.emit('质量提示：' + warning, force=True)
             total = sum(bool(point['acquire']) for point in plan)
             completed = 0
             previous_acquisition = None
@@ -265,13 +272,15 @@ class Session:
                 else:
                     reference_point = dict(point, split='reference', pose_id=1000+completed)
                     samples = self.acquire(reference_point, deadline, label='回中重复性检查')
-                    check = self._stability_check(check_reference, self.reference, samples,
+                    check = self._stability_check(check_reference, self.reference, samples, self.stability_limits,
                                                  target=point['target'], deadline=deadline)
                     check['motion_context'] = dict(self.motion_context)
                     self.reference_checks.append(check)
                     self.store.write_metadata({'reference_checks': self.reference_checks})
                     self.emit(f'回中重复性通过：原始力变化 {check["force_delta_norm_N"]:.4f} N / '
                               f'{check["force_limit_N"]:.2f} N；参考力仅用于检查。', force=True)
+                    for warning in check.get('warnings', []):
+                        self.emit('质量提示：' + warning, force=True)
             self.stage = 'acquisition_complete'
             self.emit(f'全部 {total} 个姿态采集完成，已回到起始标定姿态。', force=True)
             return self.records

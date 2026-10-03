@@ -206,7 +206,7 @@ def test_slow_stability_computation_keeps_safety_checks_and_never_delays_stop(mo
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
     read = hardware.read
 
-    def blocked_check(records):
+    def blocked_check(records, *args):
         entered.set()
         release.wait(2.)
         finished.set()
@@ -251,7 +251,7 @@ def test_slow_stability_check_continues_fresh_observations_then_accepts_result(m
     read = hardware.read
     read_times = []
 
-    def delayed_check(records):
+    def delayed_check(records, *args):
         entered.set()
         assert release.wait(1.)
         return {'status': 'stable'}

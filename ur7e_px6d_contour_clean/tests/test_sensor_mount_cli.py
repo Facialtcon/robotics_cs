@@ -18,11 +18,11 @@ START = [.4, -.2, .3, 0., np.pi, 0.]
 MOUNT = rotation_from_rotvec([.7, -1.1, .4])
 
 
-def synthetic_records():
+def synthetic_records(limits=None):
     """Nonzero fixed bias, unknown weight, arbitrary mount and independent poses."""
     rng = np.random.default_rng(709)
     records = []
-    for point in make_plan(START):
+    for point in make_plan(START, limits):
         if not point['acquire']:
             continue
         gravity = rotation_from_rotvec(point['target'][3:]).T @ [0., 0., -1.]
@@ -85,6 +85,7 @@ def workflow(tmp_path, monkeypatch):
         def __init__(self, config, limits):
             harness.hardware = self
             self.connected = self.active = self.closed = False
+            self.limits = limits
             self.metadata = {'active_tcp_offset': config['tcp']['offset'],
                              'sdk_contract': 'offline test double'}
 
@@ -120,7 +121,7 @@ def workflow(tmp_path, monkeypatch):
             return record
 
         def run(self, start, plan):
-            assert start == START and plan == make_plan(START)
+            assert start == START and plan == make_plan(START, self.hardware.limits)
             self.hardware.activate()
             self.store.write_metadata({'preflight': {'sample_count': 600}})
             if harness.before_acquisition:
@@ -134,7 +135,7 @@ def workflow(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, 'OperatorKeyboard', Keyboard)
     monkeypatch.setattr(cli, 'Session', Session)
     monkeypatch.setattr(hardware_module, 'Hardware', Hardware)
-    harness.run = lambda: cli.main(['--execute', '--config', str(path), '--data-dir', str(harness.root)])
+    harness.run = lambda *extra: cli.main(['--execute', '--config', str(path), '--data-dir', str(harness.root), *extra])
     return harness
 
 
@@ -330,9 +331,9 @@ def test_durable_log_drain_precedes_solver_and_configuration_confirmation(workfl
         assert store.logging_diagnostics['durable']
         workflow.events.append('durable_logs')
 
-    def checked_fit(records):
+    def checked_fit(records, *args):
         assert 'durable_logs' in workflow.events
-        return fit(records)
+        return fit(records, *args)
 
     monkeypatch.setattr(cli.RunStore, 'finish_logging', checked_finish)
     monkeypatch.setattr(cli, 'calibrate', checked_fit)
@@ -350,7 +351,7 @@ def test_log_finalization_failure_blocks_solver_result_and_config_save(workflow,
         finish(store, timeout_sec)
         raise StorageError('injected final durability failure')
 
-    def forbidden_fit(_records):
+    def forbidden_fit(_records, *args):
         pytest.fail('failed durability must not reach the solver or config update')
 
     monkeypatch.setattr(cli.RunStore, 'finish_logging', failed_finish)
@@ -453,7 +454,7 @@ def test_failure_analysis_runs_after_close_and_durable_logs_then_reports_evidenc
         assert store.logging_diagnostics['durable']
         workflow.events.append('durable_logs')
 
-    def failed_fit(records):
+    def failed_fit(records, *args):
         raise primary
 
     def analyzed(records, diagnostics):
@@ -486,7 +487,7 @@ def test_optional_failure_analysis_error_preserves_primary_rejection_and_config(
 
     primary = CalibrationError('original fixed-bias model rejection', {'force_signal_N': 1.})
 
-    def failed_fit(records):
+    def failed_fit(records, *args):
         raise primary
 
     def failed_analysis(*args):
@@ -523,3 +524,73 @@ def test_no_extra_numerical_analysis_when_device_close_fails(workflow, monkeypat
     assert metadata['reason'] == 'CalibrationError: original quality rejection'
     assert any('device close failed' in reason for reason in metadata['cleanup_errors'])
     assert workflow.path.read_bytes() == workflow.original
+
+
+def test_wide_preview_displays_new_bounds_without_constructing_devices(tmp_path, monkeypatch, capsys):
+    def forbidden(*args, **kwargs):
+        pytest.fail('preview must never construct a device or keyboard')
+    monkeypatch.setattr(hardware_module, 'Hardware', forbidden)
+    monkeypatch.setattr(cli, 'OperatorKeyboard', forbidden)
+    output_dir = tmp_path/'unused'
+    assert cli.main(['--profile', 'wide', '--data-dir', str(output_dir)]) == 0
+    output = capsys.readouterr().out
+    assert '20°/45°' in output and '5°' in output and '46°' in output
+    assert '197.2 mm' in output and '1.5rad' in output
+    assert not output_dir.exists()
+
+
+def test_wide_execution_saves_profile_and_angle_estimate_with_rotation_only(workflow, capsys):
+    from tools.sensor_mount_calibration.profiles import get_profile
+    profile = get_profile('wide')
+    workflow.records = synthetic_records(profile.motion)
+    assert workflow.run('--profile', 'wide') == 0
+    run = one_run(workflow)
+    result = json.loads((run/'result.json').read_text())
+    metadata = json.loads((run/'metadata.json').read_text())
+    assert metadata['calibration_profile'] == profile.as_dict()
+    assert result['calibration_profile'] == profile.as_dict()
+    assert metadata['motion_limits'] == profile.motion.as_dict()
+    assert result['estimated_rotation_95_bound_deg'] < 5.
+    assert max(p['tilt_deg'] for p in metadata['plan']) == 45.
+    assert len(workflow.prompts) == 2
+    before, after = yaml.safe_load(workflow.original), yaml.safe_load(workflow.path.read_bytes())
+    before['preprocessing']['coordinate_transform']['rotation_sensor_to_tool'] = result['rotation_sensor_to_tool']
+    assert before == after
+    assert Path(result['configuration_backup']).read_bytes() == workflow.original
+    output = capsys.readouterr().out
+    assert output.index('20°/45°') < output.index('正在连接 PX6D')
+    assert output.index('局部 95% 安装角不确定度估计') < output.index('正在备份原配置')
+
+
+def test_offline_replay_uses_saved_wide_profile_without_new_required_files(tmp_path, monkeypatch):
+    from tools.sensor_mount_calibration.profiles import get_profile
+    profile = get_profile('wide')
+    source = tmp_path/'source'
+    source.mkdir()
+    records = synthetic_records(profile.motion)
+    raw = source/'raw.jsonl'
+    raw.write_text(''.join(json.dumps(r)+'\n' for r in records))
+    (source/'metadata.json').write_text(json.dumps({'calibration_profile': profile.as_dict()}))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('offline must not open devices or request confirmation')
+    monkeypatch.setattr(hardware_module, 'Hardware', forbidden)
+    monkeypatch.setattr(cli, 'OperatorKeyboard', forbidden)
+    root = tmp_path/'replay'
+    assert cli.main(['--offline', str(raw), '--data-dir', str(root)]) == 0
+    run, = root.iterdir()
+    result = json.loads((run/'result.json').read_text())
+    assert result['calibration_profile'] == profile.as_dict()
+    assert result['configuration_saved'] is False
+    assert result['estimated_rotation_95_bound_deg'] < 5.
+
+
+def test_wide_does_not_relabel_small_angle_records_as_large_coverage(tmp_path):
+    raw = tmp_path/'raw.jsonl'
+    raw.write_text(''.join(json.dumps(r)+'\n' for r in synthetic_records()))
+    root = tmp_path/'replay'
+    assert cli.main(['--offline', str(raw), '--profile', 'wide', '--data-dir', str(root)]) == 2
+    run, = root.iterdir()
+    assert not (run/'result.json').exists()
+    metadata = json.loads((run/'metadata.json').read_text())
+    assert 'coverage' in metadata['reason']
