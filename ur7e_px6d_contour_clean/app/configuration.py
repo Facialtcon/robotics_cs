@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
 from pathlib import Path
 
 import numpy as np
 
 from calibration.scan_calibration import (load_scan_calibration, resolve_calibration_path,
                                           validate_calibration_constraints)
+from calibration.probe_alignment import downward_probe_orientation, probe_tilt_deg, unit_probe_axis
 from config.loader import runtime_robot_config
 from policy.continuous_tracking import validate_config
 from robot.rtde_controller import URRTDEController, RobotError, validate_execution_configuration, check_continuous_xy, CONTINUOUS_TRIP_FACTOR, CONTINUOUS_HARD_FACTOR, CONTINUOUS_DEBOUNCE_SEC, CONTINUOUS_DEBOUNCE_PACKETS
@@ -53,6 +55,24 @@ def prepare_real(config, config_path):
         raise RobotError('scan calibration TCP does not match configured TCP')
     validate_calibration_constraints(calibration, float(config['calibration']['min_direction_calibration_distance']),
                                      float(config['calibration']['max_direction_calibration_z_difference']))
+    config['continuous_saved_calibration'] = copy.deepcopy(calibration)
+    if config['calibration'].get('vertical_probe', True):
+        axis = unit_probe_axis(config['calibration'].get('probe_axis_tcp', [0., 0., 1.]))
+        saved_orientation = list(calibration['fixed_orientation'])
+        orientation = downward_probe_orientation(saved_orientation, axis).tolist()
+        # Preserve measured teach points on disk and in continuous_saved_calibration.
+        # Only this execution's target and hold orientation are derived here.
+        calibration = copy.deepcopy(calibration)
+        calibration['start_tcp_pose'] = list(calibration['start_tcp_pose'][:3]) + orientation
+        calibration['fixed_orientation'] = orientation
+        config['continuous_probe_alignment'] = dict(
+            enabled=True, axis_tcp=axis.tolist(), downward_base=[0., 0., -1.],
+            saved_orientation=saved_orientation, target_orientation=orientation,
+            saved_tilt_deg=probe_tilt_deg(saved_orientation, axis),
+            target_tilt_deg=probe_tilt_deg(orientation, axis),
+            method='minimum_rotation_to_base_minus_z', base_level_assumed=True)
+    else:
+        config.pop('continuous_probe_alignment', None)
     validate_return_configuration(config, calibration['start_tcp_pose'])
     for name in ('return_lift_distance', 'return_speed', 'return_vertical_speed', 'return_acceleration',
                  'return_force_limit', 'return_torque_limit', 'return_position_tolerance',
@@ -167,6 +187,7 @@ def calibration_summary(config):
                 scan_direction_reference_tcp_pose=scan['direction_reference_tcp_pose'],
                 scan_direction_xy=scan['scan_direction_xy'],
                 fixed_z=scan['fixed_z'], fixed_orientation=scan['fixed_orientation'],
+                probe_alignment=config.get('continuous_probe_alignment'),
                 sandbox_raw_corners=config['continuous_workspace_calibration']['raw_points'],
                 execution_envelope=config['continuous_execution_envelope'],
                 loaded_configuration_sha256=config['continuous_loaded_configuration_sha256'])

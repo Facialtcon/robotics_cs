@@ -262,6 +262,8 @@ class URRTDEController:
         self._speed_guard_since = self._speed_guard_stamp = None
         self._speed_guard_count = 0
         self.speed_guard_diagnostics = {}
+        self.speedl_count = 0
+        self.last_speedl = {}
 
     def set_continuous_phase(self, phase, *, stop_confirmed=False):
         """Select execution limits; braking retains the preceding envelope.
@@ -553,11 +555,15 @@ class URRTDEController:
             self._stop_pending = False
             self.stop_state = 'RUNNING'
             self._stop_method = "speedStop"
+            self.speedl_count += 1
+            self.last_speedl = dict(sequence=self.speedl_count, kind='motion',
+                velocity=list(velocity), host_monotonic=time.monotonic(), accepted=None)
             accepted = self.control.speedL(
                 velocity,
                 float(self.config["speed_acceleration"]),
                 float(duration),
             )
+            self.last_speedl['accepted'] = accepted
             if accepted is False:
                 raise RobotError("UR controller rejected speedL")
         except Exception as exc:
@@ -747,8 +753,12 @@ class URRTDEController:
         if nonblocking and self._stop_method == 'speedStop':
             report['braking_method'] = 'speedL_zero'
             try:
+                self.speedl_count += 1
+                self.last_speedl = dict(sequence=self.speedl_count, kind='braking',
+                    velocity=[0.] * 6, host_monotonic=time.monotonic(), accepted=None)
                 value = self.control.speedL([0.] * 6, float(self.config['stop_deceleration']),
                                             float(self.config.get('observation_period_sec', .01)))
+                self.last_speedl['accepted'] = value
                 report['braking_return_value'] = value
                 report['api_anomaly'] = value is not True
             except Exception as exc:

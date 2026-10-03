@@ -91,15 +91,18 @@ def test_past_jitter_does_not_inflate_next_step_at_search_edge(real_config):
     assert command.move and policy.state == State.TARGET_SEARCH
 
 
-def test_direction_and_force_rate_warnings_do_not_end_tracking(real_config):
+def test_force_rate_warning_does_not_disable_direction_reversal_stop(real_config):
     policy = ContinuousTrackingPolicy(real_config)
     for i in range(20):
         tick(policy, i*.01, raw=Wrench(1.5, 0, 0, 0, 0, 0))
     assert policy.state == State.CONTINUOUS_TRACKING
     tick(policy, .2, raw=Wrench(2., 0, 0, 0, 0, 0))
-    tick(policy, .21, raw=Wrench(-1.5, 0, 0, 0, 0, 0))
     assert policy.state == State.CONTINUOUS_TRACKING and policy.stop_reason is None
-    assert {'force_rate', 'direction_quality', 'STOP_DIRECTION_REVERSAL'} <= policy.diagnostics.keys()
+    assert 'force_rate' in policy.diagnostics
+    command = tick(policy, .21, raw=Wrench(-1.5, 0, 0, 0, 0, 0))
+    assert policy.state == State.STOP and not command.move
+    assert policy.stop_reason.value == 'STOP_DIRECTION_REVERSAL'
+    assert not tick(policy, .22, raw=Wrench(1.5, 0, 0, 0, 0, 0)).move
 
 
 def test_tracking_admittance_numerics_are_unchanged(real_config):

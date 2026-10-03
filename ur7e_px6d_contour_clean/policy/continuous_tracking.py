@@ -195,6 +195,16 @@ class ContinuousTrackingPolicy:
         validate_config(config)
         self.c, self.p = {**UNLOAD_DEFAULTS, **config['continuous_tracking']}, dict(config['policy'])
         self.real_execution = bool(config.get('continuous_real_execution'))
+        self.force_transform_status = dict(config.get('force_transform_status') or {})
+        # Configuration is known before any device connects. Do not let SEARCH
+        # move and only discover a missing installation when contact is made.
+        if self.real_execution and self.force_transform_status.get('available') is False:
+            raise ValueError('Base force transform unavailable before motion: '
+                f"{self.force_transform_status.get('reason', 'unknown installation or TCP orientation')}. "
+                'Set preprocessing.coordinate_transform.rotation_sensor_to_tool '
+                '(measured PX6D axes in active TCP coordinates), or a measured '
+                'rotation_sensor_to_base together with its reference_tool_orientation. '
+                'A placeholder identity and the probe axis alone are not installation calibration.')
         self.diagnostics = {}
         self.search_geometry = config.get('continuous_search_geometry')
         self.execution_settled = None
@@ -334,10 +344,6 @@ class ContinuousTrackingPolicy:
                            target_direction_xy=self.contact_direction.copy(), tangent_xy=self.tangent.copy()))
 
     def request_stop(self, now, pose, reason, *, event='SAFETY_STOP', code=None):
-        if self.real_execution and code in (TerminationReason.STOP_DIRECTION_REVERSAL,
-                TerminationReason.STOP_DIRECTION_UNCONFIRMED, TerminationReason.STOP_DIRECTION_NO_PROGRESS):
-            self.diagnostics[code.value] = f'WARNING: {reason}'
-            return
         if self.state != State.STOP:
             self.state, self.reason, self.stop_reason = State.STOP, reason, code
             self._event(now, pose, event)
@@ -433,9 +439,25 @@ class ContinuousTrackingPolicy:
                     # not new attempts and can never extend the timeout.
                     magnitude = 0.
             if magnitude >= float(self.c['direction_min_filtered_force']) and coherence >= float(self.c['direction_min_coherence']):
-                self._filtered, self._filtered_magnitude = mean, float(np.mean(np.linalg.norm(values, axis=1)))
-                self.contact_direction, self.tangent, _ = control_directions(
+                candidate, tangent, _ = control_directions(
                     mean, self.c['force_direction_sign'], self.follow_hand)
+                if (self.real_execution and self.state == State.FIRST_CONTACT and
+                        float((robot.pose[:2]-self._start_pose[:2]) @ self.search_direction) > 1e-6):
+                    # Search displacement is a consistency check, not a normal
+                    # calibration. A pressing normal opposing the approach that
+                    # established contact cannot authorize inward feedback. Do
+                    # not flip the sign, rotate force data, or invent a normal.
+                    alignment = float(candidate @ self.search_direction)
+                    self.diagnostics['first_contact_search_normal_alignment'] = alignment
+                    self.diagnostics['first_contact_search_normal_angle_deg'] = float(
+                        np.rad2deg(np.arccos(np.clip(alignment, -1., 1.))))
+                    if alignment <= 0.:
+                        self.request_stop(now, robot.pose,
+                            'contact pressing direction contradicts observed search approach; check force frame/sign',
+                            code=TerminationReason.STOP_DIRECTION_UNCONFIRMED)
+                        return False
+                self._filtered, self._filtered_magnitude = mean, float(np.mean(np.linalg.norm(values, axis=1)))
+                self.contact_direction, self.tangent = candidate, tangent
                 self._previous_measurement = vector / self.fxy
                 self.direction_valid, self.direction_confidence = True, coherence
                 self.filtered_fxy = magnitude
@@ -443,7 +465,7 @@ class ContinuousTrackingPolicy:
                 return True
         if now-self._confirm_started >= float(self.c['confirmation_timeout_sec']):
             direction = self.state == State.DIRECTION_RECONFIRM
-            if self.real_execution:
+            if self.real_execution and not direction:
                 self.diagnostics['contact_direction_confirmation'] = 'WARNING: contact/direction confirmation taking longer than configured interval'
             else:
                 self.request_stop(now, robot.pose, 'direction reconfirmation timeout' if direction else 'contact/standstill confirmation timeout',
@@ -469,8 +491,7 @@ class ContinuousTrackingPolicy:
                 self.estimate_residual_deg > float(self.c['direction_reconfirm_residual_deg']) or
                 self.direction_rate_filtered_deg_s > float(self.c['direction_reconfirm_rate_deg_s'])):
             self._begin_direction_reconfirm(now, pose, 'measurement change / estimate lag')
-            if not self.real_execution:
-                return False
+            return False
         alpha = float(self.c['force_direction_filter_alpha']) ** (self.dt / self.nominal_dt)
         self._filtered = vector.copy() if self._filtered is None else alpha*self._filtered+(1-alpha)*vector
         self._filtered_magnitude = alpha*self._filtered_magnitude+(1-alpha)*self.fxy
@@ -479,8 +500,7 @@ class ContinuousTrackingPolicy:
         if (self.filtered_fxy < float(self.c['direction_min_filtered_force'])
                 or self.direction_confidence < float(self.c['direction_min_coherence'])):
             self._begin_direction_reconfirm(now, pose, 'low filtered magnitude / direction coherence')
-            if not self.real_execution or self.filtered_fxy == 0:
-                return False
+            return False
         candidate, _, _ = control_directions(self._filtered, self.c['force_direction_sign'], self.follow_hand)
         angle = angle_between(self.contact_direction, candidate)
         self.direction_delta_deg = float(np.rad2deg(angle))
@@ -524,9 +544,6 @@ class ContinuousTrackingPolicy:
                               code=TerminationReason.STOP_DIRECTION_REVERSAL)
 
     def _begin_direction_reconfirm(self, now, pose, cause):
-        if self.real_execution:
-            self.diagnostics['direction_quality'] = f'WARNING: {cause}'
-            return
         if self._direction_attempt_pose is None or np.linalg.norm(pose[:2]-self._direction_attempt_pose) >= float(self.c['direction_min_progress']):
             self.direction_reconfirm_attempts = 0
             self._direction_attempt_pose = pose[:2].copy()
@@ -550,8 +567,7 @@ class ContinuousTrackingPolicy:
         if now-self._confirm_started+1e-12 >= float(self.c['confirmation_timeout_sec']):
             self.request_stop(now, robot.pose, 'direction reconfirmation timeout',
                               code=TerminationReason.STOP_DIRECTION_UNCONFIRMED)
-            if not self.real_execution:
-                return self._command(robot.pose)
+            return self._command(robot.pose)
         if self.fxy < float(self.c['contact_lost_threshold']):
             if self._lost is None:
                 self._lost = now
@@ -591,16 +607,12 @@ class ContinuousTrackingPolicy:
                 return False
         if self.direction_resume_progress_m < -float(self.c['boundary_margin']):
             self.request_stop(now, pose, 'direction restart backward progress', code=TerminationReason.STOP_DIRECTION_NO_PROGRESS)
-            if self.real_execution:
-                self._direction_resume_started = None  # Pause once, then use the existing live estimate.
             return False
         if self.direction_resume_progress_m >= float(self.c['direction_resume_distance']):
             self._direction_resume_started = None
             self._event(now, pose, 'DIRECTION_RESUME_VERIFIED')
         elif now-self._direction_resume_started >= float(self.c['direction_resume_sec']):
             self.request_stop(now, pose, 'direction restart insufficient progress', code=TerminationReason.STOP_DIRECTION_NO_PROGRESS)
-            if self.real_execution:
-                self._direction_resume_started = None
             return False
         return True
 
@@ -908,7 +920,8 @@ class ContinuousTrackingPolicy:
                 if self.state == State.STOP:
                     return self._command(pose)
             if not self._direction(now, pose, vector):
-                self.tangent_limit_reason = 'DIRECTION_CONFIRMATION'
+                if self.state != State.STOP:
+                    self.tangent_limit_reason = 'DIRECTION_CONFIRMATION'
                 self.stop_requested = True
                 return self._command(pose)
             self._remember(now, pose)  # Includes reliable 0.5--1 N samples.

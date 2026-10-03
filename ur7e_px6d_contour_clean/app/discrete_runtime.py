@@ -47,7 +47,12 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         settings = config['sensor']
         reader = reader_factory(settings['serial_port'], settings['baudrate'], settings['timeout_sec'],
                                 settings['poll_rate_hz'], settings['startup_delay_sec'])
-        preprocessing = WrenchPreprocessor.from_config(config['preprocessing'])
+        preprocessing = WrenchPreprocessor.from_config(config['preprocessing'],
+            tool_orientation=start[3:] if execute else None)
+        config['force_transform_status'] = preprocessing.force_transform_status
+        config.setdefault('force_display', {}).update(
+            frame=preprocessing.force_transform_status['output_frame'],
+            base_frame_confirmed=False, physical_sign_confirmed=False)
         policy_config = dict(config['policy'])
         if not execute:
             for key in ('max_boundary_points', 'max_runtime_sec', 'probe_direction_sign'):
@@ -67,6 +72,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         with OperatorKeyboard() as keyboard:
             if execute:
                 startup_return_done = startup_scan(config, start, controller, reader, logger, keyboard.poll, confirm=keyboard.read_line)
+                preprocessing.set_tool_orientation(controller.read_state().pose[3:])
                 keyboard.on_wait = lambda: hold_startup_confirmation(config, start, controller)
             baseline = config['preprocessing']['baseline']
             if baseline['capture_on_start']:
@@ -106,9 +112,13 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                         policy.request_stop(reason)
                     break
                 raw = reader.read_wrench()
-                processed = preprocessing.process(raw)
                 robot = controller.read_state()
-                termination.observe(policy=policy, robot=robot, raw=raw, processed=processed, phase='SCAN')
+                if execute:
+                    preprocessing.set_tool_orientation(robot.pose[3:])
+                processed = preprocessing.process(raw)
+                frame = preprocessing.force_transform_status['output_frame']
+                termination.observe(policy=policy, robot=robot, raw=raw, processed=processed,
+                                    phase='SCAN', processed_force_frame=frame)
                 command = policy.update(cycle_start, raw, processed, robot)
                 reason = command.reason
                 if command.move:
@@ -119,7 +129,8 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 elif not execute or not controller.standstill_confirmed:
                     controller.stop()
                 logger.log_sample(cycle_start, raw, processed, robot, command,
-                                  policy.current_target_direction, policy.current_tangent)
+                                  policy.current_target_direction, policy.current_tangent,
+                                  extra={'processed_force_frame': frame})
                 for i, (items, write) in enumerate(((policy.boundary_points, logger.log_boundary),
                     (policy.policy_waypoints, logger.log_waypoint), (policy.boundary_recovery_rays, logger.log_recovery_ray))):
                     while counts[i] < len(items):

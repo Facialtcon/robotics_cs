@@ -104,7 +104,7 @@ class SimulationSession:
         self.robot = SimulatedRobot(self.scene['start_point'], self.dt, self.scene['container'], **dynamics)
         self.target = create_target(self.scene)
         self.sensor = SimulatedForceSensor(self.target, self.scene['force_model'])
-        self.preprocessor = WrenchPreprocessor.from_config(self.config['preprocessing'])
+        self.preprocessor = WrenchPreprocessor.from_config(self.config['preprocessing'], synthetic=True)
         self._previous_xy = self.robot.pose[:2].copy()
 
     def capture_bias(self, poll=lambda: None, observe=lambda **kw: None):

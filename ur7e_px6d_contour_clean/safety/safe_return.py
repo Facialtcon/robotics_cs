@@ -82,8 +82,8 @@ def return_trajectory(config, current, target):
     lifted, above = current.copy(), target.copy()
     lifted[2] = above[2] = z
     aligned = lifted.copy()
-    # Scan P0 orientation equals scan_calibration.fixed_orientation (checked
-    # when loading calibration). Manual RESET retains its saved target pose.
+    # The scan target may be derived by vertical alignment. Keep this exact
+    # target through rotation, transit and descent. RESET retains its saved pose.
     aligned[3:] = target[3:]
     segments = [('VERTICAL_RETREAT', lifted, s['return_vertical_speed']),
                 ('ALIGN_PROBE_ORIENTATION', aligned, s['return_vertical_speed']),
@@ -115,21 +115,30 @@ def print_return_plan(config, current, target, segments, *, scan=False):
     if error <= float(config['safe_return']['return_orientation_tolerance']):
         print('ALIGN_PROBE_ORIENTATION: already aligned; skipped')
     elif scan:
-        print('Probe will be aligned to the calibrated scan orientation at safe height.')
+        if config.get('continuous_probe_alignment'):
+            print('Probe will be aligned vertically toward Base -Z at safe height.')
+        else:
+            print('Probe will be aligned to the calibrated scan orientation at safe height.')
     else:
         print('Probe will be aligned to the saved return orientation at safe height.')
 
 
 class PX6DForceMonitor:
     """Optional force input to the one return executor, also used while braking."""
-    def __init__(self, config, reader, preprocessor):
+    def __init__(self, config, reader, preprocessor, *, raw_only=False):
         self.config, self.reader, self.preprocessor = config, reader, preprocessor
+        self.raw_only = raw_only
+        self.force_frame = ('Sensor' if raw_only else
+            getattr(preprocessor, 'force_transform_status', {}).get('output_frame', 'configured_output_frame'))
         self.raw = self.processed = None
         self.diagnostics = {}
 
     def sample(self):
         self.raw = self.reader.read_wrench()
-        self.processed = self.preprocessor.process(self.raw)
+        # Orientation-changing startup has no valid final-pose bias yet. Use
+        # rotation-invariant raw norms during the return, never zero in contact
+        # or label a wrench in the old orientation as a new Base measurement.
+        self.processed = self.raw if self.raw_only else self.preprocessor.process(self.raw)
         if not np.isfinite(self.raw.array()).all() or not np.isfinite(self.processed.array()).all():
             raise ReturnAborted('nonfinite return wrench')
         s, p = self.config['safe_return'], self.config['policy']
@@ -141,7 +150,7 @@ class PX6DForceMonitor:
             magnitude = np.linalg.norm(value)
             real = self.config.get('continuous_real_execution', False)
             if magnitude > float(limit) or (real and label.startswith('absolute raw') and magnitude >= float(limit)):
-                if real and label.startswith('return '):
+                if real and label.startswith('return ') and not self.raw_only:
                     self.diagnostics[label] = f'WARNING: processed {label} {magnitude:g} exceeds {limit:g}'
                     continue
                 raise ReturnAborted(f'{label} limit exceeded')
@@ -182,7 +191,8 @@ class SafeReturnExecutor:
                     contact_flag=False, possible_corner=False, reason=self.phase)
                 self.logger.log_sample(started, self.force_monitor.raw, self.force_monitor.processed,
                                        state, command, None, None,
-                                       extra=({'software_warnings': json.dumps(dict(return_monitor=self.force_monitor.diagnostics))}
+                                       extra=({'software_warnings': json.dumps(dict(return_monitor=self.force_monitor.diagnostics)),
+                                               'processed_force_frame': self.force_monitor.force_frame}
                                               if self.config.get('continuous_real_execution') else None))
             if hasattr(self.logger, 'check_health'):
                 self.logger.check_health()
@@ -272,10 +282,7 @@ class SafeReturnExecutor:
                     started = time.monotonic()
                     state = self.observe()
                     if started >= deadline:
-                        if self.config.get('continuous_real_execution'):
-                            self.controller.diagnostics['return_progress'] = f'WARNING: {self.phase} taking longer than configured interval'
-                        else:
-                            raise ReturnAborted(f'{self.phase} timed out')
+                        raise ReturnAborted(f'{self.phase} timed out')
                     at_target = self._at_target(state)
                     # Position tolerance can be reached while moveL is still
                     # decelerating. Do not cancel that trajectory with stopL.
@@ -313,6 +320,8 @@ class SafeReturnExecutor:
             payload = dict(return_status=result.status, return_abort_reason=result.abort_reason,
                 stop_pose=result.stop_pose, final_pose=result.final_pose, return_target=self.start_pose.tolist(),
                 return_target_label=self.target_label, force_monitor=self.force_monitor is not None,
+                return_force_frame=None if self.force_monitor is None else self.force_monitor.force_frame,
+                return_bias_captured=False if self.force_monitor is not None and self.force_monitor.raw_only else None,
                 stop_requests=self.controller.stop_history,
                 software_warnings=dict(self.controller.diagnostics))
             if hasattr(self.logger, 'write_json'):

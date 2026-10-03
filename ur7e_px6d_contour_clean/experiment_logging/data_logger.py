@@ -19,7 +19,7 @@ SAMPLE_FIELDS = [
     "timestamp_utc", "monotonic_sec",
     "raw_fx", "raw_fy", "raw_fz", "raw_tx", "raw_ty", "raw_tz",
     "dfx", "dfy", "dfz", "dtx", "dty", "dtz",
-    "fxy", "force_angle_rad",
+    "fxy", "force_angle_rad", "processed_force_frame",
     "interaction_direction_x", "interaction_direction_y",
     "target_direction_x", "target_direction_y",
     "estimated_normal_x", "estimated_normal_y", "tangent_x", "tangent_y",
@@ -80,6 +80,7 @@ class ExperimentLogger:
             raise ValueError("sample field names must be unique")
         self.run_dir = create_run(mode, strategy, config_source or config.get('_config_source'), data_root=root)
         self.metadata = read_metadata(self.run_dir)
+        self.processed_force_frame = config.get('force_display', {}).get('frame', 'configured_output_frame')
         self.termination = TerminationRecorder().bind(self.run_dir)
         with (self.run_dir / "config_snapshot.yaml").open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
@@ -115,7 +116,8 @@ class ExperimentLogger:
     ) -> None:
         if self.termination is not None:
             self.termination.observe(robot=robot, raw=raw, processed=processed,
-                                     command=command, timestamp=monotonic_sec)
+                command=command, timestamp=monotonic_sec,
+                processed_force_frame=(extra or {}).get('processed_force_frame', self.processed_force_frame))
         features = extract_force_features(processed)
         raw_values = raw.array()
         processed_values = processed.array()
@@ -138,6 +140,7 @@ class ExperimentLogger:
             **dict(zip(("dfx", "dfy", "dfz", "dtx", "dty", "dtz"), processed_values)),
             "fxy": features.fxy,
             "force_angle_rad": features.force_angle,
+            "processed_force_frame": self.processed_force_frame,
             "interaction_direction_x": interaction[0],
             "interaction_direction_y": interaction[1],
             "target_direction_x": target_direction[0],
@@ -166,7 +169,10 @@ class ExperimentLogger:
             "reason": command.reason,
         }
         if extra:
-            if set(extra) & set(SAMPLE_FIELDS):
+            # Return may log raw Sensor coordinates while the scan logs Base.
+            # Only coordinate provenance may override its default; measurements,
+            # poses and timestamps remain protected from extra-field overwrite.
+            if set(extra) & (set(SAMPLE_FIELDS) - {'processed_force_frame'}):
                 raise ValueError("extra sample data cannot overwrite standard fields")
             row.update(extra)
         self._samples.writerow(row)

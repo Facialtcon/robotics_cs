@@ -26,9 +26,18 @@ preprocessing:
     condition: unloaded_stationary_air  # Do not capture this while touching target.
   gravity_wrench_sensor: [0, 0, 0, 0, 0, 0]  # MUST CALIBRATE at fixed orientation
   coordinate_transform:
+    # Supply measured installation R_TS: its columns are PX6D +X/+Y/+Z axes
+    # expressed in the active TCP frame (not the flange frame). Or supply R_BS
+    # together with the actual TCP rotvec (rad) at which R_BS was measured.
+    # Neither is inferred from TCP offset/pose or the probe shaft = TCP +Z.
+    rotation_sensor_to_tool: null
+    reference_tool_orientation: null
     # Unverified identity, NOT a measured calibration. R_BS maps sensor -> Base
     # at the saved fixed scan orientation. R_BS = R_BT @ R_TS only when the
     # sensor -> tool mounting rotation R_TS has independently been measured.
+    # Without either input above, output is sensor_uncalibrated (not Base);
+    # real continuous execution reports a configuration error BEFORE connecting
+    # devices or starting the lifted return/SEARCH. No verification file is required.
     # Never infer R_TS from TCP pose; the optional direction tool only observes.
     rotation_sensor_to_base:
       - [1, 0, 0]
@@ -126,6 +135,8 @@ logging:
 
 calibration:
   file: scan_calibration.yaml
+  vertical_probe: true           # derive scan attitude with the probe axis along Base -Z; base must be level
+  probe_axis_tcp: [0, 0, 1]      # operator confirmed physical probe shaft = TCP +Z; do not alter TCP offset
   min_direction_calibration_distance: 0.02
   max_direction_calibration_z_difference: 0.005
 
@@ -208,7 +219,7 @@ continuous_tracking:
   direction_slow_residual_deg: 10.0
   direction_reconfirm_residual_deg: 30.0
   direction_reconfirm_rate_deg_s: 360.0
-  direction_reversal_deg: 150.0   # real: warning; simulation retains the original stop
+  direction_reversal_deg: 150.0   # stop ambiguous reversal in real and simulated tracking; never auto-flip
   direction_confirm_hold_sec: 0.15
   direction_confirm_spread_deg: 8.0
   direction_reconfirm_max_attempts: 3 # bounded retries without 2 mm net progress

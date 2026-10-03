@@ -29,7 +29,8 @@ def direction_values(processed):
 
 
 def run(config_path=ROOT/'config.yaml', *, reader_factory=PX6DReader,
-        poll=lambda: None, samples=None, bias_samples=None, display_hz=5., emit=print, confirm=None):
+        poll=lambda: None, samples=None, bias_samples=None, display_hz=5., emit=print, confirm=None,
+        tool_orientation=None):
     config = load_config(config_path)
     if samples is not None and samples <= 0:
         raise ValueError('samples must be positive')
@@ -39,14 +40,28 @@ def run(config_path=ROOT/'config.yaml', *, reader_factory=PX6DReader,
         bias_samples = int(config['preprocessing']['baseline']['sample_count'])
     if bias_samples < 0:
         raise ValueError('bias_samples must be nonnegative')
-    processor = WrenchPreprocessor.from_config(config['preprocessing'])
+    # This is an operator-supplied pose, never a claimed robot measurement.
+    # Imports stay inside run so --help does not load robot interfaces.
+    if tool_orientation is None:
+        from calibration.scan_calibration import load_scan_calibration, resolve_calibration_path
+        from calibration.probe_alignment import downward_probe_orientation
+        saved = load_scan_calibration(resolve_calibration_path(config_path, config['calibration']['file']))
+        tool_orientation = saved['fixed_orientation']
+        if config['calibration'].get('vertical_probe', True):
+            tool_orientation = downward_probe_orientation(tool_orientation,
+                config['calibration'].get('probe_axis_tcp', [0, 0, 1]))
+    processor = WrenchPreprocessor.from_config(config['preprocessing'], tool_orientation=tool_orientation)
     sensor = config['sensor']
     reader = reader_factory(sensor['serial_port'], sensor['baudrate'], sensor['timeout_sec'],
                             sensor['poll_rate_hz'], sensor['startup_delay_sec'])
     sign = config['continuous_tracking']['force_direction_sign']
     emit('PX6D only: no UR connection or robot motion; config is not modified.')
-    emit('Values use the configured rotation_sensor_to_base; confirm the actual Base axes on site.')
-    emit(f'rotation_sensor_to_base = {processor.rotation_sensor_to_output.tolist()}')
+    emit(f'Assumed tool orientation (not measured by this tool): {np.asarray(tool_orientation).tolist()}')
+    emit(f'Force transform: {processor.force_transform_status}')
+    if not processor.force_transform_status['available']:
+        emit('安装旋转未知：仅显示 sensor 分量，不能据此声称 Base 力或卸力方向。工具不修改配置。')
+    else:
+        emit(f'rotation_sensor_to_base = {processor.rotation_sensor_to_output.tolist()}')
     emit(f'force_direction_sign = {sign}')
     period = 1./float(sensor['poll_rate_hz'])
     def read():
@@ -61,7 +76,7 @@ def run(config_path=ROOT/'config.yaml', *, reader_factory=PX6DReader,
             raise KeyboardInterrupt
         reader.connect()
         if bias_samples:
-            emit(f'Keep the probe unloaded and stationary at the saved scan orientation: capturing {bias_samples} bias samples.')
+            emit(f'Keep the probe unloaded and stationary at the displayed final orientation: capturing {bias_samples} bias samples.')
             baseline = []
             for _ in range(bias_samples):
                 started = time.monotonic()
@@ -82,13 +97,16 @@ def run(config_path=ROOT/'config.yaml', *, reader_factory=PX6DReader,
             count += 1
             if last_display is None or started-last_display >= 1./display_hz or count == samples:
                 signed = sign*normal
-                n, tangent, unload = control_directions(processed.force, sign, config['policy']['follow_hand'],
-                    minimum_force=config['continuous_tracking']['direction_min_force'])
                 emit(f'sensor debiased N={(raw.force-processor.zero_bias_sensor[:3]).tolist()}  '
-                     f'Base processed N={processed.force.tolist()}  unloading -n={unload.tolist()}  t={tangent.tolist()}')
+                     f'{processor.force_transform_status["output_frame"]} processed N={processed.force.tolist()}')
+                if processor.force_transform_status['available']:
+                    n, tangent, unload = control_directions(processed.force, sign, config['policy']['follow_hand'],
+                        minimum_force=config['continuous_tracking']['direction_min_force'])
+                    emit(f'unloading -n={unload.tolist()}  t={tangent.tolist()}')
                 emit(f'processed Fx={processed.fx:.6f} N  processed Fy={processed.fy:.6f} N  '
                      f'Fxy={fxy:.6f} N  normalized=[{normal[0]:.6f}, {normal[1]:.6f}]  '
-                     f'configured n=[{signed[0]:.6f}, {signed[1]:.6f}]')
+                     + (f'configured n=[{signed[0]:.6f}, {signed[1]:.6f}]' if processor.force_transform_status['available']
+                      else 'configured n=unavailable (sensor -> Base mounting unknown)'))
                 last_display = started
             time.sleep(max(0., period-(time.monotonic()-started)))
         return 0
@@ -108,10 +126,13 @@ def main():
     parser.add_argument('--samples', type=int, help='optional finite number of displayed-phase samples')
     parser.add_argument('--bias-samples', type=int, help='default: configured count; 0 skips software zero')
     parser.add_argument('--display-hz', type=float, default=5., help='terminal refresh rate (sensor rate unchanged)')
+    parser.add_argument('--tool-orientation', type=float, nargs=3, metavar=('RX', 'RY', 'RZ'),
+                        help='known actual TCP rotation vector [rad]; default is the derived final scan target, not a measurement')
     args = parser.parse_args()
     with OperatorKeyboard() as keyboard:
         return run(args.config, poll=keyboard.poll, samples=args.samples,
-                   bias_samples=args.bias_samples, display_hz=args.display_hz, confirm=keyboard.read_line)
+                   bias_samples=args.bias_samples, display_hz=args.display_hz, confirm=keyboard.read_line,
+                   tool_orientation=args.tool_orientation)
 
 
 if __name__ == '__main__':

@@ -17,12 +17,19 @@ def args(tmp_path, execute=True):
 
 
 def prepare(config, monkeypatch, *, watchdog=False):
+    from calibration.probe_alignment import downward_probe_orientation
+    target = load_scan_calibration(PROJECT_ROOT/'scan_calibration.yaml')['start_tcp_pose']
+    target[3:] = downward_probe_orientation(target[3:]).tolist()
     original = runtime.load_config
     def load(path):
         c=original(path)
         c['preprocessing']['baseline']['sample_count']=2
         c['safe_return']['startup_bias_sample_count']=2
         c['continuous_tracking']['continuous_require_watchdog']=watchdog
+        # These SDK/sensor doubles emit vectors already in the model's Base
+        # frame at the final pose. This is explicit synthetic setup, not a
+        # calibration supplied for the real installation in config.yaml.
+        c['preprocessing']['coordinate_transform']['reference_tool_orientation'] = list(target[3:])
         return c
     monkeypatch.setattr(runtime,'load_config',load)
     monkeypatch.setattr(runtime,'OperatorKeyboard',Keyboard)
@@ -44,7 +51,6 @@ def prepare(config, monkeypatch, *, watchdog=False):
         return None
     monkeypatch.setattr(Keyboard, '__enter__', enter)
     monkeypatch.setattr(Keyboard, 'poll', poll)
-    target=load_scan_calibration(PROJECT_ROOT/'scan_calibration.yaml')['start_tcp_pose']
     return target
 
 
@@ -84,7 +90,7 @@ def test_cancel_before_control_is_clean_exit(config,monkeypatch,tmp_path):
     assert d.control_count==0
 
 
-@pytest.mark.parametrize('stage', ['return_bias', 'return_motion', 'scan_bias', 'scan_motion'])
+@pytest.mark.parametrize('stage', ['return_motion', 'scan_bias', 'scan_motion'])
 def test_each_startup_action_requires_separate_enter(config, monkeypatch, tmp_path, stage):
     target = prepare(config, monkeypatch)
     pose = np.array(target)
@@ -98,7 +104,7 @@ def test_each_startup_action_requires_separate_enter(config, monkeypatch, tmp_pa
                    'scan_bias' if '扫描零偏' in prompt else 'scan_motion')
         prompts.append(current)
         assert devices.control_count == 0
-        assert sensor.count == (0 if current.endswith('bias') else 2)
+        assert sensor.count == (2 if current == 'scan_motion' else 0)
         return 'q' if current == stage else ''
     monkeypatch.setattr(Keyboard, 'read_line', read_line)
     assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=lambda *a: sensor) == 0

@@ -94,7 +94,9 @@ class ContinuousLogWriter:
                    target_direction, tangent, *, extra=None):
         if self.termination is not None:
             self.termination.observe(robot=robot, raw=raw, processed=processed,
-                                     command=command, timestamp=monotonic_sec)
+                command=command, timestamp=monotonic_sec,
+                processed_force_frame=(extra or {}).get('processed_force_frame',
+                    getattr(self._logger, 'processed_force_frame', 'configured_output_frame')))
         self._enqueue("log_sample", (monotonic_sec, raw, processed, robot, command,
                                      target_direction, tangent), {"extra": extra})
 

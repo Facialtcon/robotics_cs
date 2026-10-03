@@ -38,22 +38,22 @@ FORCE_CURVES = ('fx', 'fy', 'fxy', 'reference', 'error')
 SPEED_CURVES = ('command', 'actual', 'vt', 'vn')
 
 
-def display_label(key, *, simulated=True, units=True):
+def display_label(key, *, simulated=True, units=True, force_frame=None):
     style = DISPLAY_STYLES[key]
     name = style['name']
     if key == 'boundary' and not simulated:
         name = 'Measured environment resultant'
     if key in ('measured', 'fx', 'fy', 'fxy'):
-        name += '（仿真合成）' if simulated else '（processed Base）'
+        name += '（仿真合成）' if simulated else f'（processed {force_frame or "unknown frame"}）'
     if key == 'raw':
         name += '（模型Base）' if simulated else '（传感器）'
     return name + (f" [{style['unit']}]" if units else '')
 
 
-def line_style(key, *, simulated=True):
+def line_style(key, *, simulated=True, force_frame=None):
     style = DISPLAY_STYLES[key]
     return dict(color=style['color'], linestyle=style['linestyle'],
-                label=display_label(key, simulated=simulated))
+                label=display_label(key, simulated=simulated, force_frame=force_frame))
 
 
 def component_note(*, simulated, enabled):
@@ -138,7 +138,7 @@ class VectorDisplay:
         self.truth_angle, self.truth_note = None, ''
         self.legend, self.legend_keys, self._legend_signature = None, (), None
 
-    def _legend(self, keys, states, *, debug, simulated):
+    def _legend(self, keys, states, *, debug, simulated, force_frame=None):
         if not debug:
             if self.legend is not None: self.legend.set_visible(False)
             return
@@ -149,7 +149,7 @@ class VectorDisplay:
             return FancyArrowPatch((0, height/2), (width, height/2), arrowstyle='->',
                 mutation_scale=fontsize, color=orig_handle.get_edgecolor(),
                 linestyle=orig_handle.get_linestyle(), linewidth=1.5)
-        signature = (tuple(keys), simulated)
+        signature = (tuple(keys), simulated, force_frame)
         if self._legend_signature != signature:
             if self.legend is not None: self.legend.remove()
             handles = []
@@ -158,7 +158,7 @@ class VectorDisplay:
                 kw = dict(color=style['color'], linestyle=style['linestyle'], linewidth=1.3)
                 handles.append(Line2D([], [], **kw) if key in ('executed', 'true_tangent') else
                                FancyArrowPatch((0, 0), (1, 0), arrowstyle='->', **kw))
-            self.legend = self.axis.legend(handles, [display_label(k, simulated=simulated) for k in keys],
+            self.legend = self.axis.legend(handles, [display_label(k, simulated=simulated, force_frame=force_frame) for k in keys],
                 handler_map={FancyArrowPatch: HandlerPatch(patch_func=proxy_arrow)},
                 loc='upper left', ncol=3, mode='expand', borderaxespad=0,
                 prop={'family': CJK_FONT, 'size': 7}, handlelength=2.4,
@@ -166,7 +166,7 @@ class VectorDisplay:
             self.legend_keys, self._legend_signature = tuple(keys), signature
         self.legend.set_visible(True)
         for key, text in zip(keys, self.legend.get_texts()):
-            text.set_text(display_label(key, simulated=simulated) + states.get(key, ''))
+            text.set_text(display_label(key, simulated=simulated, force_frame=force_frame) + states.get(key, ''))
 
     def layout_legend(self):
         """Call after subplot layout. Reserve a band above XY, outside all data."""
@@ -184,12 +184,16 @@ class VectorDisplay:
 
     def draw(self, xy, force, command, actual, tangent, inward, *, valid,
              components=None, physical=None, debug=False, simulated=True,
-             components_enabled=None, true_tangent=False):
+             components_enabled=None, true_tangent=False, force_frame=None):
         if components_enabled is None: components_enabled = components is not None
+        force_frame = force_frame or ('Base' if simulated else 'unknown frame')
         physical = physical or dict(blue=None, red=None, blue_label=display_label('boundary', simulated=simulated, units=False))
         vectors = dict(measured=np.asarray(force)*FORCE_MM_PER_N,
                        command=np.asarray(command)*VELOCITY_MM_PER_MM_S,
                        actual=np.asarray(actual)*VELOCITY_MM_PER_MM_S)
+        if force_frame != 'Base':
+            # Sensor components cannot be drawn on a Base XY position chart.
+            vectors['measured'] = np.full(2, np.nan)
         for name, direction in [('tangent', tangent), ('inward', inward)]:
             direction = np.asarray(direction)
             length = np.linalg.norm(direction)
@@ -235,7 +239,7 @@ class VectorDisplay:
             else:
                 states['true_tangent'] = '（不可用）'
                 self.truth_note = '真实切向对照不可用（无有效模型接触/法向）'
-        self._legend(keys, states, debug=debug, simulated=simulated)
+        self._legend(keys, states, debug=debug, simulated=simulated, force_frame=force_frame)
         self.speed_bar.set_visible(debug); self.speed_label.set_visible(debug)
         lo = np.array([self.axis.get_xlim()[0], self.axis.get_ylim()[0]])
         span = np.array([np.ptp(self.axis.get_xlim()), np.ptp(self.axis.get_ylim())])
@@ -262,6 +266,7 @@ def force_demonstration(row, metadata, *, simulated, previous_velocity=None, com
             return value if np.isfinite(value).all() else None
         except (ValueError,TypeError):return None
     if metadata.get('schema_version')!=1 or metadata.get('frame')!='Base':return result
+    if (row.get('processed_force_frame') or metadata.get('frame')) != 'Base':return result
     if metadata.get('estimate_method')!='quasistatic_planar_balance':return result
     if simulated:
         if (metadata.get('force_convention')!='legacy_inward_normal_to_outward_physical_v1' or

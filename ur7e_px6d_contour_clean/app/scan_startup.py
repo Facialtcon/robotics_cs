@@ -2,7 +2,7 @@
 import time
 import numpy as np
 
-from robot.rtde_controller import RobotError, _orientation_distance
+from robot.rtde_controller import RobotError, _orientation_distance, _rotvec_to_matrix
 from safety.force_guard import raw_safety_reason
 from safety.safe_return import SafeReturnExecutor, PX6DForceMonitor, return_trajectory, print_return_plan
 from sensor.force_preprocess import WrenchPreprocessor
@@ -77,19 +77,42 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
     print(f'当前 TCP: {current.pose.tolist()}\n扫描 P0: {start.tolist()}')
     print(f'初始方向 P0 -> P1: {config["policy"]["search_direction_xy"]}')
     print_return_plan(config, current.pose, start, segments, scan=True)
+    alignment = config.get('continuous_probe_alignment')
+    def tilt(pose):
+        axis = np.asarray(alignment['axis_tcp'], dtype=float)
+        axis /= np.linalg.norm(axis)
+        return float(np.degrees(np.arccos(np.clip((_rotvec_to_matrix(pose[3:]) @ axis) @ [0., 0., -1.], -1., 1.))))
+    def report_alignment(final):
+        if not alignment:
+            return
+        record = dict(alignment, actual_before_tilt_deg=tilt(current.pose),
+            actual_after_tilt_deg=tilt(final.pose), actual_final_tcp_pose=final.pose.tolist(),
+            configured_tcp_offset=controller.config.get('tcp_offset'),
+            reference='Base -Z; physical downward requires a level robot base')
+        print(f"探针轴倾角（相对 Base -Z）: {record['actual_before_tilt_deg']:.4f}° -> "
+              f"{record['actual_after_tilt_deg']:.4f}°；目标 {tilt(start):.4f}°。")
+        if logger is not None:
+            logger.write_json('startup_alignment.json', record)
+    if alignment:
+        print(f'当前探针倾角 {tilt(current.pose):.4f}°，目标 {tilt(start):.4f}°（Base -Z，基座须水平）。')
     if not away:
         print('Startup return: already at P0 and aligned; no return motion required.')
+        report_alignment(current)
         return False
-    if not confirm_enter('探针须脱离目标、静止空载；即将采集启动返回用零偏。', read_line=confirm):
-        raise KeyboardInterrupt('bias not confirmed')
-    fresh = controller.wait_for_standstill(**startup)
-    if (np.linalg.norm(fresh.pose[:3]-current.pose[:3]) > startup_position_tolerance(config) or
-        _orientation_distance(fresh.pose[3:], current.pose[3:]) > config['safe_return']['return_orientation_tolerance']):
-        raise RobotError('robot moved during path confirmation')
     temporary = WrenchPreprocessor.from_config(config['preprocessing'])
-    capture_stationary_bias(config, reader, temporary, controller,
-        config['safe_return']['startup_bias_sample_count'], poll=poll, logger=logger)
-    if not confirm_enter('核对完整返回路径和姿态；即将自动返回扫描 P0。', read_line=confirm):
+    if not alignment:
+        if not confirm_enter('探针须脱离目标、静止空载；即将采集启动返回用零偏。', read_line=confirm):
+            raise KeyboardInterrupt('bias not confirmed')
+        fresh = controller.wait_for_standstill(**startup)
+        if (np.linalg.norm(fresh.pose[:3]-current.pose[:3]) > startup_position_tolerance(config) or
+            _orientation_distance(fresh.pose[3:], current.pose[3:]) > config['safe_return']['return_orientation_tolerance']):
+            raise RobotError('robot moved during path confirmation')
+        capture_stationary_bias(config, reader, temporary, controller,
+            config['safe_return']['startup_bias_sample_count'], poll=poll, logger=logger)
+    prompt = ('探针已脱离目标及颗粒、静止空载，基座水平，抬升后有足够旋转空间；'
+              '核对路径，即将抬升、调正探针并自动返回扫描 P0（此时不采零）。' if alignment else
+              '核对完整返回路径和姿态；即将自动返回扫描 P0。')
+    if not confirm_enter(prompt, read_line=confirm):
         raise KeyboardInterrupt('startup return not confirmed')
     fresh = controller.wait_for_standstill(**startup)
     if (np.linalg.norm(fresh.pose[:3]-current.pose[:3]) > startup_position_tolerance(config) or
@@ -100,7 +123,9 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
         if controller.config.get('continuous_require_watchdog'):
             controller.enable_watchdog(config['continuous_tracking']['watchdog_frequency_hz'])
         result = SafeReturnExecutor(config, start, controller,
-            force_monitor=PX6DForceMonitor(config, reader, temporary), logger=logger, poll=poll).execute()
+            force_monitor=PX6DForceMonitor(config, reader, temporary, raw_only=bool(alignment)),
+            logger=logger, poll=poll).execute()
         if result.status != 'complete':
             raise RobotError(f'startup return aborted: {result.abort_reason}')
+    report_alignment(controller.read_diagnostic_state())
     return away

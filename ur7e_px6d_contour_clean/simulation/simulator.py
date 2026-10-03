@@ -120,7 +120,7 @@ class ContourSimulator:
             self.config["start_point"], self.dt, self.config["container"]
         )
         self.sensor = SimulatedForceSensor(self.target, self.config["force_model"])
-        self.preprocessor = WrenchPreprocessor.from_config(self.config["preprocessing"])
+        self.preprocessor = WrenchPreprocessor.from_config(self.config["preprocessing"], synthetic=True)
         bias_samples = [
             self.sensor.read_wrench(self.robot.pose[:2], np.zeros(2))[0] for _ in range(100)
         ]

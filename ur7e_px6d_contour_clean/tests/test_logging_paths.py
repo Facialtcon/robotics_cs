@@ -26,6 +26,38 @@ def test_no_header_only_optional_tables(config,tmp_path):
         assert not (path/name).exists()
 
 
+@pytest.mark.parametrize('asynchronous', [False, True])
+def test_sample_frame_reaches_csv_and_termination_without_overwriting_measurements(config,tmp_path,asynchronous):
+    import csv
+    import numpy as np
+    from core.models import Wrench, RobotState, PolicyCommand
+    from experiment_logging.continuous_writer import ContinuousLogWriter
+    config['force_display'] = {'frame': 'Base'}
+    logger = ExperimentLogger(tmp_path, config, mode='real', strategy='continuous', workspace_logging=False)
+    recorder = TerminationRecorder()
+    logger.termination = recorder
+    writer = ContinuousLogWriter(logger) if asynchronous else logger
+    pose = np.zeros(6)
+    raw = Wrench(1., 2., 3., 0., 0., 0.)
+    robot = RobotState(1., pose, pose.copy())
+    command = PolicyCommand('RETURN_TO_START', False, np.zeros(2), 0., pose, False, False)
+    try:
+        writer.log_sample(1., raw, raw, robot, command, None, None,
+                          extra={'processed_force_frame': 'Sensor'})
+        recorder.set_stop_reason(detail='test stopped', source='test')
+        assert recorder.record['force_frame'] == 'Sensor'
+        writer.flush()
+        with (logger.run_dir/'samples.csv').open() as stream:
+            row, = csv.DictReader(stream)
+        assert row['processed_force_frame'] == 'Sensor'
+        assert float(row['dfx']) == 1.
+        if not asynchronous:
+            with pytest.raises(ValueError, match='overwrite standard'):
+                logger.log_sample(2., raw, raw, robot, command, None, None, extra={'dfx': 99.})
+    finally:
+        writer.close()
+
+
 def test_failed_startup_has_same_classification(tmp_path):
     recorder=TerminationRecorder(output_root=tmp_path,mode='real',strategy='continuous',config_source=PROJECT_ROOT/'config.yaml')
     recorder.set_stop_reason(detail='bad configuration',source='test')

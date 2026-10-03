@@ -1,7 +1,9 @@
-"""Fixed-orientation force convention shared by control and read-only checks.
+"""Force convention shared by control and read-only checks.
 
 R_BS maps sensor components directly to Base (R_BT @ R_TS if independently
-calibrated). TCP pose alone does not identify R_TS. n points toward increasing
+calibrated), updated from actual TCP orientation. TCP pose alone does not
+identify R_TS; unknown sensor components cannot authorize Base motion.
+n points toward increasing
 contact compression; unloading is -n. Fxy remains a processed resultant,
 including friction/background, not an isolated target normal force.
 """

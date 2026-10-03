@@ -27,7 +27,9 @@ TIMING_FIELDS = ('serial_read_start', 'serial_read_end', 'tcp_read_start', 'tcp_
                  'rtde_device_timestamp', 'rtde_packet_stagnation_sec', 'wrench_host_age_sec',
                  'tcp_host_age_sec', 'command_send_time', 'command_return_time', 'timing_source',
                  'cycle_start_time', 'loop_start_interval_sec', 'runtime_stop_state',
-                 'actual_xyz_speed_mps', 'stop_api_anomaly', 'software_warnings')
+                 'actual_xyz_speed_mps', 'stop_api_anomaly', 'software_warnings',
+                 'speedl_sequence', 'speedl_kind', 'speedl_host_monotonic',
+                 'speedl_vx', 'speedl_vy', 'speedl_accepted')
 
 
 from app.configuration import prepare_real, calibration_summary, site_configuration_digest
@@ -107,6 +109,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         return dict(runtime=dict(diagnostics), controller=dict(getattr(controller, 'diagnostics', {})),
                     policy=dict(getattr(policy, 'diagnostics', {})), logging=getattr(logger, 'diagnostics', {}))
     try:
+        termination.observe(phase='CONFIG_PREFLIGHT')
         config = deepcopy(load_config(args.config))
         config['continuous_provenance'] = git_provenance()
         # Load the saved project calibrations before optional duration shortening;
@@ -135,16 +138,22 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 print('WARNING: --duration applies to simulation only; real continuous execution has no runtime stop budget.', flush=True)
         dt = 1 / float(config["policy"]["control_rate_hz"])
         if args.execute:
-            # Installation/sign are not inferred from the configured transform.
-            # Show processed forces and n/t without claiming physical calibration.
-            config['force_display'] = dict(schema_version=1, frame='Base', force_source='processed_wrench',
+            preprocessor = WrenchPreprocessor.from_config(config["preprocessing"], tool_orientation=start[3:])
+            config['force_transform_status'] = preprocessor.force_transform_status
+            config['force_transform_status']['orientation_source'] = 'planned_scan_target_not_measured'
+            termination.observe(force_transform_status=config['force_transform_status'],
+                processed_force_frame=config['force_transform_status']['output_frame'])
+            # A supplied mounting transform is not a physical verification of
+            # the force sign. Missing installation data must remain explicit.
+            config['force_display'] = dict(schema_version=1,
+                frame=preprocessor.force_transform_status['output_frame'], force_source='processed_wrench',
                 physical_sign_confirmed=False, base_frame_confirmed=False, physical_available=False)
+            print('Force transform: '+json.dumps(config['force_transform_status'], ensure_ascii=False), flush=True)
             policy = ContinuousTrackingPolicy(config)  # validate before any connection
             controller = controller_factory(robot_config)
             s = config["sensor"]
             reader = reader_factory(s["serial_port"], s["baudrate"], s["timeout_sec"],
                                 s["poll_rate_hz"], s["startup_delay_sec"])
-            preprocessor = WrenchPreprocessor.from_config(config["preprocessing"])
         else:
             from simulation.simulator import load_simulation_config
             from simulation.continuous_session import SimulationSession
@@ -163,26 +172,34 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             # cannot end motion; the bounded queue records any dropped samples.
             logger = ContinuousLogWriter(logger, max_pending_sec=float(
                 config['continuous_tracking']['confirmation_timeout_sec']), diagnostic_only=True)
-        termination.observe(policy=policy, processed_force_frame="Base")
+        termination.observe(policy=policy, processed_force_frame=config.get('force_display', {}).get('frame', 'Base'))
         print(f"Continuous run: {logger.run_dir}", flush=True)
         if args.execute:
+            termination.observe(phase='SENSOR_CONNECT')
             reader.connect()
             robot_connect_started = True
+            termination.observe(phase='ROBOT_CONNECT')
             controller.connect(allow_start_away_from_fixed_pose=True)
         else:
             robot = controller.read_state()
         startup_return_done = False
         with OperatorKeyboard() as keyboard:
             if args.execute:
+                termination.observe(phase='STARTUP_RETURN')
                 startup_return_done = startup_scan(config, start, controller, reader, logger,
                                                           keyboard.poll, confirm=keyboard.read_line)
                 robot = check_start(controller, start, config)
+                preprocessor.set_tool_orientation(robot.pose[3:])
+                actual_transform = dict(preprocessor.force_transform_status,
+                    orientation_source='rtde_actual_tcp_at_start', host_monotonic=robot.timestamp)
+                termination.observe(force_transform_status=actual_transform)
+                logger.write_json('force_transform_at_start.json', actual_transform)
                 keyboard.on_wait = lambda: hold_startup_confirmation(config, start, controller)
             baseline = config["preprocessing"].get("baseline", {"capture_on_start": True, "sample_count": 100})
             if not args.execute:
                 session.capture_bias(keyboard.poll, termination.observe)
             elif baseline.get("capture_on_start", True):
-                if not confirm_enter('P0 处探针须脱离目标、静止空载；即将采集扫描零偏。', read_line=keyboard.read_line):
+                if not confirm_enter('最终姿态的 P0 处探针须脱离目标及颗粒、静止空载；即将采集扫描零偏。', read_line=keyboard.read_line):
                     raise KeyboardInterrupt('bias not confirmed')
                 capture_stationary_bias(config, reader, preprocessor, controller,
                     baseline['sample_count'], poll=keyboard.poll, logger=logger)
@@ -241,8 +258,10 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 timing['loop_start_interval_sec'] = ('' if previous_cycle_start is None else cycle_start-previous_cycle_start) if args.execute else dt
                 termination.observe(raw=raw, robot=robot, phase="WRENCH_PROCESSING")
                 if args.execute:
+                    preprocessor.set_tool_orientation(robot.pose[3:])
                     processed = preprocessor.process(raw)
-                    termination.observe(processed=processed, timestamp=now, phase="POLICY_UPDATE")
+                    termination.observe(processed=processed, timestamp=now, phase="POLICY_UPDATE",
+                        processed_force_frame=preprocessor.force_transform_status['output_frame'])
                     # Policy STOP is terminal for its algorithm, but the runtime
                     # keeps all hard force checks alive throughout braking.
                     if policy.state == State.STOP:
@@ -305,6 +324,14 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                                   actual_xyz_speed_mps=float(np.linalg.norm(robot.tcp_speed[:3])),
                                   stop_api_anomaly=bool(controller.stop_report and controller.stop_report['api_anomaly']),
                                   software_warnings=json.dumps(software_warnings(), ensure_ascii=False))
+                    # The last actual SDK call is separate from the policy output.
+                    # An unchanged sequence means no new speedL call this cycle.
+                    sent = getattr(controller, 'last_speedl', {})
+                    velocity = sent.get('velocity', ['', ''])
+                    timing.update(speedl_sequence=sent.get('sequence', ''),
+                        speedl_kind=sent.get('kind', ''), speedl_host_monotonic=sent.get('host_monotonic', ''),
+                        speedl_vx=velocity[0], speedl_vy=velocity[1], speedl_accepted=sent.get('accepted', ''),
+                        processed_force_frame=config.get('force_display', {}).get('frame', 'Base'))
                 else:
                     timing['command_send_time'] = now
                     timing['command_return_time'] = controller.time

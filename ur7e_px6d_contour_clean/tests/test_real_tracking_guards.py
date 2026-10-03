@@ -385,23 +385,36 @@ def test_real_pose_drift_warns_but_large_drift_stops_and_commands_stay_planar(re
     owner.close()
 
 
-def test_direction_reconfirm_can_finish_after_timeout(real):
+def test_direction_reconfirm_cannot_accept_contact_after_timeout(real):
     config, *_ = real
     policy = tracking(config)
     policy.state = State.DIRECTION_RECONFIRM
     policy._reset_confirmation(0.)
-    for i in range(101, 125): sample(policy, i*.01)
-    assert policy.state == State.CONTINUOUS_TRACKING
+    for i in range(101, 125):
+        assert not sample(policy, i*.01).move
+    assert policy.state == State.STOP
+    assert policy.stop_reason.value == 'STOP_DIRECTION_UNCONFIRMED'
+    assert 'DIRECTION_CONFIRMED' not in [event.event_type for event in policy.events]
+
+
+def test_direction_resume_overload_retains_bounded_normal_unloading(real):
+    config, *_ = real
+    policy = tracking(config)
     policy._direction_resume_started = 0.
     policy._direction_resume_pose = np.zeros(2)
     policy._direction_resume_tangent = policy.tangent.copy()
     assert sample(policy, 1.25, 4.).move
     assert policy.state == State.CONTINUOUS_TRACKING
     assert 'direction_restart_overload' in policy.diagnostics
+    assert policy.unload_active and policy.v_t == 0. and policy.v_n < 0.
+    for i in range(126, 300):
+        command = sample(policy, i*.01, 4.)
+    assert policy.stop_reason.value == 'STOP_UNLOAD_NO_MOTION'
+    assert not command.move
 
 
 @pytest.mark.parametrize('backwards', [True, False])
-def test_direction_no_progress_pauses_then_retries(real, backwards):
+def test_direction_no_progress_stops_without_automatic_retry(real, backwards):
     config, *_ = real
     policy = tracking(config)
     policy._direction_resume_started = -5.
@@ -410,8 +423,9 @@ def test_direction_no_progress_pauses_then_retries(real, backwards):
     pose = np.zeros(6)
     if backwards: pose[:2] = -.001*policy.tangent
     assert not sample(policy, 1.01, pose=pose).move
-    assert policy.state == State.CONTINUOUS_TRACKING
-    assert sample(policy, 1.02, pose=pose).move
+    assert policy.state == State.STOP
+    assert policy.stop_reason.value == 'STOP_DIRECTION_NO_PROGRESS'
+    assert not sample(policy, 1.02, pose=pose).move
 
 
 def test_legacy_real_runtime_budget_is_warning_but_simulation_stops(real):
@@ -564,15 +578,17 @@ def test_startup_noise_survives_return_and_first_search_command(config, monkeypa
     assert any(call[0] == 'moveL' for call in devices.control.calls) is away
 
 
-def test_return_segment_time_budget_only_warns(real, clock):
+def test_return_segment_timeout_stops_before_any_later_waypoint(real, clock):
     config, start, devices, owner = real
     config['safe_return']['return_segment_timeout_sec'] = .02
     devices.receive.pose[0] += .003
     owner.activate_control(confirmed=True)
     move = devices.control.moveL
     pending = None
+    issued = []
     def delayed_move(*args):
         nonlocal pending
+        issued.append(args)
         pending = (clock.now+.08, args)
         return True
     devices.control.moveL = delayed_move
@@ -583,5 +599,7 @@ def test_return_segment_time_budget_only_warns(real, clock):
         return None
     monitor = returns.PX6DForceMonitor(config, Sensor(), WrenchPreprocessor.from_config(config['preprocessing']))
     result = returns.SafeReturnExecutor(config, start, owner, force_monitor=monitor, poll=poll).execute()
-    assert result.status == 'complete'
-    assert 'return_progress' in owner.diagnostics
+    assert result.status == 'aborted' and 'timed out' in result.abort_reason
+    assert len(issued) == 1  # The lift did not complete; no rotation or XY transfer.
+    assert any(call[0] == 'stopL' for call in devices.control.calls)
+    assert not any(call[0] == 'moveL' for call in devices.control.calls)

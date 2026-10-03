@@ -21,7 +21,9 @@ def read_run(run_dir):
         raise ValueError("run contains no control samples")
     required = ("monotonic_sec", "tcp_x", "tcp_y", "dfx", "dfy", "fxy", "force_reference",
                 "tangent_x", "tangent_y", "contact_direction_x", "contact_direction_y")
-    data = {key: np.asarray([float(row[key]) for row in rows]) for key in required}
+    # Startup RETURN rows share the CSV but have no tracking reference or n/t.
+    # Keep these values unavailable, rather than inventing a tracking command.
+    data = {key: np.asarray([float(row[key] or 'nan') for row in rows]) for key in required}
     if not np.all(np.isfinite(data["monotonic_sec"])) or np.any(np.diff(data["monotonic_sec"]) < 0):
         raise ValueError("sample timestamps must be finite and ordered")
     for key in ('direction_valid', 'command_vx', 'command_vy', 'reacquire_origin_x', 'reacquire_origin_y',
@@ -41,6 +43,8 @@ def read_run(run_dir):
     data["state"] = [row["current_state"] for row in rows]
     with (run_dir / "config_snapshot.yaml").open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
+    fallback_frame = config.get('force_display', {}).get('frame') or 'unknown frame'
+    data['processed_force_frame'] = [row.get('processed_force_frame') or fallback_frame for row in rows]
     from experiment_logging.paths import read_metadata
     if read_metadata(run_dir)['strategy'] != 'continuous':
         raise ValueError('selected run is not a continuous experiment')
@@ -79,6 +83,9 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
     xy.set_aspect('equal',adjustable='box')
     xy.set(xlabel='Base X [mm]',ylabel='Base Y [mm]')
     scene=config.get('continuous_simulation');outline=None
+    frames = data.get('processed_force_frame', [config.get('force_display', {}).get('frame') or
+                                               'unknown frame'] * len(data['time']))
+    curve_frame = next(iter(set(frames))) if len(set(frames)) == 1 else 'mixed frames (see current frame)'
     points=np.column_stack((data['tcp_x'],data['tcp_y']))*1000
     bounds=np.array([points.min(axis=0)-20,points.max(axis=0)+20])
     if scene:
@@ -124,13 +131,14 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
                             np.sqrt(data['tcp_vx']**2+data['tcp_vy']**2+data['tcp_vz']**2),data['v_t'],data['v_n']))*1000
     indices=extrema_indices(np.nan_to_num(force_values),buckets=100)
     for col,key in enumerate((*FORCE_CURVES, 'raw')):
-        force.plot(data['time'][indices],force_values[indices,col],lw=.9,**line_style(key,simulated=bool(scene)))
+        force.plot(data['time'][indices],force_values[indices,col],lw=.9,
+                   **line_style(key,simulated=bool(scene),force_frame=curve_frame))
     cursor=force.axvline(0,color='k',ls='--',lw=.8)
     indices=extrema_indices(np.nan_to_num(speeds),buckets=100)
     for col,key in enumerate(SPEED_CURVES):
         velocity.plot(data['time'][indices],speeds[indices,col],lw=.9,**line_style(key,simulated=bool(scene)))
     velocity_cursor=velocity.axvline(0,color='k',ls='--',lw=.8)
-    force.set(xlabel='Elapsed time [s]',ylabel='Processed Base / raw force [N]')
+    force.set(xlabel='Elapsed time [s]',ylabel=f'Processed {curve_frame} / raw force [N]')
     velocity.set(xlabel='Elapsed time [s]',ylabel='Velocity [mm/s]')
     for axis in (force,velocity):axis.legend(prop={'family': CJK_FONT, 'size': 6},ncol=2,loc='upper right');axis.grid(alpha=.2)
     title=fig.suptitle('',fontsize=10)
@@ -202,6 +210,7 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
                for key in ('object','friction','background','noise')} if debug and components and available else None)
         row={key:values[index] for key,values in data.items()}
         row['current_state']=data['state'][index]
+        row['processed_force_frame'] = frames[index]
         physical=force_demonstration(row,config.get('force_display',{}),simulated=bool(scene),
                       components_visible=comp is not None,
                       previous_velocity=np.array([data['tcp_vx'][index-1],data['tcp_vy'][index-1]]) if index else None)
@@ -211,7 +220,8 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
                      np.array([data['tangent_x'][index],data['tangent_y'][index]]),
                      np.array([data['contact_direction_x'][index],data['contact_direction_y'][index]]),
                      valid=bool(contact_mask[index]),components=comp,physical=physical,debug=debug,
-                     components_enabled=components, true_tangent=fig.continuous_true_tangent, simulated=bool(scene))
+                     components_enabled=components, true_tangent=fig.continuous_true_tangent,
+                     simulated=bool(scene), force_frame=frames[index])
         for artist,selected in markers:
             artist.set_visible(False)
             visible=[[float(e['x'])*1000,float(e['y'])*1000] for e in selected if float(e['timestamp'])<=data['monotonic_sec'][index]+1e-8]
@@ -223,13 +233,16 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
         title.set_text(f"{data['time'][index]:.2f}s | {data['state'][index]} / {data['direction_phase'][index]} | "
                        f"tangent limit: {data['tangent_limit_reason'][index]} | {data['reason'][index]}")
         note.set_text('\n'.join(part for part in (physical['note'],
+            f'Processed force frame: {frames[index]}' +
+                ('; force arrow unavailable in Base XY' if frames[index] != 'Base' else ''),
             component_note(simulated=bool(scene),enabled=debug and components),vectors.truth_note) if part))
         width,height=fig.get_size_inches()
         note.set_text('\n'.join(textwrap.fill(line,width=max(30,int(width*72*.915/4.8)))
                                 for line in note.get_text().splitlines()))
         fig.subplots_adjust(bottom=.08+((note.get_text().count('\n')+1)*12+40)/(height*72))
         vectors.layout_legend()
-        force.set_ylabel('Control feedback [N]' if not debug else 'Processed Base / raw force [N]')
+        force.set_ylabel(f'Processed {curve_frame} [N]' if not debug else
+                         f'Processed {curve_frame} / raw force [N]')
 
         return trajectory,other_path,reference_path,probe,cursor,velocity_cursor,title
     fig.canvas.mpl_connect('resize_event',lambda event:update(current_index[0]))

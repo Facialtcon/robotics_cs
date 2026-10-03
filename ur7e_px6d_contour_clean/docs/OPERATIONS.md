@@ -10,8 +10,8 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 ```
 
 1. 选择 **18** 启动连续扫描，按 Enter 打开任务。
-2. 核对程序显示的当前 TCP、P0、搜索方向及返回路径。若不在 P0，按提示分别确认空载采零、自动返回；已在 P0 时跳过返回。
-3. 在 P0 确认探针脱离目标、静止空载，按 Enter 采集扫描零偏；采零完成后，再按 Enter 开始扫描。SEARCH 保持 **18 mm/s**。
+2. 核对当前 TCP、P0、搜索方向、探针倾角和完整返回路径。确认探针脱离目标及颗粒、基座水平、抬升后有足够旋转空间，再按 Enter：先抬升、将探针轴调到 Base −Z、移动到 P0 上方、下降到 P0。已在 P0 且姿态正确时跳过返回。
+3. 核对调正后的倾角。在最终姿态的 P0，确认探针脱离目标、静止空载，按 Enter 采集扫描零偏；采零完成后，再按 Enter 开始扫描。SEARCH 保持 **18 mm/s**。调正前不采零。
 4. 运行中按 **Q / Esc / Ctrl+C** 原地停止，不自动返回。等待停稳确认和日志保存、回到菜单，再执行下一项；菜单 **0** 退出。
 
 每个确认提示出现后单独按一次 Enter。程序清除积压按键，不接受预先粘贴或管道传入的回车；确认时按 Q/Esc/Ctrl+C 可取消。菜单选择和数值输入仍按原方式填写。探针接触目标时不能采零。
@@ -21,6 +21,35 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 原菜单 **12** 是离散扫描，启动同样逐步按 Enter；Q 按原配置正常停止并可能返回，Esc/Ctrl+C 不自动返回。急迫危险使用现场物理急停。
 
 ## 故障排查
+
+### 垂直姿态与接触方向
+
+保存扫描姿态原先使 TCP +Z 偏离 Base −Z **5.0466°**。当前以操作者确认的探针轴
+`calibration.probe_axis_tcp: [0, 0, 1]` 计算最小旋转，尽量保留绕轴朝向；不修改 TCP 偏置，
+不覆盖原始示教文件。派生的返回目标、扫描起点与固定姿态使用同一姿态。
+`startup_alignment.json` 保存实际调正前后倾角和目标。Base −Z 为重力向下的前提是基座水平。
+旋转仅在原安全返回流程抬升并确认静止后进行；返回阶段使用原始力模长监控，不使用旧姿态零偏。
+每段返回沿用原 60 秒预算，超时停止，不继续下一段。
+
+最新 `run_20261002_204147_019798` 是低力丢接触、恢复角度用尽：1.078 N 在约 0.606 秒内
+降至 0.498 N，实际只移动 0.226 mm，不代表沿边成功。旧配置把主要 +Y 的力方向当作补压方向，
+而导致接触的搜索主要沿 −Y。此类方向矛盾须明确停止，不能自动翻符号或扩大恢复角度。
+实际 `speedL` 指令、调用序号及返回值写入逐帧日志；序号未变表示该帧没有新的 `speedL` 调用。
+SDK 接受指令不代表已完成运动，仍以实际 TCP 和接触力判断。
+
+姿态变化后，力变换按实际 TCP 姿态更新：提供实测 `rotation_sensor_to_tool` 时使用
+`R_BS = R_BT * R_TS`；已有实测 `rotation_sensor_to_base` 时必须同时给出测量时的
+`reference_tool_orientation`（TCP 旋转向量，rad）。这两个输入都没有时，只显示
+`sensor_uncalibrated`，不冒称 Base 力；程序在连接设备、启动返回及 SEARCH 之前报告
+`STOP_CONFIG_ERROR / CONFIG_PREFLIGHT`，不会等到接触后才发现缺少安装方向。
+当前两项均为 null，旧单位矩阵是占位值。缺少的是 PX6D +X/+Y/+Z 在当前 TCP 中的方向，
+即 `rotation_sensor_to_tool` 的三列；“探针轴等于 TCP +Z”不能替代这项安装信息。
+也不能把保存的 TCP 姿态与旧占位单位阵组合成所谓实测标定。
+不生成强制验证文件，也不自动推导安装旋转或翻转 `force_direction_sign`。
+`force_transform_at_start.json` 记录安装矩阵、参考姿态、最终实际 TCP 姿态和合成的 Base 矩阵。
+直接安装关系使用 `R_BS = R_BT_actual * R_TS`；参考姿态关系使用
+`R_BS = R_BT_actual * transpose(R_BT_reference) * R_BS_reference`。
+`force_direction_sign` 仍只在控制方向计算时生效，不加入这两个旋转矩阵。
 
 ### 日志与现有菜单
 
@@ -97,7 +126,9 @@ Linux 上本项目的读取器以排他文件锁打开串口，重复打开会�
 
 方向观察不是启动前置步骤，不生成验证文件，不绑定配置，不修改旋转矩阵或 `force_direction_sign`。
 `rotation_sensor_to_base` 直接将传感器分量旋转到 Base；未知安装旋转不能仅从 TCP 姿态推导。
-当前单位矩阵及符号是否符合实物，仍须现场判断。
+当前单位矩阵及符号尚未实测；缺少安装关系时显示传感器分量，不能给出 Base 卸力方向。
+方向工具默认展示派生的最终扫描姿态，但不会读取或调整机器人姿态；实际姿态不同可用
+`--tool-orientation RX RY RZ` 明确输入旋转向量（rad）。观察前必须确认机器人已在显示姿态且空载。
 
 `n = sign * unit(Base XY)` 是估计压入方向；`v = vt*t + vn*n`，力偏大时 `vn < 0`，沿 `-n` 卸力。
 从 Base +Z 看，CW 的 `t=R90*n`、目标在右侧，CCW 的 `t=-R90*n`、目标在左侧。
@@ -175,7 +206,7 @@ Remote Control、安全状态和其他控制程序占用。Q/Esc 不响应时检
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/user-linux/robotics_cs/.venv312/bin/python -m pytest -q
-/home/user-linux/robotics_cs/.venv312/bin/python tools/replay_continuous_policy.py data/real/continuous/run_20261002_181532_094239 --output data/analysis/reacquire_20261003/replay_after.json
+/home/user-linux/robotics_cs/.venv312/bin/python tools/replay_continuous_policy.py data/real/continuous/run_20261002_204147_019798 --output data/analysis/continuous_20261003_204147/replay_direction_fix.json
 ```
 
 重放使用保存配置和记录输入，跳过独立执行的启动返回段；报告首次指令/状态变化及原停机帧的

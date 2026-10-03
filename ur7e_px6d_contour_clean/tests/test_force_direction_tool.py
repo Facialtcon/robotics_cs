@@ -33,13 +33,15 @@ def test_readonly_tool_reports_3_4_5_without_any_rtde_access(monkeypatch):
 
 def test_tool_applies_configured_transform_and_displays_sign_without_saving(config, tmp_path):
     config['preprocessing']['coordinate_transform']['rotation_sensor_to_base'] = [[0,-1,0],[1,0,0],[0,0,1]]
+    config['preprocessing']['coordinate_transform']['reference_tool_orientation'] = [0, 0, 0]
     config['continuous_tracking']['force_direction_sign'] = -1
     config['calibration']['file'] = str(PROJECT_ROOT/'scan_calibration.yaml')
     path = tmp_path/'config.yaml'; path.write_text(yaml.safe_dump(config))
     sensor = Sensor(); sensor.read_wrench = lambda: Wrench(3, 4, 0, 0, 0, 0)
     messages = []
     before = path.read_bytes()
-    assert tool.run(path, reader_factory=lambda *a: sensor, samples=1, bias_samples=0, emit=messages.append) == 0
+    assert tool.run(path, reader_factory=lambda *a: sensor, samples=1, bias_samples=0, emit=messages.append,
+                    tool_orientation=[0, 0, 0]) == 0
     output = '\n'.join(messages)
     assert 'normalized=[-0.800000, 0.600000]' in output
     assert 'configured n=[0.800000, -0.600000]' in output
