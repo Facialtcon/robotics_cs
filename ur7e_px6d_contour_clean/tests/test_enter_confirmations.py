@@ -101,6 +101,27 @@ def test_redirected_blank_input_cannot_confirm(monkeypatch):
         operator_input.confirm_enter('action')
 
 
+def test_numeric_text_reads_decimal_and_editing_with_stationary_checks(monkeypatch):
+    master, slave = pty.openpty()
+    stream = os.fdopen(slave, 'r', encoding='utf-8')
+    monkeypatch.setattr(sys, 'stdin', stream)
+    original = termios.tcgetattr(stream.fileno())
+    checks = []
+    def emit(value='', **kwargs):
+        if '倍率' in value:
+            os.write(master, b'2.70\x7f5\n\n')
+    monkeypatch.setattr(operator_input, 'print', emit, raising=False)
+    try:
+        with operator_input.OperatorKeyboard() as keyboard:
+            keyboard.on_wait = lambda: checks.append(True)
+            assert keyboard.read_text('倍率：') == '2.75'
+        assert checks
+        assert termios.tcgetattr(stream.fileno()) == original
+    finally:
+        stream.close()
+        os.close(master)
+
+
 @pytest.mark.parametrize('answer,accepted', [('', True), ('START', False), (' ', False), ('q', False), ('\x1b', False)])
 def test_only_enter_confirms(answer, accepted):
     assert operator_input.confirm_enter('action', read_line=lambda _: answer) is accepted

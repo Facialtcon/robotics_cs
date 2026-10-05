@@ -30,6 +30,32 @@ TIMING_FIELDS = ('serial_read_start', 'serial_read_end', 'tcp_read_start', 'tcp_
                  'actual_xyz_speed_mps', 'stop_api_anomaly', 'software_warnings',
                  'speedl_sequence', 'speedl_kind', 'speedl_host_monotonic',
                  'speedl_vx', 'speedl_vy', 'speedl_accepted')
+TRACKING_SPEED_FIELDS = ('tracking_base_speed_mps', 'tracking_speed_multiplier',
+                         'tracking_nominal_speed_mps')
+
+
+def choose_tracking_speed(base_speed, max_speed, *, read_text, emit=print):
+    """Select this run's tangent speed from the original base, never a prior choice."""
+    while True:
+        answer = read_text('贴边扫描速度倍率（例如 1、2、3、5；回车默认 1 倍）：')
+        if answer.strip().lower() in ('q', 'esc', '\x1b'):
+            raise KeyboardInterrupt('operator cancelled tracking speed choice')
+        try:
+            multiplier = float(answer.strip()) if answer.strip() else 1.
+        except ValueError:
+            emit('请输入有限正数倍率。', flush=True)
+            continue
+        if not np.isfinite(multiplier) or multiplier <= 0:
+            emit('请输入有限正数倍率。', flush=True)
+            continue
+        nominal_speed = base_speed * multiplier
+        if not np.isfinite(nominal_speed) or nominal_speed > max_speed or nominal_speed <= 0:
+            emit(f'名义贴边速度须大于 0 且不超过总速度上限 {max_speed*1000:g} mm/s，请重新输入。', flush=True)
+            continue
+        emit(f'基准速度：{base_speed*1000:g} mm/s；所选倍率：{multiplier:g} 倍；'
+             f'本次名义贴边速度：{nominal_speed*1000:g} mm/s。\n'
+             '实际速度仍受原有受力减速、加速度限制和速度限幅影响。', flush=True)
+        return dict(zip(TRACKING_SPEED_FIELDS, (base_speed, multiplier, nominal_speed)))
 
 
 from app.configuration import prepare_real, calibration_summary, site_configuration_digest
@@ -162,9 +188,15 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             policy, controller, reader = session.policy, session.robot, session.sensor
             preprocessor = session.preprocessor
         output = args.output
+        # Latch the freshly loaded base before any run-only choice. Offline
+        # simulation retains its noninteractive default; execution asks below.
+        base_tangential_speed = float(config['continuous_tracking']['tangential_speed'])
+        selection = dict(zip(TRACKING_SPEED_FIELDS, (base_tangential_speed, 1., base_tangential_speed)))
+        config['continuous_speed_selection'] = selection
+        timing.update(selection)
         # Existing optional workspace exporter renders on close and assumes
         # real Base coordinates; use only our explicit offline replay here.
-        logger = ExperimentLogger(output, config, mode="real" if args.execute else "simulation", strategy="continuous", config_source=args.config, extra_sample_fields=EXTRA_SAMPLE_FIELDS + TIMING_FIELDS + SIMULATION_SAMPLE_FIELDS + SPEED_GUARD_FIELDS,
+        logger = ExperimentLogger(output, config, mode="real" if args.execute else "simulation", strategy="continuous", config_source=args.config, extra_sample_fields=EXTRA_SAMPLE_FIELDS + TIMING_FIELDS + TRACKING_SPEED_FIELDS + SIMULATION_SAMPLE_FIELDS + SPEED_GUARD_FIELDS,
                                   workspace_logging=False)
         logger.termination = termination.bind(logger.run_dir)
         if args.execute:
@@ -204,6 +236,17 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 capture_stationary_bias(config, reader, preprocessor, controller,
                     baseline['sample_count'], poll=keyboard.poll, logger=logger)
             if args.execute:
+                selection = choose_tracking_speed(base_tangential_speed, float(config['robot']['max_tcp_speed']),
+                                                  read_text=keyboard.read_text)
+                # Only the desired tangential component changes. Leave robot
+                # execution envelopes, normal feedback, SEARCH/return/reacquire,
+                # global cap, acceleration and all stop protections untouched.
+                config['continuous_tracking']['tangential_speed'] = selection['tracking_nominal_speed_mps']
+                policy.c['tangential_speed'] = selection['tracking_nominal_speed_mps']
+                config['continuous_speed_selection'] = selection
+                timing.update(selection)
+                logger.write_config_snapshot(config)
+                logger.write_json('tracking_speed_selection.json', selection)
                 if not confirm_enter('即将从 P0 沿保存方向开始扫描。', read_line=keyboard.read_line):
                     raise KeyboardInterrupt('scan not confirmed')
                 hold_startup_confirmation(config, start, controller)

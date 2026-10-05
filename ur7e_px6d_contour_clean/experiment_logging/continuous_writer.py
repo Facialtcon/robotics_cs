@@ -109,6 +109,9 @@ class ContinuousLogWriter:
             raise ValueError("log JSON name must be a filename inside the run directory")
         self._enqueue("write_json", (name, payload), {})
 
+    def write_config_snapshot(self, config):
+        self._enqueue('write_config_snapshot', (config,), {})
+
     def _work(self):
         try:
             while True:

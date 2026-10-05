@@ -11,10 +11,14 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 
 1. 选择 **18** 启动连续扫描，按 Enter 打开任务。
 2. 核对当前 TCP、P0、搜索方向、探针倾角和完整返回路径。确认探针脱离目标及颗粒、基座水平、抬升后有足够旋转空间，再按 Enter：先抬升、将探针轴调到 Base −Z、移动到 P0 上方、下降到 P0。已在 P0 且姿态正确时跳过返回。
-3. 核对调正后的倾角。在最终姿态的 P0，确认探针脱离目标、静止空载，按 Enter 采集扫描零偏；采零完成后，再按 Enter 开始扫描。SEARCH 保持 **18 mm/s**。调正前不采零。
+3. 核对调正后的倾角。在最终姿态的 P0，确认探针脱离目标、静止空载，按 Enter 采集扫描零偏；采零完成后选择贴边速度倍率（有限正数，回车为 1 倍），核对基准、倍率和本次名义速度（mm/s），再单独按 Enter 开始扫描。倍率仅作用于原配置的名义切向速度，实际速度仍受原受力减速、加速度和限幅影响；超出总速度上限时重新输入。SEARCH 保持 **18 mm/s**。调正前不采零。
 4. 运行中按 **Q / Esc / Ctrl+C** 原地停止，不自动返回。等待停稳确认和日志保存、回到菜单，再执行下一项；菜单 **0** 退出。
 
 每个确认提示出现后单独按一次 Enter。程序清除积压按键，不接受预先粘贴或管道传入的回车；确认时按 Q/Esc/Ctrl+C 可取消。菜单选择和数值输入仍按原方式填写。探针接触目标时不能采零。
+倍率选择仅用于本次菜单 18 / 命令行 `--execute`，每次重新读取原配置基准，不修改 `config.yaml`。
+`config_snapshot.yaml` 的 `continuous_speed_selection`、`tracking_speed_selection.json` 和逐帧日志保存
+`tracking_base_speed_mps`、`tracking_speed_multiplier`、`tracking_nominal_speed_mps`（速度按 m/s 记录）。
+搜索、启动/返回、法向补压/卸力、丢边探索速度及原阶段监测阈值均保持不变。
 
 原菜单 **11** 用于手动返回 reset（没有 reset 文件则返回 P0）：按 Enter 打开任务，核对路径后再按 Enter 执行。手动返回不连接 PX6D；自动启动返回有 PX6D 力监控。返回中 Q/Esc/Ctrl+C 中止。
 

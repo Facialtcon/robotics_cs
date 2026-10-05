@@ -93,3 +93,4 @@ class Keyboard:
     def __exit__(self, *args): pass
     def poll(self): return self.key
     def read_line(self, prompt): return self.answer
+    def read_text(self, prompt): return self.answer

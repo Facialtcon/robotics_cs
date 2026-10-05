@@ -84,8 +84,7 @@ class ExperimentLogger:
         self.metadata = read_metadata(self.run_dir)
         self.processed_force_frame = config.get('force_display', {}).get('frame', 'configured_output_frame')
         self.termination = TerminationRecorder().bind(self.run_dir)
-        with (self.run_dir / "config_snapshot.yaml").open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
+        self.write_config_snapshot(config)
         self._samples = LazyCSV(self.run_dir / 'samples.csv', fields)
         self._full_log = LazyCSV(self.run_dir / 'full_log.csv', fields)
         self._boundaries = LazyCSV(self.run_dir / 'boundary_points.csv', BOUNDARY_FIELDS)
@@ -103,6 +102,11 @@ class ExperimentLogger:
                 print(f"[workspace] Optional workspace logger unavailable: {type(exc).__name__}: {exc}")
             except Exception:
                 pass
+
+    def write_config_snapshot(self, config: dict) -> None:
+        """Record effective run settings; never write the source configuration."""
+        with (self.run_dir / 'config_snapshot.yaml').open('w', encoding='utf-8') as handle:
+            yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
 
     def log_sample(
         self,

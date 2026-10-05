@@ -73,6 +73,43 @@ class OperatorKeyboard:
             termios.tcflush(fd, termios.TCIFLUSH)
             termios.tcsetattr(fd, termios.TCSANOW, previous)
 
+    def read_text(self, prompt: str) -> str:
+        """Read a fresh numeric/text choice while retaining stationary checks."""
+        if not self.enabled:
+            raise EOFError('输入需要前台交互终端，不能通过管道预先输入。')
+        fd = sys.stdin.fileno()
+        previous = termios.tcgetattr(fd)
+        value = []
+        try:
+            tty.setcbreak(fd)
+            termios.tcflush(fd, termios.TCIFLUSH)
+            print(prompt, end='', flush=True)
+            while True:
+                if self.on_wait is not None:
+                    self.on_wait()
+                readable, _, _ = select.select([fd], [], [], .01)
+                if not readable:
+                    continue
+                key = os.read(fd, 1)
+                if not key or key == b'\x04':
+                    raise EOFError('choice input closed')
+                if key in (b'\x03', b'\x1b', b'q', b'Q'):
+                    raise KeyboardInterrupt('operator cancelled choice')
+                if key in (b'\r', b'\n'):
+                    print(flush=True)
+                    return ''.join(value)
+                if key in (b'\x7f', b'\x08'):
+                    if value:
+                        value.pop()
+                        print('\b \b', end='', flush=True)
+                elif b' ' <= key <= b'~':
+                    char = key.decode('ascii')
+                    value.append(char)
+                    print(char, end='', flush=True)
+        finally:
+            termios.tcflush(fd, termios.TCIFLUSH)
+            termios.tcsetattr(fd, termios.TCSANOW, previous)
+
     def __exit__(self, *_args) -> None:
         if self.enabled and self._original is not None:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._original)
