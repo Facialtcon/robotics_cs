@@ -251,7 +251,9 @@ def test_return_soft_loads_warn_raw_extremes_abort(real, clock, tmp_path, raw, p
     owner.activate_control(confirmed=True)
     devices.receive.pose[0] += .003
     monitor = returns.PX6DForceMonitor(config, SimpleNamespace(read_wrench=lambda: raw),
-                                    SimpleNamespace(process=lambda _: processed))
+                                    SimpleNamespace(process=lambda _: processed,
+                                        set_tool_orientation=lambda _: None,
+                                        force_transform_status={'output_frame': 'Base'}, force_log_fields={}))
     logger = ExperimentLogger(tmp_path, config, mode='real', strategy='continuous',
                               extra_sample_fields=('software_warnings',), workspace_logging=False)
     try:

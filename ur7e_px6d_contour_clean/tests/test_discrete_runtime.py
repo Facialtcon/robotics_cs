@@ -15,6 +15,8 @@ def test_fake_discrete_scan_shared_startup_and_normal_return(config,monkeypatch,
     original=runtime.load_config
     def load(path):
         c=original(path);c['preprocessing']['baseline']['sample_count']=2
+        # Synthetic known mount for this device-double test, not a physical calibration.
+        c['preprocessing']['coordinate_transform']['rotation_sensor_to_tool']=np.eye(3).tolist()
         c['safe_return']['startup_bias_sample_count']=2
         c['policy']['max_runtime_sec']=.06
         return c
@@ -40,7 +42,9 @@ def test_discrete_escape_never_auto_returns(config,monkeypatch,tmp_path):
             return 'ESC' if self.calls>2 else None
     original=runtime.load_config
     def load(path):
-        c=original(path);c['preprocessing']['baseline']['sample_count']=2;return c
+        c=original(path);c['preprocessing']['baseline']['sample_count']=2
+        c['preprocessing']['coordinate_transform']['rotation_sensor_to_tool']=np.eye(3).tolist()
+        return c
     monkeypatch.setattr(runtime,'load_config',load)
     monkeypatch.setattr(runtime,'OperatorKeyboard',StopKeyboard)
     args=Namespace(config=PROJECT_ROOT/'config.yaml',execute=True,sensor='real',output=tmp_path)
@@ -76,3 +80,15 @@ def test_discrete_known_mount_uses_final_actual_pose(config,monkeypatch,tmp_path
     assert observed
     for force,pose in observed:
         np.testing.assert_allclose(force,_tool_rotation(pose[3:]) @ [.01,.02,.03])
+
+
+def test_discrete_unknown_mount_fails_before_devices_or_policy(config, monkeypatch, tmp_path):
+    def forbidden(*args, **kwargs):
+        pytest.fail('unknown Sensor frame must never reach devices or policy')
+    monkeypatch.setattr(runtime.RuleBasedPolicy, 'update', forbidden)
+    args=Namespace(config=PROJECT_ROOT/'config.yaml',execute=True,sensor='real',output=tmp_path)
+    assert runtime.run(args, controller_factory=forbidden, reader_factory=forbidden)==1
+    run_dir, = (tmp_path/'real/discrete').glob('run_*')
+    record = json.loads((run_dir/'termination.json').read_text())
+    assert record['reason'] == 'STOP_CONFIG_ERROR'
+    assert record['phase'] == 'CONFIG_PREFLIGHT'

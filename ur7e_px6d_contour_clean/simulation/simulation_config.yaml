@@ -31,7 +31,13 @@ force_model:
   friction_coefficient: 0.03
 
 preprocessing:
-  filter_alpha: 0.15
+  filter_alpha: 0.15  # legacy compatibility only
+  kalman:
+    enabled: true
+    # Ideal simulator noise model; not physical PX6D tuning.
+    process_noise: 0.05
+    measurement_noise: 0.01
+    initial_covariance: 0.01
   gravity_wrench_sensor: [0, 0, 0, 0, 0, 0]
   coordinate_transform:
     rotation_sensor_to_base:

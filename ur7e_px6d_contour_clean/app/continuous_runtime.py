@@ -259,6 +259,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 termination.observe(raw=raw, robot=robot, phase="WRENCH_PROCESSING")
                 if args.execute:
                     preprocessor.set_tool_orientation(robot.pose[3:])
+                    # processed.force is filtered_force_base; no policy-local rotation.
                     processed = preprocessor.process(raw)
                     termination.observe(processed=processed, timestamp=now, phase="POLICY_UPDATE",
                         processed_force_frame=preprocessor.force_transform_status['output_frame'])
@@ -337,7 +338,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     timing['command_return_time'] = controller.time
                 # Real runs enqueue snapshots; the disk worker never calls devices.
                 logger.log_sample(now, raw, processed, robot, command, policy.contact_direction,
-                                  policy.tangent, extra={**policy.telemetry(command), **timing,
+                                  policy.tangent, extra={**preprocessor.force_log_fields, **policy.telemetry(command), **timing,
                                       **(speed_diagnostics if args.execute else {}),
                                       **({'sim_components_available': 0, 'physical_force_available': 0} if args.execute else sample.simulation_telemetry)})
                 while policy.events:
@@ -439,13 +440,14 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                             try:
                                 started = time.monotonic()
                                 sample = reader.read_wrench()
+                                state = controller.read_state()
+                                preprocessor.set_tool_orientation(state.pose[3:])
                                 wrench = preprocessor.process(sample)
                                 if not np.isfinite(np.r_[sample.array(), wrench.array()]).all():
                                     raise RobotError('nonfinite stopping wrench')
                                 force_error = continuous_force_reason(sample, wrench, config['policy'], diagnostics)
                                 if force_error:
                                     raise RobotError(force_error)
-                                state = controller.read_state()
                                 logger.check_health()
                                 validate_cycle_timing(config['continuous_tracking'], started, time.monotonic(), started,
                                                       diagnostics=diagnostics)

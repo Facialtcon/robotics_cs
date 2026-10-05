@@ -29,6 +29,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
     stop_info = dict(standstill_confirmed=False)
     returned = None
     try:
+        termination.observe(phase='CONFIG_PREFLIGHT')
         config = load_config(args.config)
         sensor_kind = args.sensor or config['execution']['default_sensor']
         if not execute and sensor_kind == 'mock':
@@ -42,13 +43,17 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         if execute and sensor_kind != 'real':
             raise RobotError('real robot execution requires --sensor real')
         robot_config, start = prepare_discrete(config, args.config) if execute else (runtime_robot_config(config), None)
+        preprocessing = WrenchPreprocessor.from_config(config['preprocessing'],
+            tool_orientation=start[3:] if execute else config['dry_run']['start_pose'][3:])
+        if not preprocessing.force_transform_status['available']:
+            raise ValueError('Base force unavailable: set preprocessing.coordinate_transform.'
+                             'rotation_sensor_to_tool or a measured Base rotation with '
+                             'reference_tool_orientation; sensor installation is unknown')
         controller = controller_factory(robot_config) if execute else SimulatedController(
             config['dry_run']['start_pose'], robot_config['max_tcp_speed'])
         settings = config['sensor']
         reader = reader_factory(settings['serial_port'], settings['baudrate'], settings['timeout_sec'],
                                 settings['poll_rate_hz'], settings['startup_delay_sec'])
-        preprocessing = WrenchPreprocessor.from_config(config['preprocessing'],
-            tool_orientation=start[3:] if execute else None)
         config['force_transform_status'] = preprocessing.force_transform_status
         config.setdefault('force_display', {}).update(
             frame=preprocessing.force_transform_status['output_frame'],
@@ -113,8 +118,8 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     break
                 raw = reader.read_wrench()
                 robot = controller.read_state()
-                if execute:
-                    preprocessing.set_tool_orientation(robot.pose[3:])
+                preprocessing.set_tool_orientation(robot.pose[3:])
+                # processed.force is filtered_force_base; retain policy API.
                 processed = preprocessing.process(raw)
                 frame = preprocessing.force_transform_status['output_frame']
                 termination.observe(policy=policy, robot=robot, raw=raw, processed=processed,
@@ -130,7 +135,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     controller.stop()
                 logger.log_sample(cycle_start, raw, processed, robot, command,
                                   policy.current_target_direction, policy.current_tangent,
-                                  extra={'processed_force_frame': frame})
+                                  extra={**preprocessing.force_log_fields, 'processed_force_frame': frame})
                 for i, (items, write) in enumerate(((policy.boundary_points, logger.log_boundary),
                     (policy.policy_waypoints, logger.log_waypoint), (policy.boundary_recovery_rays, logger.log_recovery_ray))):
                     while counts[i] < len(items):
@@ -144,8 +149,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 # Keep PX6D checks alive through ordinary braking and any return.
                 monitor = PX6DForceMonitor(config, reader, preprocessing)
                 def observe_stop():
-                    monitor.sample()
-                    return controller.read_diagnostic_state()
+                    return monitor.sample(read_state=controller.read_diagnostic_state)
                 robot = controller.wait_for_standstill(observe=observe_stop)
             else:
                 robot = controller.read_state()

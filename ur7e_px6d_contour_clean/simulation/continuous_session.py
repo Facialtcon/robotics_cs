@@ -94,9 +94,9 @@ class SimulationSession:
         self.scene['policy']['search_direction_xy'] = self.scene['scan_direction_xy']
         self.config['continuous_simulation'] = self.scene
         self.config['policy']['search_direction_xy'] = self.scene['scan_direction_xy']
-        alpha = self.config['preprocessing']['filter_alpha']
+        kalman = deepcopy(self.config['preprocessing'].get('kalman', {}))
         self.config['preprocessing'] = deepcopy(self.scene['preprocessing'])
-        self.config['preprocessing']['filter_alpha'] = alpha
+        self.config['preprocessing']['kalman'] = kalman
         # Geometry remains exclusively in the environment, not policy input.
         self.policy = ContinuousTrackingPolicy({k: self.config[k] for k in ('continuous_tracking', 'policy', 'robot', 'preprocessing')})
         dynamics = dict(acceleration_limit=.005, delay_steps=2)

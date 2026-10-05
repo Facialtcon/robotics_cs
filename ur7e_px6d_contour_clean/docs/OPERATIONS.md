@@ -51,6 +51,44 @@ SDK 接受指令不代表已完成运动，仍以实际 TCP 和接触力判断�
 `R_BS = R_BT_actual * transpose(R_BT_reference) * R_BS_reference`。
 `force_direction_sign` 仍只在控制方向计算时生效，不加入这两个旋转矩阵。
 
+### 力处理顺序与 Kalman 参数
+
+扫描链路统一为 PX6D raw Sensor wrench → Sensor 零偏/已有重力补偿 →
+Sensor→Base 旋转/已有 Base 颗粒基线补偿 → Base 三轴独立 Kalman →
+原接触阈值、死区、n/t 方向估计及力反馈 → policy → RTDE speedL。
+`URRTDEController.read_state()` 从 `getActualTCPPose()` 读取
+`[x,y,z,rx,ry,rz]`；后三项是 rad 单位的旋转向量。
+`sensor/force_preprocess.py::_tool_rotation()` 用 Rodrigues 公式构造 `R_BT`，
+扫描每帧在串口读取后更新实际姿态，`processed.force` 就是 `filtered_force_base`。
+离散与连续入口均拒绝将安装关系未知的 Sensor 力传给扫描 policy；未知数据仍可用于只读诊断。
+
+`preprocessing.kalman` 的默认值为 `enabled: true`、`process_noise: 0.01`、
+`measurement_noise: 0.25`、`initial_covariance: 1.0`。
+Q/R/P 为 N²，Q 按每个有效采样步计；可用标量或按 Fx/Fy/Fz 的三个数配置。
+这些是保守起始值，尚未用 PX6D 静态实验数据辨识，采样频率改变后需重新评估 Q。
+滤波状态在帧间保存，采零/重新设基线后重置，第一帧由真实测量初始化。
+旧配置不含 kalman 时使用上述默认值；`filter_alpha` 仅保留兼容，已不参与 wrench 滤波。
+`enabled: false` 直接透传补偿后的 Base 力，不恢复 EMA。
+缺失、NaN、Inf 不更新滤波状态；串口超时沿用停止路径，不补零也不将旧输出当新测量。
+连续 policy 既有的方向/一致性和方向变化率平滑仍保留，输入来自 Base Kalman，
+它们属于原跟踪策略，不是 Sensor-frame wrench 滤波。
+卸力配置校验中的滤波稳定时间改为 Kalman 增益的保守估计，卸力预算与策略不变。
+
+当前 `sensor_origin_in_tool_m: null` 表示几何偏置未知，力矩只在传感器原点处旋转到 Base，
+不是 TCP 原点的力矩。旧 `sensor_origin_in_base_m: [0,0,0]` 不证明原点重合。
+如需完整参考点变换，实测从 TCP 原点指向 Sensor 原点的向量（TCP 表达，m）后填写
+`sensor_origin_in_tool_m`；届时使用 `M_B@TCP = R_BS M_S + (R_BT r_TS) × (R_BS F_S)`。
+已有非零 Base 偏置配合实测参考姿态的配置也继续支持。
+`force_transform_at_start.json` 中 `torque_reference_point` 和
+`wrench_reference_point_transform_complete` 明确记录当前范围。
+三维力旋转不依赖这项平移参数；不新增 torque 控制或动态重力模型。
+
+日志保留 `raw_fx/fy/fz/tx/ty/tz`（raw Sensor wrench）和 `dfx/dfy/dfz`（policy 输入）。
+新增 `force_base_fx/fy/fz` 保存补偿后滤波前的 Base 力，
+`filtered_force_base_fx/fy/fz` 是 Base 输出的显式别名。
+图表继续读取历史 dfx/dfy/dfz 并按 `processed_force_frame` 标识；
+启动返回使用原始 Sensor 力模长时，Base 别名留空，不混用参考系。
+
 ### 日志与现有菜单
 
 停止后先查看终端打印的本次运行目录。数据在 `data/real/continuous/`、`data/real/discrete/`、`data/real/return/` 或 `data/simulation/`，目录时间为 UTC。

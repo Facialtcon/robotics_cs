@@ -133,8 +133,12 @@ class PX6DForceMonitor:
         self.raw = self.processed = None
         self.diagnostics = {}
 
-    def sample(self):
+    def sample(self, *, read_state=None):
         self.raw = self.reader.read_wrench()
+        state = None if read_state is None else read_state()
+        if state is not None and not self.raw_only:
+            self.preprocessor.set_tool_orientation(state.pose[3:])
+            self.force_frame = self.preprocessor.force_transform_status['output_frame']
         # Orientation-changing startup has no valid final-pose bias yet. Use
         # rotation-invariant raw norms during the return, never zero in contact
         # or label a wrench in the old orientation as a new Base measurement.
@@ -154,6 +158,7 @@ class PX6DForceMonitor:
                     self.diagnostics[label] = f'WARNING: processed {label} {magnitude:g} exceeds {limit:g}'
                     continue
                 raise ReturnAborted(f'{label} limit exceeded')
+        return state
 
 
 class SafeReturnExecutor:
@@ -176,9 +181,10 @@ class SafeReturnExecutor:
         if self.poll() in ('Q', 'ESC'):
             raise KeyboardInterrupt('operator stopped return')
         if self.force_monitor is not None:
-            self.force_monitor.sample()
+            state = self.force_monitor.sample(read_state=self.controller.read_state)
             self.controller.diagnostics.update(self.force_monitor.diagnostics)
-        state = self.controller.read_state()
+        else:
+            state = self.controller.read_state()
         if self.logger is not None:
             if self.force_monitor is None:
                 self.logger.log_return(state, self.phase, self.target)
@@ -191,9 +197,10 @@ class SafeReturnExecutor:
                     contact_flag=False, possible_corner=False, reason=self.phase)
                 self.logger.log_sample(started, self.force_monitor.raw, self.force_monitor.processed,
                                        state, command, None, None,
-                                       extra=({'software_warnings': json.dumps(dict(return_monitor=self.force_monitor.diagnostics)),
-                                               'processed_force_frame': self.force_monitor.force_frame}
-                                              if self.config.get('continuous_real_execution') else None))
+                                       extra={**({} if self.force_monitor.raw_only else self.force_monitor.preprocessor.force_log_fields),
+                                              'processed_force_frame': self.force_monitor.force_frame,
+                                              **({'software_warnings': json.dumps(dict(return_monitor=self.force_monitor.diagnostics))}
+                                                 if self.config.get('continuous_real_execution') else {})})
             if hasattr(self.logger, 'check_health'):
                 self.logger.check_health()
         if self.controller.watchdog_active or self.config.get('continuous_real_execution'):

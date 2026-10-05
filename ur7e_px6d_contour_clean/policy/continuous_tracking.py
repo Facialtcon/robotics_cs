@@ -14,6 +14,7 @@ from experiment_logging.termination import TerminationReason, classify_stop_reas
 from policy.boundary_estimation import handed_tangent, unit
 from safety.force_guard import ForceRateGuard, force_safety_reason, continuous_force_reason
 from sensor.force_direction import control_directions, normal_feedback_speed
+from sensor.force_preprocess import IndependentForceKalman
 
 # Conservative software budgets, not measured contact stiffness. At 0.5 mm/s,
 # 0.2 mm needs >=0.4 s plus acceleration/filter settling; never use the old
@@ -51,8 +52,8 @@ def validate_config(config: dict) -> None:
         raise ValueError('unload budgets must be finite and positive')
     if not (c['force_reference']+c['force_deadband'] <= u['unload_resume_force'] < c['overload_tangent_zero_force']):
         raise ValueError('unload resume threshold must precede tangent-zero threshold')
-    filter_settle = (np.log(.01)/np.log(config['preprocessing']['filter_alpha']) / p['control_rate_hz']
-                     if config['preprocessing']['filter_alpha'] > 0 else 0.)
+    filter_settle = IndependentForceKalman(config['preprocessing'].get('kalman', {})).settling_time(
+        p['control_rate_hz'])
     minimum_time = u['unload_min_displacement_m']/c['normal_speed_limit'] + filter_settle + u['unload_force_window_sec']
     if not (minimum_time <= u['unload_evaluation_sec'] < u['unload_max_time_sec'] and
             u['unload_min_displacement_m'] < u['unload_max_displacement_m']):
@@ -493,6 +494,8 @@ class ContinuousTrackingPolicy:
             self._begin_direction_reconfirm(now, pose, 'measurement change / estimate lag')
             return False
         alpha = float(self.c['force_direction_filter_alpha']) ** (self.dt / self.nominal_dt)
+        # Existing direction/coherence estimator, downstream of Base Kalman.
+        # This is not sensor-wrench preprocessing; retain the tracking strategy.
         self._filtered = vector.copy() if self._filtered is None else alpha*self._filtered+(1-alpha)*vector
         self._filtered_magnitude = alpha*self._filtered_magnitude+(1-alpha)*self.fxy
         self.filtered_fxy = float(np.linalg.norm(self._filtered))

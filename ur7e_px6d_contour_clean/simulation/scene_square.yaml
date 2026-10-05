@@ -19,7 +19,9 @@ force_model:
   friction_coefficient: 0.0
   noise_std: 0.0
 preprocessing:
-  filter_alpha: 0.0
+  filter_alpha: 0.0  # legacy compatibility only
+  kalman:
+    enabled: false  # preserve this ideal noiseless geometry test's pass-through
 policy:
   position_tolerance: 0.000001  # ideal kinematics: 1 um return/anchor tolerance; NOT a hardware claim
   # Evaluate completion in simulation only; do not change robot policy logic.

@@ -18,8 +18,14 @@ sensor:
   startup_delay_sec: 2.0       # PX6D v1.0.1 USB CDC settle time after open
 
 preprocessing:
-  # EMA convention: filtered = alpha * previous + (1-alpha) * current.
-  filter_alpha: 0.80
+  filter_alpha: 0.80  # deprecated, accepted for compatibility; no wrench EMA
+  kalman:
+    enabled: true
+    # Independent Base Fx/Fy/Fz random walks, variances in N^2 per sample.
+    # Conservative starting values only; tune using stationary PX6D records.
+    process_noise: 0.01
+    measurement_noise: 0.25
+    initial_covariance: 1.0
   baseline:
     capture_on_start: true
     sample_count: 100
@@ -31,6 +37,8 @@ preprocessing:
     # together with the actual TCP rotvec (rad) at which R_BS was measured.
     # Neither is inferred from TCP offset/pose or the probe shaft = TCP +Z.
     rotation_sensor_to_tool: null
+    # Unknown mounting: confirm each Sensor +X/+Y/+Z axis (including signs)
+    # in the ACTIVE TCP frame. Leave null until measured; do not guess identity.
     reference_tool_orientation: null
     # Unverified identity, NOT a measured calibration. R_BS maps sensor -> Base
     # at the saved fixed scan orientation. R_BS = R_BT @ R_TS only when the
@@ -45,6 +53,10 @@ preprocessing:
       - [0, 0, 1]
     # Vector from output-frame origin to sensor origin, expressed in output frame.
     sensor_origin_in_base_m: [0, 0, 0]
+    # Null = rotate torque at the sensor origin only, no claim of TCP torque.
+    # A measured vector TCP origin -> sensor origin, expressed in TCP (m),
+    # enables M_Base_at_TCP = R_BS M_S + (R_BT r_TS) x (R_BS F_S).
+    sensor_origin_in_tool_m: null
   # No-target response at the chosen granular insertion depth, in output frame.
   granular_baseline_output: [0, 0, 0, 0, 0, 0]  # MUST MEASURE
 

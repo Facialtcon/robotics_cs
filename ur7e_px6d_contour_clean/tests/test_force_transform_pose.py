@@ -39,7 +39,7 @@ def test_unknown_identity_does_not_become_calibrated_by_tcp_pose():
     assert config == before
 
 
-def test_unknown_mount_preserves_sensor_bias_and_filter_but_ignores_base_baseline():
+def test_unknown_mount_preserves_sensor_bias_without_base_filter_or_baseline():
     config = preprocessing()
     config['coordinate_transform']['rotation_sensor_to_base'] = RZ.tolist()
     config['coordinate_transform']['sensor_origin_in_base_m'] = [1., 2., 3.]
@@ -48,7 +48,9 @@ def test_unknown_mount_preserves_sensor_bias_and_filter_but_ignores_base_baselin
     processor = WrenchPreprocessor.from_config(config)
     processor.set_zero_bias([wrench([5., 0., 0.])])
     np.testing.assert_allclose(processor.process(wrench([7., 0., 0.])).array(), [2., 0., 0., 0., 0., 0.])
-    np.testing.assert_allclose(processor.process(wrench([9., 0., 0.])).force, [3., 0., 0.])
+    np.testing.assert_allclose(processor.process(wrench([9., 0., 0.])).force, [4., 0., 0.])
+    assert processor.force_kalman.state is None
+    assert processor.filtered_force_base is None
 
 
 def test_explicit_sensor_to_tool_composes_in_correct_order_and_updates():

@@ -19,6 +19,8 @@ SAMPLE_FIELDS = [
     "timestamp_utc", "monotonic_sec",
     "raw_fx", "raw_fy", "raw_fz", "raw_tx", "raw_ty", "raw_tz",
     "dfx", "dfy", "dfz", "dtx", "dty", "dtz",
+    "force_base_fx", "force_base_fy", "force_base_fz",
+    "filtered_force_base_fx", "filtered_force_base_fy", "filtered_force_base_fz",
     "fxy", "force_angle_rad", "processed_force_frame",
     "interaction_direction_x", "interaction_direction_y",
     "target_direction_x", "target_direction_y",
@@ -138,6 +140,11 @@ class ExperimentLogger:
             "monotonic_sec": f"{monotonic_sec:.9f}",
             **dict(zip(("raw_fx", "raw_fy", "raw_fz", "raw_tx", "raw_ty", "raw_tz"), raw_values)),
             **dict(zip(("dfx", "dfy", "dfz", "dtx", "dty", "dtz"), processed_values)),
+            # Explicit Base aliases accompany historical dfx/dfy/dfz. Raw
+            # columns remain Sensor measurements; return rows can be Sensor.
+            **dict(zip(('filtered_force_base_fx', 'filtered_force_base_fy', 'filtered_force_base_fz'),
+                       processed_values[:3] if (extra or {}).get('processed_force_frame', self.processed_force_frame) == 'Base'
+                       else ('', '', ''))),
             "fxy": features.fxy,
             "force_angle_rad": features.force_angle,
             "processed_force_frame": self.processed_force_frame,
@@ -170,9 +177,10 @@ class ExperimentLogger:
         }
         if extra:
             # Return may log raw Sensor coordinates while the scan logs Base.
-            # Only coordinate provenance may override its default; measurements,
-            # poses and timestamps remain protected from extra-field overwrite.
-            if set(extra) & (set(SAMPLE_FIELDS) - {'processed_force_frame'}):
+            # Frame and pre-filter force come from preprocessing. Published
+            # raw/filtered measurements, poses and timestamps stay protected.
+            if set(extra) & (set(SAMPLE_FIELDS) - {'processed_force_frame',
+                                                   'force_base_fx', 'force_base_fy', 'force_base_fz'}):
                 raise ValueError("extra sample data cannot overwrite standard fields")
             row.update(extra)
         self._samples.writerow(row)
