@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -131,11 +132,28 @@ class PX6DForceMonitor:
         self.force_frame = ('Sensor' if raw_only else
             getattr(preprocessor, 'force_transform_status', {}).get('output_frame', 'configured_output_frame'))
         self.raw = self.processed = None
+        self.robot_state = self.guard_wrench_base = None
+        self.enforce_processed_limits = False
         self.diagnostics = {}
+
+    def use_air_compensated_wrench(self, processor):
+        """After raised air zero, enforce insertion limits on total Base load."""
+        if processor.force_transform_status['output_frame'] != 'Base':
+            raise ReturnAborted('Base transform unavailable after air bias')
+        # Reuse the captured air zero with an independent return filter. Medium
+        # subtraction must never weaken insertion safety or prime scan Kalman.
+        self.preprocessor = deepcopy(processor)
+        from core.models import Wrench
+        self.preprocessor.set_granular_baseline(Wrench(0., 0., 0., 0., 0., 0.))
+        self.raw_only = False
+        self.force_frame = 'Base'
+        self.enforce_processed_limits = True
+        self.diagnostics.clear()
 
     def sample(self, *, read_state=None):
         self.raw = self.reader.read_wrench()
         state = None if read_state is None else read_state()
+        self.robot_state = state
         if state is not None and not self.raw_only:
             self.preprocessor.set_tool_orientation(state.pose[3:])
             self.force_frame = self.preprocessor.force_transform_status['output_frame']
@@ -143,18 +161,21 @@ class PX6DForceMonitor:
         # rotation-invariant raw norms during the return, never zero in contact
         # or label a wrench in the old orientation as a new Base measurement.
         self.processed = self.raw if self.raw_only else self.preprocessor.process(self.raw)
+        self.guard_wrench_base = (self.preprocessor.air_compensated_wrench_base(self.raw)
+                                 if self.enforce_processed_limits else None)
         if not np.isfinite(self.raw.array()).all() or not np.isfinite(self.processed.array()).all():
             raise ReturnAborted('nonfinite return wrench')
         s, p = self.config['safe_return'], self.config['policy']
+        protected = self.guard_wrench_base if self.enforce_processed_limits else self.processed
         for value, limit, label in (
-            (self.processed.force, s['return_force_limit'], 'return force'),
-            (self.processed.torque, s['return_torque_limit'], 'return torque'),
+            (protected.force, s['return_force_limit'], 'return force'),
+            (protected.torque, s['return_torque_limit'], 'return torque'),
             (self.raw.force, p['absolute_raw_force_threshold'], 'absolute raw force'),
             (self.raw.torque, p['absolute_raw_torque_threshold'], 'absolute raw torque')):
             magnitude = np.linalg.norm(value)
             real = self.config.get('continuous_real_execution', False)
             if magnitude > float(limit) or (real and label.startswith('absolute raw') and magnitude >= float(limit)):
-                if real and label.startswith('return '):
+                if real and label.startswith('return ') and not self.enforce_processed_limits:
                     # Continuous execution already treats these return levels
                     # as diagnostics. Before raised-position zero, raw loads
                     # include unknown bias/gravity/contact: they must not become
@@ -165,7 +186,9 @@ class PX6DForceMonitor:
                         f'WARNING: {source} {label} {magnitude:g} exceeds {limit:g}'
                         + ('; contact load unknown until raised-position zero' if self.raw_only else ''))
                     continue
-                raise ReturnAborted(f'{label} limit exceeded')
+                detail = (f': air-compensated Base norm {magnitude:g} > {limit:g}'
+                          if self.enforce_processed_limits and label.startswith('return ') else '')
+                raise ReturnAborted(f'{label} limit exceeded{detail}')
         return state
 
 
@@ -189,8 +212,16 @@ class SafeReturnExecutor:
         if self.poll() in ('Q', 'ESC'):
             raise KeyboardInterrupt('operator stopped return')
         if self.force_monitor is not None:
-            state = self.force_monitor.sample(read_state=self.controller.read_state)
-            self.controller.diagnostics.update(self.force_monitor.diagnostics)
+            try:
+                state = self.force_monitor.sample(read_state=self.controller.read_state)
+            finally:
+                self.controller.diagnostics.update(self.force_monitor.diagnostics)
+                recorder = getattr(self.logger, 'termination', None)
+                if recorder is not None:
+                    recorder.observe(raw=self.force_monitor.raw, processed=self.force_monitor.processed,
+                        robot=self.force_monitor.robot_state, processed_force_frame=self.force_monitor.force_frame,
+                        return_guard_wrench_base=(None if self.force_monitor.guard_wrench_base is None
+                                                 else self.force_monitor.guard_wrench_base.array().tolist()))
         else:
             state = self.controller.read_state()
         if self.logger is not None:
@@ -345,7 +376,11 @@ class SafeReturnExecutor:
                 stop_pose=result.stop_pose, final_pose=result.final_pose, return_target=self.start_pose.tolist(),
                 return_target_label=self.target_label, force_monitor=self.force_monitor is not None,
                 return_force_frame=None if self.force_monitor is None else self.force_monitor.force_frame,
-                return_bias_captured=False if self.force_monitor is not None and self.force_monitor.raw_only else None,
+                return_bias_captured=(None if self.force_monitor is None else
+                    (True if self.force_monitor.enforce_processed_limits else (False if self.force_monitor.raw_only else None))),
+                processed_return_limits_enforced=bool(self.force_monitor and self.force_monitor.enforce_processed_limits),
+                return_guard_wrench_base=(None if self.force_monitor is None or self.force_monitor.guard_wrench_base is None
+                                         else self.force_monitor.guard_wrench_base.array().tolist()),
                 stop_requests=self.controller.stop_history,
                 software_warnings=dict(self.controller.diagnostics))
             if hasattr(self.logger, 'write_json'):

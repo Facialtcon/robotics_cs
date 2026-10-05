@@ -1,6 +1,7 @@
 """Shared confirmed activation, stationary bias and force-monitored startup return."""
 import time
 import numpy as np
+from core.models import Wrench
 
 from robot.rtde_controller import RobotError, _orientation_distance, _rotvec_to_matrix
 from safety.force_guard import raw_safety_reason
@@ -32,7 +33,9 @@ def check_startup_stationary(config, state, controller, *, anchor=None):
             f'WARNING: startup noise: translation={translation:g} m/s, angular={angular:g} rad/s, drift={drift:g} m')
 
 
-def capture_stationary_bias(config, reader, preprocessor, controller, count, *, poll=lambda: None, logger=None):
+def _stationary_samples(config, reader, preprocessor, controller, count, *, poll, logger, granular=False):
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ValueError('stationary calibration sample_count must be a positive integer')
     anchor = controller.read_diagnostic_state().pose.copy()
     samples = []
     for _ in range(int(count)):
@@ -45,6 +48,15 @@ def capture_stationary_bias(config, reader, preprocessor, controller, count, *, 
             raise RobotError(reason)
         state = controller.read_diagnostic_state()
         check_startup_stationary(config, state, controller, anchor=anchor)
+        if granular:
+            preprocessor.set_tool_orientation(state.pose[3:])
+            sample = preprocessor.air_compensated_wrench_base(raw)
+            # Background calibration cannot hide an excessive insertion load.
+            for value, key in ((sample.force, 'return_force_limit'), (sample.torque, 'return_torque_limit')):
+                if np.linalg.norm(value) > config['safe_return'][key]:
+                    raise RobotError(f'{key} exceeded during granular baseline acquisition')
+        else:
+            sample = raw
         if logger is not None and hasattr(logger, 'check_health'):
             logger.check_health()
         if time.monotonic()-started > config['continuous_tracking']['cycle_timeout_sec']:
@@ -55,9 +67,21 @@ def capture_stationary_bias(config, reader, preprocessor, controller, count, *, 
         if controller.config.get('continuous_require_watchdog') and controller.watchdog_active:
             controller._check_watchdog_health()
             controller.kick_watchdog()
-        samples.append(raw)
+        samples.append(sample)
         time.sleep(max(0., 1/float(config['sensor']['poll_rate_hz'])-(time.monotonic()-started)))
+    return samples
+
+
+def capture_stationary_bias(config, reader, preprocessor, controller, count, *, poll=lambda: None, logger=None):
+    samples = _stationary_samples(config, reader, preprocessor, controller, count, poll=poll, logger=logger)
     preprocessor.set_zero_bias(samples)
+
+
+def capture_stationary_granular_baseline(config, reader, preprocessor, controller, count, *, poll=lambda: None, logger=None):
+    """Target-free stationary Base background; never call sensor set_zero_bias."""
+    samples = _stationary_samples(config, reader, preprocessor, controller, count,
+                                 poll=poll, logger=logger, granular=True)
+    preprocessor.set_granular_baseline(Wrench.from_sequence(np.mean([s.array() for s in samples], axis=0)))
 
 
 def hold_startup_confirmation(config, start, controller):
@@ -132,12 +156,16 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
                 recorder.observe(raw=monitor.raw, processed=monitor.processed, robot=fresh,
                                  processed_force_frame=monitor.force_frame)
     controller.activate_control(confirmed=True)
+    def prepared_descent(above):
+        processor = before_descent(above)
+        if processor is not None:
+            monitor.use_air_compensated_wrench(processor)
     if away or before_descent is not None:
         if controller.config.get('continuous_require_watchdog'):
             controller.enable_watchdog(config['continuous_tracking']['watchdog_frequency_hz'])
         result = SafeReturnExecutor(config, start, controller,
             force_monitor=monitor,
-            logger=logger, poll=poll).execute(before_descent=before_descent)
+            logger=logger, poll=poll).execute(before_descent=prepared_descent if before_descent is not None else None)
         if result.status != 'complete':
             raise RobotError(f'startup return aborted: {result.abort_reason}')
     report_alignment(controller.read_diagnostic_state())

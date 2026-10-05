@@ -47,6 +47,9 @@ def test_partial_low_force_recovery_enters_original_reacquire_at_fixed_deadline(
     assert not policy._low_force_pending
     command = sample(policy, started+timeout+.01, recovered_force)
     assert policy.state == State.LOCAL_REACQUIRE and not command.move
+    assert policy.last_reliable_contact['timestamp'] == memory['timestamp']
+    assert started+timeout+.01-memory['timestamp'] <= policy.c['memory_max_age_sec']
+    assert 'recovery_memory' not in policy.diagnostics
     np.testing.assert_array_equal(policy._memory_normal, memory['normal'])
     np.testing.assert_array_equal(policy._memory_tangent, memory['tangent'])
     assert [e.event_type for e in policy.events][-2:] == ['STANDSTILL_CONFIRMED', 'LOCAL_REACQUIRE']
@@ -93,3 +96,27 @@ def test_low_force_timeout_never_explores_without_physical_stop_confirmation(con
     assert policy.state == State.STOP
     assert policy.reason == 'contact lost stop confirmation timeout'
     assert not any(e.event_type == 'LOCAL_REACQUIRE' for e in policy.events)
+
+
+@pytest.mark.parametrize('timeout,memory_age,valid', [(1., .5, False), (1., 1.5, True),
+                                                   (2., 1.5, False), (2., 2.5, True)])
+def test_memory_configuration_covers_the_entire_low_force_wait(config, timeout, memory_age, valid):
+    config['continuous_tracking'].update(confirmation_timeout_sec=timeout, memory_max_age_sec=memory_age)
+    if valid:
+        ContinuousTrackingPolicy(config)
+    else:
+        with pytest.raises(ValueError, match='memory_max_age_sec must cover'):
+            ContinuousTrackingPolicy(config)
+
+
+def test_first_contact_cannot_wait_forever_for_physical_stop(config):
+    config['continuous_real_execution'] = True
+    policy = ContinuousTrackingPolicy(config)
+    assert sample(policy, 0., 1.2, settled=False).state == 'FIRST_CONTACT'
+    for i in range(1, 102):
+        command = sample(policy, i*.01, 1.2, settled=False)
+        assert not command.move
+        if policy.state == State.STOP:
+            break
+    assert policy.state == State.STOP
+    assert policy.reason == 'contact/standstill confirmation timeout'

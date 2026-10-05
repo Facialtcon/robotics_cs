@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 
 import numpy as np
+from core.models import Wrench
 
 from app.operator_input import OperatorKeyboard, confirm_enter
 from config.loader import load_config
@@ -60,6 +61,7 @@ def choose_tracking_speed(base_speed, max_speed, *, read_text, emit=print):
 
 from app.configuration import prepare_real, calibration_summary, site_configuration_digest
 from app.scan_startup import (startup_scan, capture_stationary_bias,
+                             capture_stationary_granular_baseline,
                              startup_position_tolerance, check_startup_stationary, hold_startup_confirmation)
 from experiment_logging.paths import git_provenance
 
@@ -163,6 +165,17 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             else:
                 print('WARNING: --duration applies to simulation only; real continuous execution has no runtime stop budget.', flush=True)
         dt = 1 / float(config["policy"]["control_rate_hz"])
+        baseline = config['preprocessing'].get('baseline', {'capture_on_start': True, 'sample_count': 100})
+        granular = config['preprocessing'].get('granular_baseline', dict(
+            capture_on_start=bool(baseline.get('capture_on_start', True)), sample_count=baseline['sample_count']))
+        if not isinstance(granular.get('capture_on_start', True), bool):
+            raise ValueError('granular_baseline.capture_on_start must be boolean')
+        if args.execute and granular.get('capture_on_start', True):
+            if not baseline.get('capture_on_start', True):
+                raise ValueError('granular baseline capture requires the raised-position air zero')
+            count = granular.get('sample_count', baseline['sample_count'])
+            if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+                raise ValueError('granular_baseline.sample_count must be a positive integer')
         if args.execute:
             preprocessor = WrenchPreprocessor.from_config(config["preprocessing"], tool_orientation=start[3:])
             config['force_transform_status'] = preprocessor.force_transform_status
@@ -215,7 +228,6 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         else:
             robot = controller.read_state()
         startup_return_done = False
-        baseline = config["preprocessing"].get("baseline", {"capture_on_start": True, "sample_count": 100})
         with OperatorKeyboard() as keyboard:
             if args.execute:
                 def prepare_descent(above):
@@ -251,10 +263,12 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     timing.update(selection)
                     logger.write_config_snapshot(config)
                     logger.write_json('tracking_speed_selection.json', selection)
-                    if not confirm_enter('即将垂直向下插入至 P0 扫描深度，然后从 P0 沿保存方向开始扫描。',
+                    if not confirm_enter('即将垂直向下插入至 P0 扫描深度，停稳并处理颗粒背景力后，从 P0 沿保存方向开始扫描。',
                                          read_line=keyboard.read_line):
                         raise KeyboardInterrupt('scan not confirmed')
                     hold_startup_confirmation(config, above, controller)
+                    termination.observe(phase='SCAN_INSERTION')
+                    return preprocessor if baseline.get('capture_on_start', True) else None
                 termination.observe(phase='STARTUP_RETURN')
                 startup_return_done = startup_scan(config, start, controller, reader, logger,
                     keyboard.poll, confirm=keyboard.read_line, before_descent=prepare_descent)
@@ -265,6 +279,27 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 termination.observe(force_transform_status=actual_transform)
                 logger.write_json('force_transform_at_start.json', actual_transform)
                 keyboard.on_wait = lambda: hold_startup_confirmation(config, start, controller)
+                if granular.get('capture_on_start', True):
+                    termination.observe(phase='GRANULAR_BASELINE_AT_P0')
+                    if not confirm_enter('P0 扫描深度：确认只有颗粒背景、未接触目标且静止；即将采集颗粒 baseline（不重采传感器 zero bias）。',
+                                         read_line=keyboard.read_line):
+                        raise KeyboardInterrupt('granular baseline not confirmed')
+                    capture_stationary_granular_baseline(config, reader, preprocessor, controller,
+                        granular.get('sample_count', baseline['sample_count']), poll=keyboard.poll, logger=logger)
+                    background_source = 'target_free_stationary_P0_after_insertion'
+                else:
+                    # An explicit configured Base background is independent of
+                    # air zero; calibration resets the scan filter once only.
+                    preprocessor.set_granular_baseline(Wrench.from_sequence(preprocessor.granular_baseline_output))
+                    background_source = 'configured_Base_background'
+                config['preprocessing']['granular_baseline_output'] = preprocessor.granular_baseline_output.tolist()
+                logger.write_json('granular_baseline_at_start.json', dict(
+                    source=background_source, frame='Base', tcp_pose=controller.read_state().pose.tolist(),
+                    granular_baseline_output=preprocessor.granular_baseline_output.tolist(),
+                    zero_bias_sensor=preprocessor.zero_bias_sensor.tolist(),
+                    sample_count=granular.get('sample_count', baseline['sample_count']) if granular.get('capture_on_start', True) else 0,
+                    condition='target-free background; no target force may be calibrated away'))
+                logger.write_config_snapshot(config)
             if not args.execute:
                 session.capture_bias(keyboard.poll, termination.observe)
         if args.execute and not startup_return_done and controller.config.get('continuous_require_watchdog'):

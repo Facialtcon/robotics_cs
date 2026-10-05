@@ -286,17 +286,21 @@ def test_real_contact_loss_reacquires_and_resumes(real):
 
 
 @pytest.mark.parametrize('missing_memory', [False, True])
-def test_unavailable_recovery_holds_then_accepts_contact(real, missing_memory):
+def test_unavailable_recovery_stops_within_existing_timeout(real, missing_memory):
     config, *_ = real
     policy = tracking(config)
     if missing_memory: policy.last_reliable_contact = None
     else: policy.c['reacquire_enabled'] = False
     for i in range(101, 220):
         command = sample(policy, i*.01, 0.)
-        assert not command.move and policy.state != State.STOP
-    assert policy.state == State.CONTACT_LOST
-    for i in range(220, 245): sample(policy, i*.01)
-    assert policy.state == State.CONTINUOUS_TRACKING
+        assert not command.move
+        if policy.state == State.STOP:
+            break
+    assert policy.state == State.STOP and policy.stop_reason.value == 'STOP_NO_CONTACT'
+    assert i*.01 <= 1.01+policy.c['confirmation_timeout_sec']+.01
+    # A late force increase cannot silently restart a terminal stop.
+    assert not sample(policy, (i+1)*.01).move and policy.state == State.STOP
+    assert not any(e.event_type == 'LOCAL_REACQUIRE' for e in policy.events)
 
 
 def test_contact_at_recovery_budget_edge_can_confirm(real):
@@ -308,16 +312,29 @@ def test_contact_at_recovery_budget_edge_can_confirm(real):
     assert policy.state == State.CONTINUOUS_TRACKING
 
 
-def test_recovery_memory_and_tracking_error_warn_but_spatial_limit_stops(real):
+def test_stale_recovery_memory_stops_instead_of_being_used(real):
     config, *_ = real
     policy = tracking(config)
     policy.last_reliable_contact['timestamp'] = -10.
+    for i in range(101, 119):
+        command = sample(policy, i*.01, 0.)
+        if policy.state == State.STOP:
+            break
+    assert not command.move and policy.state == State.STOP
+    assert policy.reason == 'recovery memory stale or unavailable'
+    assert policy.stop_reason.value == 'STOP_NO_CONTACT'
+    assert not any(e.event_type == 'LOCAL_REACQUIRE' for e in policy.events)
+
+
+def test_recovery_tracking_error_warns_but_spatial_limit_stops(real):
+    config, *_ = real
+    policy = tracking(config)
     policy._last_recovery_origin = np.zeros(6)
     lose(policy)
     policy.reacquire_reference = np.array([.001, 0])
     assert sample(policy, 1.19, 0.).move
     assert policy.state == State.LOCAL_REACQUIRE
-    assert {'recovery_memory', 'recovery_progress', 'recovery_tracking error'} <= policy.diagnostics.keys()
+    assert {'recovery_progress', 'recovery_tracking error'} <= policy.diagnostics.keys()
     assert sample(policy, 1.20, 0., pose=np.array([.004, 0, 0, 0, 0, 0])).state == 'STOP'
     assert 'displacement' in policy.reason
 

@@ -65,7 +65,11 @@ preprocessing:
     # reference origin. This origin definition is NOT confirmed by the maker.
     sensor_origin_in_tool_m: [0.0, 0.0, 0.024]
   # No-target response at the chosen granular insertion depth, in output frame.
-  granular_baseline_output: [0, 0, 0, 0, 0, 0]  # MUST MEASURE
+  granular_baseline_output: [0, 0, 0, 0, 0, 0]  # Base F/T; run-only measurement below replaces this placeholder
+  granular_baseline:
+    capture_on_start: true  # At settled P0 ONLY after operator confirms no target contact
+    sample_count: 100
+    condition: target_free_stationary_granular_P0
 
 policy:
   control_rate_hz: 100.0
@@ -260,7 +264,9 @@ continuous_tracking:
   unload_max_displacement_m: 0.001 # m; finite 1 mm excursion, no endless retreat
   unload_max_time_sec: 3.0        # s; total episode budget, never reset by intermittent improvement
   unload_resume_ramp_sec: 0.5     # s; smooth recovery, existing acceleration cap also applies
-  memory_max_age_sec: 0.5          # s; maximum age of recovery direction at stop
+  # Covers the 1 s confirmation wait, 0.15 s low-force hold and sample latency.
+  # Validate against these budgets; never refresh the timestamp while waiting.
+  memory_max_age_sec: 1.5          # s; maximum age of genuine contact memory at recovery start
   reacquire_enabled: true         # use the existing local arc after contact loss
   reacquire_radius: 0.002         # m; independent arc reference radius, no target truth
   reacquire_max_path: 0.004        # m; accumulated ACTUAL TCP path during one search

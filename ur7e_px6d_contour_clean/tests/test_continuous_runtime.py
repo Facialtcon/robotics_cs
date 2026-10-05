@@ -25,6 +25,9 @@ def prepare(config, monkeypatch, *, watchdog=False, synthetic_force_sign=None):
         c=original(path)
         c['preprocessing']['baseline']['sample_count']=2
         c['safe_return']['startup_bias_sample_count']=2
+        # Legacy sensor doubles have an explicitly zero granular background;
+        # medium calibration is exercised by dedicated startup regressions.
+        c['preprocessing']['granular_baseline']['capture_on_start'] = False
         c['continuous_tracking']['continuous_require_watchdog']=watchdog
         if synthetic_force_sign is not None:
             # Explicit convention for legacy targetward sensor doubles only;

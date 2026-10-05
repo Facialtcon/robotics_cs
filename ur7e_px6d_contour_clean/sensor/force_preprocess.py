@@ -270,6 +270,29 @@ class WrenchPreprocessor:
             return {}
         return dict(zip(('force_base_fx', 'force_base_fy', 'force_base_fz'), self.force_base))
 
+    def air_compensated_wrench_base(self, raw: Wrench) -> Wrench:
+        """Base wrench after air bias/gravity, before granular baseline/Kalman.
+
+        Used for independent background calibration and insertion protection;
+        neither call mutates the air zero or the persistent control filter.
+        """
+        if raw is None:
+            raise ValueError('raw sensor wrench is missing')
+        values = _six(raw.array(), 'raw sensor wrench')
+        if not self._transform_status['available']:
+            raise ValueError('Base transform unavailable for compensated wrench')
+        return Wrench.from_sequence(self._air_compensated_base(values))
+
+    def _air_compensated_base(self, raw_sensor_wrench):
+        corrected = raw_sensor_wrench-self.zero_bias_sensor-self.gravity_wrench_sensor
+        rotation = self.rotation_sensor_to_output
+        force_sensor = corrected[:3]
+        rotated_force_base = rotation @ force_sensor
+        torque_base = rotation @ corrected[3:]
+        if self._torque_reference_point_known:
+            torque_base += np.cross(self.sensor_origin_in_output_m, rotated_force_base)
+        return _six(np.r_[rotated_force_base, torque_base], 'air-compensated Base wrench')
+
     def process(self, raw: Wrench) -> Wrench:
         if raw is None:
             raise ValueError('raw sensor wrench is missing')
@@ -281,14 +304,9 @@ class WrenchPreprocessor:
             self.raw_sensor_wrench = raw_sensor_wrench.copy()
             self.force_base = self.filtered_force_base = None
             return Wrench.from_sequence(corrected)
-        rotation = self.rotation_sensor_to_output
-        force_sensor = corrected[:3]
-        rotated_force_base = rotation @ force_sensor
-        torque_base = rotation @ corrected[3:]  # rotation at the sensor origin
-        if self._torque_reference_point_known:
-            torque_base += np.cross(self.sensor_origin_in_output_m, rotated_force_base)
-        force_base = rotated_force_base - self.granular_baseline_output[:3]
-        torque_base -= self.granular_baseline_output[3:]
+        compensated_base = self._air_compensated_base(raw_sensor_wrench)
+        force_base = compensated_base[:3]-self.granular_baseline_output[:3]
+        torque_base = compensated_base[3:]-self.granular_baseline_output[3:]
         # Validate the entire output before touching persistent filter state.
         _six(np.r_[force_base, torque_base], 'transformed wrench')
         filtered_force_base = self.force_kalman.update(force_base)

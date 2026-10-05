@@ -151,6 +151,10 @@ def validate_config(config: dict) -> None:
         raise ValueError("boundary margin consumes recovery budget")
     if float(c["settle_hold_sec"]) >= float(c["confirmation_timeout_sec"]):
         raise ValueError("confirmation timeout must exceed settle hold")
+    minimum_memory_age = (float(c['confirmation_timeout_sec']) + float(c['contact_lost_hold_sec'])
+                          + 2*float(c['max_sample_gap_sec']))
+    if float(c['memory_max_age_sec']) < minimum_memory_age:
+        raise ValueError('memory_max_age_sec must cover confirmation_timeout_sec, contact_lost_hold_sec and two sample gaps')
     if float(c["max_sample_gap_sec"]) < 1 / float(p["control_rate_hz"]):
         raise ValueError("sample gap must cover nominal control period")
     unit(p["search_direction_xy"])
@@ -635,26 +639,15 @@ class ContinuousTrackingPolicy:
 
     def _begin_recovery(self, now, pose, *, robot=None):
         if not self.c['reacquire_enabled']:
-            if self.real_execution:
-                self.diagnostics['recovery_disabled'] = 'WARNING: recovery disabled; holding for contact'
-            else:
-                self.request_stop(now, pose, 'contact lost; experimental recovery disabled', code=TerminationReason.STOP_NO_CONTACT)
+            self.request_stop(now, pose, 'contact lost; experimental recovery disabled', code=TerminationReason.STOP_NO_CONTACT)
             return
         memory = self.last_reliable_contact
         if memory is None or now-memory['timestamp'] > float(self.c['memory_max_age_sec']):
-            if self.real_execution:
-                self.diagnostics['recovery_memory'] = 'WARNING: recovery memory stale or unavailable'
-                if memory is None:
-                    return  # Hold for contact; no new direction or search is invented.
-            else:
-                self.request_stop(now, pose, 'recovery memory stale or unreliable')
-                return
+            self.request_stop(now, pose, 'recovery memory stale or unavailable', code=TerminationReason.STOP_NO_CONTACT)
+            return
         if memory['confidence'] < float(self.c['direction_min_coherence']):
-            if self.real_execution:
-                self.diagnostics['recovery_confidence'] = 'WARNING: recovery memory confidence below configured threshold'
-            else:
-                self.request_stop(now, pose, 'recovery memory stale or unreliable')
-                return
+            self.request_stop(now, pose, 'recovery memory unreliable', code=TerminationReason.STOP_NO_CONTACT)
+            return
         if (self._last_recovery_origin is not None
                 and np.linalg.norm(pose[:2]-self._last_recovery_origin[:2]) < float(self.c['reacquire_min_progress'])):
             if self.real_execution:
@@ -890,6 +883,8 @@ class ContinuousTrackingPolicy:
                 self._event(now, pose, 'FIRST_CONTACT_RETRY_SEARCH')
                 # This transition sample remains stopped; the next SEARCH tick
                 # applies the unchanged contact and polygon checks before moving.
+            elif now-self._confirm_started >= float(self.c['confirmation_timeout_sec']):
+                self.request_stop(now, pose, 'contact/standstill confirmation timeout')
             return self._command(pose)
         if self.state == State.DIRECTION_RECONFIRM:
             return self._direction_reconfirm(now, robot, vector)
@@ -990,8 +985,8 @@ class ContinuousTrackingPolicy:
                 if now-self._confirm_started+1e-12 < float(self.c['confirmation_timeout_sec']):
                     return self._command(pose)
                 # A failed confirmation cannot keep this stop pending forever.
-                # If recovery is unavailable, _begin_recovery retains the old
-                # stationary hold; later valid contact may still be accepted.
+                # Unavailable/expired recovery memory ends in a safe stop;
+                # it cannot reopen an unlimited stationary wait.
             if self._settled(now, robot):
                 self._begin_recovery(now, pose, robot=robot)
             elif now-self._confirm_started >= float(self.c['confirmation_timeout_sec']):
