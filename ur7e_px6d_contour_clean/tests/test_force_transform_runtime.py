@@ -72,9 +72,10 @@ def test_vertical_startup_transforms_synthetic_mount_at_actual_pose_before_polic
 
         def read_wrench(self):
             self.count += 1
-            if self.loading:
+            scan_loading = self.loading and not devices.owner._return_mode
+            if scan_loading:
                 self.loading_count += 1
-            force = sensor_force * self.loading_count if self.loading else np.zeros(3)
+            force = sensor_force * self.loading_count if scan_loading else np.zeros(3)
             return Wrench.from_sequence([*force, 0., 0., 0.])
 
     sensor = SyntheticSensor()
@@ -165,10 +166,14 @@ def test_runtime_timeout_after_valid_sample_never_updates_kalman_or_retries(
     monkeypatch.setattr(runtime, 'load_config', load)
 
     class TimeoutSensor(Sensor):
+        scan_reads = 0
         def read_wrench(self):
             self.count += 1
-            assert self.count <= 2, 'failed acquisition must not be retried during cleanup'
-            if self.count == 2:
+            if devices.owner.control is None or devices.owner._return_mode:
+                return Wrench(0., 0., 0., 0., 0., 0.)
+            self.scan_reads += 1
+            assert self.scan_reads <= 2, 'failed acquisition must not be retried during cleanup'
+            if self.scan_reads == 2:
                 raise PX6DTimeout('offline force-chain timeout')
             return Wrench(.1, .2, .3, 0., 0., 0.)
 
@@ -184,13 +189,13 @@ def test_runtime_timeout_after_valid_sample_never_updates_kalman_or_retries(
     settings.duration = 1.0
     assert runtime.run(settings, controller_factory=devices.controller,
                        reader_factory=lambda *unused: sensor) == 1
-    assert sensor.count == 2 and len(updates) == 1
+    assert sensor.scan_reads == 2 and len(updates) == 1
     processor, state, covariance = updates[0]
     np.testing.assert_array_equal(processor.force_kalman.state, state)
     np.testing.assert_array_equal(processor.force_kalman.covariance, covariance)
     run_dir, = (tmp_path/'real/continuous').glob('run_*')
     with (run_dir/'samples.csv').open(newline='') as handle:
-        rows = list(csv.DictReader(handle))
+        rows = [r for r in csv.DictReader(handle) if r['current_state'] != 'RETURN_TO_START']
     assert len(rows) == 1
     record = json.loads((run_dir/'termination.json').read_text())
     assert record['reason'] == 'STOP_SENSOR_ERROR'  # existing PX6D error classification

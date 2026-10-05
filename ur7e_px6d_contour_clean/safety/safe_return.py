@@ -251,9 +251,10 @@ class SafeReturnExecutor:
                 return state
             time.sleep(max(0., self.period-(time.monotonic()-started)))
 
-    def execute(self):
+    def execute(self, *, before_descent=None):
         self.controller.begin_return_mode()
         initial = final = self.start_pose.copy()
+        descent_error = None
         try:
             self._settle()
             initial = self.observe().pose.copy()
@@ -265,6 +266,12 @@ class SafeReturnExecutor:
                 check_continuous_xy(self.controller.config, target[:2])
             for self.phase, self.target, speed in segments:
                 self.command_speed = 0.
+                if self.phase == 'DESCEND_TO_START' and before_descent is not None:
+                    # Startup scan zeros at the existing above-P0 endpoint,
+                    # after final orientation and a held physical standstill.
+                    self._settle()
+                    before_descent(segments[2][1].copy())
+                    self.previous_cycle = None  # Operator wait is not a motion sample gap.
                 state = self.observe()
                 if self.phase == 'ALIGN_PROBE_ORIENTATION':
                     # A failed retreat/stop exits above; alignment also rechecks
@@ -312,6 +319,8 @@ class SafeReturnExecutor:
             final = self._settle().pose
             result = ReturnResult('complete', '', initial.tolist(), final.tolist())
         except BaseException as exc:
+            if before_descent is not None:
+                descent_error = exc
             self.controller.request_stop(nonblocking=True)
             stop_error = ''
             try:
@@ -335,4 +344,6 @@ class SafeReturnExecutor:
                 self.logger.write_json('return_status.json', payload)
             else:
                 (Path(self.logger.run_dir)/'return_status.json').write_text(json.dumps(payload, indent=2), encoding='utf-8')
+        if descent_error is not None:
+            raise descent_error  # Preserve bias errors/cancellation after stop/cleanup.
         return result

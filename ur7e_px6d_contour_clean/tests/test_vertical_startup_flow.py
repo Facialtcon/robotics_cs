@@ -81,7 +81,8 @@ def test_raw_monitor_ignores_wrong_old_bias_and_transform(config):
     with pytest.raises(ReturnAborted, match='return force limit'): monitor.sample()
 
 
-def test_runtime_captures_single_bias_only_after_final_vertical_pose(config, clock, monkeypatch, tmp_path):
+@pytest.mark.parametrize('already_at_p0', [False, True])
+def test_runtime_captures_single_bias_above_p0_before_vertical_insertion(config, clock, monkeypatch, tmp_path, already_at_p0):
     from app import continuous_runtime as runtime
     from doubles import Devices
     from test_continuous_runtime import args, prepare
@@ -89,15 +90,67 @@ def test_runtime_captures_single_bias_only_after_final_vertical_pose(config, clo
     from experiment_logging.paths import PROJECT_ROOT
     target = prepare(config, monkeypatch)
     saved = load_scan_calibration(PROJECT_ROOT/'scan_calibration.yaml')['start_tcp_pose']
-    devices = Devices(config, saved)
+    devices = Devices(config, target if already_at_p0 else saved)
     original = WrenchPreprocessor.set_zero_bias
     captures = []
     def capture(processor, samples):
         captures.append(devices.receive.pose.copy())
-        np.testing.assert_allclose(devices.receive.pose, target)
+        above = np.array(target)
+        above[2] += config['safe_return']['return_lift_distance']
+        np.testing.assert_allclose(devices.receive.pose, above)
         assert any(c[0] == 'moveL' for c in devices.control.calls)
         assert not any(c[0] == 'speedL' and np.linalg.norm(c[1][:2]) > 0 for c in devices.control.calls)
         return original(processor, samples)
     monkeypatch.setattr(WrenchPreprocessor, 'set_zero_bias', capture)
     assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=Sensor) == 0
     assert len(captures) == 1
+    moves = [np.array(c[1]) for c in devices.control.calls if c[0] == 'moveL']
+    np.testing.assert_allclose(moves[-1], target)
+    assert moves[-1][2] < captures[0][2]
+    np.testing.assert_allclose(moves[-1][[0, 1, 3, 4, 5]], captures[0][[0, 1, 3, 4, 5]])
+
+
+def test_insertion_load_is_preserved_instead_of_zeroed_at_depth(config, clock, monkeypatch, tmp_path):
+    import json
+    from app import continuous_runtime as runtime
+    from doubles import Devices
+    from test_continuous_runtime import args, prepare
+    target = prepare(config, monkeypatch)
+    devices = Devices(config, target)
+    class LoadedSensor(Sensor):
+        def read_wrench(self):
+            self.count += 1
+            # Synthetic unloaded offset above P0, added insertion load at depth.
+            force = .2 if devices.receive.pose[2] > target[2]+.015 else 1.2
+            return Wrench(0., 0., force, 0., 0., 0.)
+    forces = []
+    update = runtime.ContinuousTrackingPolicy.update
+    def observe(policy, now, raw, processed, *args, **kwargs):
+        forces.append(processed.fz)
+        return update(policy, now, raw, processed, *args, **kwargs)
+    monkeypatch.setattr(runtime.ContinuousTrackingPolicy, 'update', observe)
+    assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=LoadedSensor) == 0
+    directory, = (tmp_path/'real/continuous').glob('run_*')
+    bias = json.loads((directory/'scan_bias_at_start.json').read_text())
+    assert bias['reference'] == 'above_P0_before_vertical_insertion'
+    assert bias['tcp_pose'][2] == pytest.approx(target[2]+.030)
+    assert bias['zero_bias_sensor'][2] == pytest.approx(.2)
+    assert forces and min(forces) > .5  # Insertion force reaches the real preprocessing/policy path.
+
+
+def test_bias_failure_above_p0_prevents_descent(config, clock, monkeypatch, tmp_path):
+    import json
+    from app import continuous_runtime as runtime
+    from doubles import Devices
+    from sensor.px6d_reader import PX6DTimeout
+    from test_continuous_runtime import args, prepare
+    target = prepare(config, monkeypatch)
+    devices = Devices(config, target)
+    def fail(processor, samples):
+        raise PX6DTimeout('injected failure while capturing raised scan bias')
+    monkeypatch.setattr(WrenchPreprocessor, 'set_zero_bias', fail)
+    assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=Sensor) == 1
+    assert not any(c[0] == 'moveL' and np.isclose(c[1][2], target[2]) for c in devices.control.calls)
+    directory, = (tmp_path/'real/continuous').glob('run_*')
+    assert json.loads((directory/'termination.json').read_text())['reason'] == 'STOP_SENSOR_ERROR'
+    assert not devices.receive.connected and not devices.control.connected

@@ -68,7 +68,7 @@ def hold_startup_confirmation(config, start, controller):
         controller.kick_watchdog()
 
 
-def startup_scan(config, start, controller, reader, logger, poll, *, confirm=None):
+def startup_scan(config, start, controller, reader, logger, poll, *, confirm=None, before_descent=None):
     startup = {'startup': True} if config.get('continuous_real_execution') else {}
     current = controller.wait_for_standstill(**startup)
     segments = return_trajectory(config, current.pose, start)
@@ -95,12 +95,12 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
             logger.write_json('startup_alignment.json', record)
     if alignment:
         print(f'当前探针倾角 {tilt(current.pose):.4f}°，目标 {tilt(start):.4f}°（Base -Z，基座须水平）。')
-    if not away:
+    if not away and before_descent is None:
         print('Startup return: already at P0 and aligned; no return motion required.')
         report_alignment(current)
         return False
     temporary = WrenchPreprocessor.from_config(config['preprocessing'])
-    if not alignment:
+    if not alignment and before_descent is None:
         if not confirm_enter('探针须脱离目标、静止空载；即将采集启动返回用零偏。', read_line=confirm):
             raise KeyboardInterrupt('bias not confirmed')
         fresh = controller.wait_for_standstill(**startup)
@@ -109,7 +109,9 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
             raise RobotError('robot moved during path confirmation')
         capture_stationary_bias(config, reader, temporary, controller,
             config['safe_return']['startup_bias_sample_count'], poll=poll, logger=logger)
-    prompt = ('探针已脱离目标及颗粒、静止空载，基座水平，抬升后有足够旋转空间；'
+    prompt = ('机器人静止，基座水平，抬升后有足够旋转空间；核对路径，即将垂直抬升脱离颗粒、'
+              '调正探针并移至扫描 P0 正上方，在抬升位置采零后再下降到 P0。' if before_descent is not None else
+              '探针已脱离目标及颗粒、静止空载，基座水平，抬升后有足够旋转空间；'
               '核对路径，即将抬升、调正探针并自动返回扫描 P0（此时不采零）。' if alignment else
               '核对完整返回路径和姿态；即将自动返回扫描 P0。')
     if not confirm_enter(prompt, read_line=confirm):
@@ -118,14 +120,25 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
     if (np.linalg.norm(fresh.pose[:3]-current.pose[:3]) > startup_position_tolerance(config) or
         _orientation_distance(fresh.pose[3:], current.pose[3:]) > config['safe_return']['return_orientation_tolerance']):
         raise RobotError('robot moved during path confirmation')
+    monitor = PX6DForceMonitor(config, reader, temporary, raw_only=bool(alignment or before_descent))
+    if before_descent is not None:
+        # Verify the existing raw force guard before opening control for the
+        # mandatory lift. Preserve sensor errors and any force-limit evidence.
+        try:
+            monitor.sample(read_state=controller.read_diagnostic_state)
+        finally:
+            recorder = getattr(logger, 'termination', None)
+            if recorder is not None:
+                recorder.observe(raw=monitor.raw, processed=monitor.processed, robot=fresh,
+                                 processed_force_frame=monitor.force_frame)
     controller.activate_control(confirmed=True)
-    if away:
+    if away or before_descent is not None:
         if controller.config.get('continuous_require_watchdog'):
             controller.enable_watchdog(config['continuous_tracking']['watchdog_frequency_hz'])
         result = SafeReturnExecutor(config, start, controller,
-            force_monitor=PX6DForceMonitor(config, reader, temporary, raw_only=bool(alignment)),
-            logger=logger, poll=poll).execute()
+            force_monitor=monitor,
+            logger=logger, poll=poll).execute(before_descent=before_descent)
         if result.status != 'complete':
             raise RobotError(f'startup return aborted: {result.abort_reason}')
     report_alignment(controller.read_diagnostic_state())
-    return away
+    return away or before_descent is not None

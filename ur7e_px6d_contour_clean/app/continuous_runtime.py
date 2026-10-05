@@ -215,11 +215,43 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         else:
             robot = controller.read_state()
         startup_return_done = False
+        baseline = config["preprocessing"].get("baseline", {"capture_on_start": True, "sample_count": 100})
         with OperatorKeyboard() as keyboard:
             if args.execute:
+                def prepare_descent(above):
+                    # Reuse MOVE_ABOVE_START's safe height. Never zero at scan
+                    # depth, including a startup already positioned at P0.
+                    termination.observe(phase='SCAN_BIAS_ABOVE_P0')
+                    state = controller.read_state()
+                    check_startup_stationary(config, state, controller, anchor=above)
+                    preprocessor.set_tool_orientation(state.pose[3:])
+                    keyboard.on_wait = lambda: hold_startup_confirmation(config, above, controller)
+                    if baseline.get('capture_on_start', True):
+                        if not confirm_enter('P0 正上方抬升位置：确认探针脱离目标及颗粒、静止空载；即将采集扫描零偏。',
+                                             read_line=keyboard.read_line):
+                            raise KeyboardInterrupt('bias not confirmed')
+                        capture_stationary_bias(config, reader, preprocessor, controller,
+                            baseline['sample_count'], poll=keyboard.poll, logger=logger)
+                        logger.write_json('scan_bias_at_start.json', dict(
+                            reference='above_P0_before_vertical_insertion', tcp_pose=state.pose.tolist(),
+                            zero_bias_sensor=preprocessor.zero_bias_sensor.tolist(), sample_count=baseline['sample_count']))
+                    selection = choose_tracking_speed(base_tangential_speed, float(config['robot']['max_tcp_speed']),
+                                                      read_text=keyboard.read_text)
+                    # Only the desired tangential component changes; retain all
+                    # return/reacquire/normal speeds and execution protections.
+                    config['continuous_tracking']['tangential_speed'] = selection['tracking_nominal_speed_mps']
+                    policy.c['tangential_speed'] = selection['tracking_nominal_speed_mps']
+                    config['continuous_speed_selection'] = selection
+                    timing.update(selection)
+                    logger.write_config_snapshot(config)
+                    logger.write_json('tracking_speed_selection.json', selection)
+                    if not confirm_enter('即将垂直向下插入至 P0 扫描深度，然后从 P0 沿保存方向开始扫描。',
+                                         read_line=keyboard.read_line):
+                        raise KeyboardInterrupt('scan not confirmed')
+                    hold_startup_confirmation(config, above, controller)
                 termination.observe(phase='STARTUP_RETURN')
                 startup_return_done = startup_scan(config, start, controller, reader, logger,
-                                                          keyboard.poll, confirm=keyboard.read_line)
+                    keyboard.poll, confirm=keyboard.read_line, before_descent=prepare_descent)
                 robot = check_start(controller, start, config)
                 preprocessor.set_tool_orientation(robot.pose[3:])
                 actual_transform = dict(preprocessor.force_transform_status,
@@ -227,31 +259,8 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 termination.observe(force_transform_status=actual_transform)
                 logger.write_json('force_transform_at_start.json', actual_transform)
                 keyboard.on_wait = lambda: hold_startup_confirmation(config, start, controller)
-            baseline = config["preprocessing"].get("baseline", {"capture_on_start": True, "sample_count": 100})
             if not args.execute:
                 session.capture_bias(keyboard.poll, termination.observe)
-            elif baseline.get("capture_on_start", True):
-                if not confirm_enter('最终姿态的 P0 处探针须脱离目标及颗粒、静止空载；即将采集扫描零偏。', read_line=keyboard.read_line):
-                    raise KeyboardInterrupt('bias not confirmed')
-                capture_stationary_bias(config, reader, preprocessor, controller,
-                    baseline['sample_count'], poll=keyboard.poll, logger=logger)
-            if args.execute:
-                selection = choose_tracking_speed(base_tangential_speed, float(config['robot']['max_tcp_speed']),
-                                                  read_text=keyboard.read_text)
-                # Only the desired tangential component changes. Leave robot
-                # execution envelopes, normal feedback, SEARCH/return/reacquire,
-                # global cap, acceleration and all stop protections untouched.
-                config['continuous_tracking']['tangential_speed'] = selection['tracking_nominal_speed_mps']
-                policy.c['tangential_speed'] = selection['tracking_nominal_speed_mps']
-                config['continuous_speed_selection'] = selection
-                timing.update(selection)
-                logger.write_config_snapshot(config)
-                logger.write_json('tracking_speed_selection.json', selection)
-                if not confirm_enter('即将从 P0 沿保存方向开始扫描。', read_line=keyboard.read_line):
-                    raise KeyboardInterrupt('scan not confirmed')
-                hold_startup_confirmation(config, start, controller)
-                if not startup_return_done:
-                    controller.activate_control(confirmed=True)
         if args.execute and not startup_return_done and controller.config.get('continuous_require_watchdog'):
             controller.enable_watchdog(float(policy.c['watchdog_frequency_hz']))
         with OperatorKeyboard() as keyboard:

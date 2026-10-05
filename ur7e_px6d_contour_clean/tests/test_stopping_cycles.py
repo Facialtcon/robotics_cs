@@ -84,8 +84,9 @@ def test_search_limit_brakes_across_logged_cycles(config, monkeypatch, tmp_path,
     stopping = [r for r in rows if r['runtime_stop_state'] == 'STOPPING']
     assert len(stopping) >= 10
     assert record['script_stop']-record['start'] > .1
-    assert len(record['mode_exits']) == 1
-    assert record['mode_exits'][0]-record['start'] >= .12
+    scan_exits = [t for t in record['mode_exits'] if t >= record['start']]
+    assert len(scan_exits) == 1
+    assert scan_exits[0]-record['start'] >= .12
     kicks = [t for t in record['kicks'] if t >= record['start']]
     assert len(kicks) >= 10 and max(np.diff(kicks)) < .03
     assert all(float(r['command_return_time'])-float(r['cycle_start_time']) < .03 for r in stopping)
@@ -93,7 +94,7 @@ def test_search_limit_brakes_across_logged_cycles(config, monkeypatch, tmp_path,
     assert any(float(r['actual_xyz_speed_mps']) > .001 for r in stopping)
     assert any(0 < float(r['actual_xyz_speed_mps']) <= .0001 for r in stopping)
     summary = json.loads((run_dir/'summary.json').read_text())
-    report, = summary['stop_observation']['stop_requests']
+    report = summary['stop_observation']['stop_requests'][-1]
     assert report['physical_stop'] == 'confirmed'
     assert report['api_anomaly'] is (not stop_value)
     termination = json.loads((run_dir/'termination.json').read_text())
@@ -118,9 +119,12 @@ def test_first_contact_uses_same_braking_monitor(config, monkeypatch, tmp_path):
         return original_health(logger)
     monkeypatch.setattr(runtime.ContinuousLogWriter, 'check_health', checked_health)
     class ContactSensor(Sensor):
+        scan_reads = 0
         def read_wrench(self):
             self.count += 1
-            return Wrench(0 if self.count < 10 else 1.5, 0, 0, 0, 0, 0)
+            if devices.owner.control is not None and not devices.owner._return_mode:
+                self.scan_reads += 1
+            return Wrench(0 if self.scan_reads < 10 else 1.5, 0, 0, 0, 0, 0)
     settings = args(tmp_path); settings.duration = .65
     assert runtime.run(settings, controller_factory=devices.controller, reader_factory=ContactSensor) == 0
     run_dir, = (tmp_path/'real/continuous').glob('run_*')
@@ -128,9 +132,9 @@ def test_first_contact_uses_same_braking_monitor(config, monkeypatch, tmp_path):
     contact = [r for r in rows if r['current_state'] == 'FIRST_CONTACT']
     assert len([r for r in contact if r['runtime_stop_state'] == 'STOPPING']) >= 10
     assert any(r['current_state'] == 'CONTINUOUS_TRACKING' for r in rows)
-    assert len(record['mode_exits']) == 2  # contact and final time limit
+    assert len(record['mode_exits']) == 3  # initial activation, contact and final operator stop
     summary = json.loads((run_dir/'summary.json').read_text())
-    stop = summary['stop_observation']['stop_requests'][0]
+    stop = [r for r in summary['stop_observation']['stop_requests'] if r.get('braking_method') == 'speedL_zero'][-2]
     assert stop['request_host_monotonic'] <= stop['first_low_speed_host_monotonic'] <= stop['confirmed_host_monotonic']
     assert stop['confirmed_host_monotonic']-stop['settle_hold_start_host_monotonic'] >= .08
 
@@ -182,7 +186,7 @@ def test_stopping_keeps_hard_force_and_freshness_guards(config, monkeypatch, tmp
     devices.control.stopScript = lambda: True  # Faults deliberately stop healthy watchdog kicks.
     class FaultSensor(Sensor):
         def read_wrench(self):
-            if record['start'] is not None:
+            if record['start'] is not None and devices.owner._scan_motion_started:
                 if fault == 'stale_rtde':
                     devices.receive.frozen_stamp = devices.owner._packet_stamp
                 else:

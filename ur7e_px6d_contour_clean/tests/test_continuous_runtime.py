@@ -69,7 +69,7 @@ def test_fake_real_continuous_owns_one_control_and_correct_logs(config,monkeypat
     assert d.control_count==d.receive_count==1
     assert not d.receive.connected and not d.control.connected and not sensor.connected
     assert any(x[0]=='speedL' for x in d.control.calls)
-    assert any(x[0]=='moveL' for x in d.control.calls)==away
+    assert any(x[0]=='moveL' for x in d.control.calls)  # P0 also lifts before scan bias.
     path,=(tmp_path/'real/continuous').glob('run_*')
     assert read_metadata(path)['mode']=='real'
     summary=json.loads((path/'summary.json').read_text())
@@ -103,19 +103,27 @@ def test_each_startup_action_requires_separate_enter(config, monkeypatch, tmp_pa
     if stage.startswith('return'):
         pose[0] += .003
     devices, sensor = Devices(config, pose), Sensor()
-    prompts = []
+    prompts, captures = [], []
+    from sensor.force_preprocess import WrenchPreprocessor
+    zero = WrenchPreprocessor.set_zero_bias
+    def capture(processor, samples):
+        captures.append(devices.receive.pose.copy())
+        return zero(processor, samples)
+    monkeypatch.setattr(WrenchPreprocessor, 'set_zero_bias', capture)
     def read_line(self, prompt):
-        current = ('return_bias' if '启动返回用零偏' in prompt else
-                   'return_motion' if '自动返回扫描 P0' in prompt else
+        current = ('return_motion' if '即将垂直抬升' in prompt else
                    'scan_bias' if '扫描零偏' in prompt else 'scan_motion')
         prompts.append(current)
-        assert devices.control_count == 0
-        assert sensor.count == (2 if current == 'scan_motion' else 0)
+        assert devices.control_count == (0 if current == 'return_motion' else 1)
+        assert len(captures) == int(current == 'scan_motion')
+        if current != 'return_motion':
+            assert devices.receive.pose[2] == pytest.approx(target[2]+config['safe_return']['return_lift_distance'])
         return 'q' if current == stage else ''
     monkeypatch.setattr(Keyboard, 'read_line', read_line)
     assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=lambda *a: sensor) == 0
     assert prompts[-1] == stage
-    assert devices.control_count == 0
+    assert devices.control_count == int(stage != 'return_motion')
+    assert not any(c[0] == 'moveL' and np.isclose(c[1][2], target[2]) for c in devices.control.calls)
     assert not sensor.connected and not devices.receive.connected
 
 
@@ -168,11 +176,14 @@ def test_px6d_timeout_preserves_evidence_stops_and_never_retries_while_braking(c
     class TimeoutSensor(Sensor):
         failed = False
         reads_after_failure = 0
+        scan_reads = 0
         def read_wrench(self):
             if self.failed:
                 self.reads_after_failure += 1
                 raise AssertionError('sensor was retried while braking')
-            if self.count >= 5:
+            if not devices.owner._return_mode:
+                self.scan_reads += 1
+            if self.scan_reads >= 4:
                 self.failed = True
                 exc = PX6DTimeout('PX6D response timeout after 0.050 s')
                 exc.sensor_diagnostics = {'requests': [{'request_id': 6, 'rx_bytes': 0}]}
@@ -210,9 +221,12 @@ def test_fake_contact_brakes_confirms_and_enters_tracking(config,monkeypatch,tmp
     # opposes the saved search approach under the real sign=-1 convention.
     approach = np.array(load_scan_calibration(PROJECT_ROOT/'scan_calibration.yaml')['scan_direction_xy'])
     class ContactSensor(Sensor):
+        scan_reads = 0
         def read_wrench(self):
             self.count+=1
-            reaction = np.zeros(2) if self.count < 10 else -1.5*approach
+            if not d.owner._return_mode:
+                self.scan_reads += 1
+            reaction = np.zeros(2) if self.scan_reads < 10 else -1.5*approach
             return Wrench(*reaction, 0., 0., 0., 0.)
     settings=args(tmp_path);settings.duration=.6
     assert runtime.run(settings,controller_factory=d.controller,reader_factory=ContactSensor)==0

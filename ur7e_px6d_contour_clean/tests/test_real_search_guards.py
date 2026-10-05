@@ -146,14 +146,17 @@ def test_real_loop_continues_after_single_slow_sample(config, monkeypatch, tmp_p
     target = prepare(config, monkeypatch)
     devices = Devices(config, target)
     class JitterSensor(Sensor):
+        scan_reads = 0
         def read_wrench(self):
-            if self.count == 5:
+            if devices.owner.control is not None and not devices.owner._return_mode:
+                self.scan_reads += 1
+            if self.scan_reads == 4:
                 time.sleep(jitter)
             return super().read_wrench()
     settings = args(tmp_path); settings.duration = .25
     assert runtime.run(settings, controller_factory=devices.controller, reader_factory=JitterSensor) == 0
     run_dir, = (tmp_path/'real/continuous').glob('run_*')
-    rows = list(csv.DictReader((run_dir/'samples.csv').open()))
+    rows = [r for r in csv.DictReader((run_dir/'samples.csv').open()) if r['current_state'] != 'RETURN_TO_START']
     slow = next(i for i, row in enumerate(rows)
                 if float(row['serial_read_end'])-float(row['serial_read_start']) >= jitter)
     assert rows[slow+1]['current_state'] == 'TARGET_SEARCH'
@@ -273,8 +276,13 @@ def test_real_device_exceptions_and_raw65_end_motion(config, monkeypatch, tmp_pa
     target = prepare(config, monkeypatch)
     devices = Devices(config, target)
     class FaultSensor(Sensor):
+        scan_reads = 0
         def read_wrench(self):
-            if self.count >= 5:
+            if devices.owner.control is not None and not devices.owner._return_mode:
+                self.scan_reads += 1
+            # Inject the original scan fault after unloaded startup acquisition,
+            # rather than counting the newly mandatory lift's monitor samples.
+            if self.scan_reads >= 5:
                 if source == 'px6d':
                     raise OSError('PX6D communication failed')
                 if source == 'raw65':

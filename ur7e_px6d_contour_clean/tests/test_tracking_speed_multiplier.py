@@ -158,6 +158,8 @@ def test_real_entry_selects_before_scan_and_records_effective_settings_without_s
         rows = list(csv.DictReader(handle))
     assert rows
     for row in rows:
+        if row['current_state'] == 'RETURN_TO_START':
+            continue  # Selection occurs above P0 after the initial lift/transit.
         for key, value in selection.items():
             assert float(row[key]) == value
     output = capsys.readouterr().out

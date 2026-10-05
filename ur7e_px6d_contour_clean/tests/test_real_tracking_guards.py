@@ -454,13 +454,16 @@ def test_real_fake_runtime_passes_120_seconds_in_tracking(config, monkeypatch, t
     monkeypatch.setattr(ContinuousTrackingPolicy, 'update', record)
     jumped = False
     class ContactSensor(Sensor):
+        scan_reads = 0
         def read_wrench(self):
             nonlocal jumped
             self.count += 1
+            if devices.owner.control is not None and not devices.owner._return_mode:
+                self.scan_reads += 1
             if devices.owner.continuous_phase == 'CONTINUOUS_TRACKING' and not jumped:
                 clock.now += 121.
                 jumped = True
-            return Wrench(0. if self.count < 10 else 1.5, 0, 0, 0, 0, 0)
+            return Wrench(0. if self.scan_reads < 10 else 1.5, 0, 0, 0, 0, 0)
     def poll(self):
         return 'Q' if self.main_loop and observed and observed[-1][0] > 120 else None
     monkeypatch.setattr(Keyboard, 'poll', poll)
@@ -476,15 +479,18 @@ def test_fake_runtime_contact_loss_recovers_without_terminal_stop(config, monkey
     phases = []
     stage = 'contact'
     class LossSensor(Sensor):
+        scan_reads = 0
         def read_wrench(self):
             nonlocal stage
             self.count += 1
+            if devices.owner.control is not None and not devices.owner._return_mode:
+                self.scan_reads += 1
             phase = devices.owner.continuous_phase
             phases.append(phase)
             if phase == 'CONTINUOUS_TRACKING' and stage == 'contact': stage = 'loss'
             if phase == 'LOCAL_REACQUIRE': stage = 'recover'
             if phase == 'CONTINUOUS_TRACKING' and stage == 'recover': stage = 'done'
-            force = 0. if self.count < 10 or stage == 'loss' else 1.5
+            force = 0. if self.scan_reads < 10 or stage == 'loss' else 1.5
             return Wrench(force, 0, 0, 0, 0, 0)
     def poll(self):
         return 'Q' if self.main_loop and (stage == 'done' or len(phases) > 500) else None
@@ -503,7 +509,7 @@ def test_fake_runtime_first_contact_loss_brakes_retries_and_tracks(config, monke
     target = prepare(config, monkeypatch, synthetic_force_sign=1)  # targetward +X double
     devices = Devices(config, target)
     braking = stopping.braking_device(devices, stop_value=stop_value)
-    stage, retry_samples = 'initial', 0
+    stage, retry_samples, scan_started = 'initial', 0, None
     transitions = []
     def factory(c):
         owner = devices.controller(c)
@@ -517,9 +523,14 @@ def test_fake_runtime_first_contact_loss_brakes_retries_and_tracks(config, monke
         owner.set_continuous_phase = observe_transition
         return owner
     class TransientContactSensor(Sensor):
+        scan_reads = 0
         def read_wrench(self):
-            nonlocal stage, retry_samples
+            nonlocal stage, retry_samples, scan_started
             self.count += 1
+            if devices.owner.control is not None and not devices.owner._return_mode:
+                self.scan_reads += 1
+                if scan_started is None:
+                    scan_started = clock.now
             phase = devices.owner.continuous_phase
             if phase == 'FIRST_CONTACT' and stage == 'initial': stage = 'lost'
             if phase == 'TARGET_SEARCH' and stage == 'lost': stage = 'retry'
@@ -527,10 +538,11 @@ def test_fake_runtime_first_contact_loss_brakes_retries_and_tracks(config, monke
                 retry_samples += 1
                 if retry_samples >= 210: stage = 'second_contact'
             if phase == 'CONTINUOUS_TRACKING': stage = 'done'
-            force = 0. if self.count < 210 else (.7 if stage in ('lost', 'retry') else 1.2)
+            force = 0. if self.scan_reads < 210 else (.7 if stage in ('lost', 'retry') else 1.2)
             return Wrench(force, 0, 0, 0, 0, 0)
     def poll(self):
-        return 'Q' if self.main_loop and (stage == 'done' or clock.now > 1008.) else None
+        return 'Q' if self.main_loop and (stage == 'done' or
+            (scan_started is not None and clock.now-scan_started > 8.)) else None
     monkeypatch.setattr(Keyboard, 'poll', poll)
     assert runtime.run(args(tmp_path), controller_factory=factory, reader_factory=TransientContactSensor) == 0
     assert stage == 'done'
@@ -577,7 +589,7 @@ def test_startup_noise_survives_return_and_first_search_command(config, monkeypa
     monkeypatch.setattr(Keyboard, 'poll', poll)
     assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=Sensor) == 0
     assert any(call[0] == 'speedL' and np.linalg.norm(call[1][:2]) > 0 for call in devices.control.calls)
-    assert any(call[0] == 'moveL' for call in devices.control.calls) is away
+    assert any(call[0] == 'moveL' for call in devices.control.calls)  # Also lift when initially at P0.
 
 
 def test_return_segment_timeout_stops_before_any_later_waypoint(real, clock):
