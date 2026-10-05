@@ -11,7 +11,7 @@ import pytest
 from core.models import RobotState, Wrench
 from experiment_logging.termination import TerminationReason
 from policy.continuous_tracking import ContinuousTrackingPolicy, State
-from sensor.force_direction import control_directions
+from sensor.force_direction import control_directions, normal_feedback_speed
 
 
 def sample(policy, now, force, *, position=(0., 0.), speed=(0., 0.)):
@@ -37,7 +37,9 @@ def test_real_direction_stop_is_terminal_not_a_warning(config, code):
 
 
 def test_first_contact_rejects_force_normal_opposing_observed_approach(config):
-    _, policy = real_policy(config)
+    c = deepcopy(config)
+    c['continuous_tracking']['force_direction_sign'] = 1  # deliberately wrong for this external reaction
+    _, policy = real_policy(c)
     sample(policy, 0., (0., 0.))
     assert sample(policy, .01, (0., 0.), position=(.0001, 0.)).move
     for i in range(2, 25):
@@ -47,7 +49,71 @@ def test_first_contact_rejects_force_normal_opposing_observed_approach(config):
     assert 'contradicts observed search' in policy.reason
     assert policy.diagnostics['first_contact_search_normal_angle_deg'] > 150.
     assert 'TRACKING_ENTERED' not in [event.event_type for event in policy.events]
-    assert policy.c['force_direction_sign'] == config['continuous_tracking']['force_direction_sign']
+    assert policy.c['force_direction_sign'] == 1  # contradiction must not auto-flip the configured sign
+
+
+@pytest.mark.parametrize('sign,accepted', [(-1, True), (1, False)])
+def test_base_minus_y_search_plus_y_external_reaction_checks_configured_sign(config, sign, accepted):
+    c = deepcopy(config)
+    assert c['continuous_tracking']['force_direction_sign'] == -1
+    c['continuous_tracking']['force_direction_sign'] = sign
+    c['policy']['search_direction_xy'] = [0., -2.]  # verify normalized search diagnostic
+    _, policy = real_policy(c)
+    sample(policy, 0., (0., 0.))
+    assert sample(policy, .01, (0., 0.), position=(0., -.0001)).move
+    for i in range(2, 25):
+        command = sample(policy, i*.01, (0., 1.1), position=(0., -.001))
+        if policy.state in (State.CONTINUOUS_TRACKING, State.STOP):
+            break
+        assert not command.move
+    diagnostics = policy.diagnostics
+    assert diagnostics['first_contact_force_direction_sign'] == sign
+    np.testing.assert_allclose(diagnostics['first_contact_search_direction_xy'], [0., -1.])
+    np.testing.assert_allclose(diagnostics['first_contact_mean_force_base_xy'], [0., 1.1])
+    np.testing.assert_allclose(diagnostics['first_contact_candidate_pressing_direction_xy'], [0., sign])
+    assert diagnostics['first_contact_search_normal_alignment'] == -sign
+    assert diagnostics['first_contact_search_normal_angle_deg'] == (0. if accepted else 180.)
+    if accepted:
+        assert policy.state == State.CONTINUOUS_TRACKING and policy.stop_reason is None
+        np.testing.assert_allclose(policy.contact_direction, [0., -1.])
+    else:
+        assert policy.state == State.STOP and not command.move
+        assert policy.stop_reason == TerminationReason.STOP_DIRECTION_UNCONFIRMED
+        assert 'TRACKING_ENTERED' not in [event.event_type for event in policy.events]
+    assert policy.c['force_direction_sign'] == sign
+
+
+@pytest.mark.parametrize('force,expected_direction', [(1.1, [0., -1.]), (1.9, [0., 1.])])
+def test_external_reaction_normal_feedback_presses_at_low_force_unloads_at_high_force(config, force, expected_direction):
+    assert config['continuous_tracking']['force_direction_sign'] == -1
+    c = deepcopy(config)
+    c['policy']['search_direction_xy'] = [0., -1.]
+    _, policy = real_policy(c)
+    for i in range(25):
+        sample(policy, i*.01, (0., 1.5))
+    assert policy.state == State.CONTINUOUS_TRACKING
+    for i, magnitude in enumerate(np.linspace(1.5, force, 21)[1:], 25):
+        command = sample(policy, i*.01, (0., magnitude))
+    assert policy.state == State.CONTINUOUS_TRACKING
+    vn = normal_feedback_speed(force, policy.c)
+    assert policy.v_n == pytest.approx(vn)
+    normal_velocity = vn*policy.contact_direction
+    np.testing.assert_allclose(normal_velocity/np.linalg.norm(normal_velocity), expected_direction)
+    # Actual policy command includes tangential velocity; its normal projection
+    # must still have the same pressing/unloading sign and value.
+    assert (command.direction_xy*command.speed) @ policy.contact_direction == pytest.approx(vn)
+
+
+def test_simulation_keeps_its_explicit_targetward_force_convention(config):
+    from experiment_logging.paths import PROJECT_ROOT
+    from simulation.simulator import load_simulation_config
+    from simulation.continuous_session import SimulationSession
+    scene = load_simulation_config(PROJECT_ROOT/'simulation/scene_continuous.yaml')
+    session = SimulationSession(config, scene)
+    assert scene['continuous_tracking']['force_direction_sign'] == 1
+    assert session.policy.c['force_direction_sign'] == 1
+    assert session.config['continuous_tracking']['force_direction_sign'] == 1
+    assert config['continuous_tracking']['force_direction_sign'] == -1
 
 
 def test_unknown_base_force_frame_cannot_authorize_contact_feedback(config):

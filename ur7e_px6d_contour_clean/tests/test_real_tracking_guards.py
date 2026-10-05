@@ -443,7 +443,7 @@ def test_legacy_real_runtime_budget_is_warning_but_simulation_stops(real):
 
 
 def test_real_fake_runtime_passes_120_seconds_in_tracking(config, monkeypatch, tmp_path, clock):
-    target = prepare(config, monkeypatch)
+    target = prepare(config, monkeypatch, synthetic_force_sign=1)  # targetward +X double
     devices = Devices(config, target)
     observed = []
     update = ContinuousTrackingPolicy.update
@@ -471,7 +471,7 @@ def test_real_fake_runtime_passes_120_seconds_in_tracking(config, monkeypatch, t
 
 
 def test_fake_runtime_contact_loss_recovers_without_terminal_stop(config, monkeypatch, tmp_path, clock):
-    target = prepare(config, monkeypatch)
+    target = prepare(config, monkeypatch, synthetic_force_sign=1)  # targetward +X double
     devices = Devices(config, target)
     phases = []
     stage = 'contact'
@@ -500,7 +500,7 @@ def test_fake_runtime_contact_loss_recovers_without_terminal_stop(config, monkey
 def test_fake_runtime_first_contact_loss_brakes_retries_and_tracks(config, monkeypatch, tmp_path, clock, stop_value, capsys):
     import test_stopping_cycles as stopping
     monkeypatch.setattr(stopping, 'time', clock)
-    target = prepare(config, monkeypatch)
+    target = prepare(config, monkeypatch, synthetic_force_sign=1)  # targetward +X double
     devices = Devices(config, target)
     braking = stopping.braking_device(devices, stop_value=stop_value)
     stage, retry_samples = 'initial', 0

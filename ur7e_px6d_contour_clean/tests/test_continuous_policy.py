@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def config():
     c = deepcopy(load_config(ROOT / "config.yaml"))
     c['continuous_tracking']['reacquire_enabled'] = True  # explicit offline unit fixture
+    # These legacy synthetic traces report targetward force (+X), as does the
+    # analytic simulator; they do not represent environment-on-probe PX6D data.
+    c['continuous_tracking']['force_direction_sign'] = 1
     return c
 
 
@@ -257,4 +260,3 @@ def test_tracking_positive_rate_guard_still_uses_original_limit():
     assert p.force_rate == pytest.approx(80.)
     assert p.stop_reason == TerminationReason.STOP_FORCE_LIMIT
     assert p.force_rate_guard_active
-

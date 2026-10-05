@@ -16,7 +16,7 @@ def args(tmp_path, execute=True):
     return settings
 
 
-def prepare(config, monkeypatch, *, watchdog=False):
+def prepare(config, monkeypatch, *, watchdog=False, synthetic_force_sign=None):
     from calibration.probe_alignment import downward_probe_orientation
     target = load_scan_calibration(PROJECT_ROOT/'scan_calibration.yaml')['start_tcp_pose']
     target[3:] = downward_probe_orientation(target[3:]).tolist()
@@ -26,6 +26,10 @@ def prepare(config, monkeypatch, *, watchdog=False):
         c['preprocessing']['baseline']['sample_count']=2
         c['safe_return']['startup_bias_sample_count']=2
         c['continuous_tracking']['continuous_require_watchdog']=watchdog
+        if synthetic_force_sign is not None:
+            # Explicit convention for legacy targetward sensor doubles only;
+            # default runtime fixtures retain the formal environment-on-probe sign.
+            c['continuous_tracking']['force_direction_sign'] = synthetic_force_sign
         # These SDK/sensor doubles emit vectors already in the model's Base
         # frame at the final pose. This is explicit synthetic setup, not a
         # calibration supplied for the real installation in config.yaml.
@@ -202,16 +206,27 @@ def test_fake_contact_brakes_confirms_and_enters_tracking(config,monkeypatch,tmp
     import csv
     from core.models import Wrench
     target=prepare(config,monkeypatch);d=Devices(config,target)
+    # The synthetic mount in prepare() outputs Base forces. External reaction
+    # opposes the saved search approach under the real sign=-1 convention.
+    approach = np.array(load_scan_calibration(PROJECT_ROOT/'scan_calibration.yaml')['scan_direction_xy'])
     class ContactSensor(Sensor):
         def read_wrench(self):
             self.count+=1
-            return Wrench(0. if self.count<10 else 1.5,0.,0.,0.,0.,0.)
+            reaction = np.zeros(2) if self.count < 10 else -1.5*approach
+            return Wrench(*reaction, 0., 0., 0., 0.)
     settings=args(tmp_path);settings.duration=.6
     assert runtime.run(settings,controller_factory=d.controller,reader_factory=ContactSensor)==0
     path,=(tmp_path/'real/continuous').glob('run_*')
     with (path/'samples.csv').open() as f:
         states={row['current_state'] for row in csv.DictReader(f)}
     assert {'TARGET_SEARCH','FIRST_CONTACT','CONTINUOUS_TRACKING'} <= states
+    summary = json.loads((path/'summary.json').read_text())
+    diagnostic = summary['software_warnings']['policy']
+    assert diagnostic['first_contact_force_direction_sign'] == -1
+    np.testing.assert_allclose(diagnostic['first_contact_search_direction_xy'], approach)
+    np.testing.assert_allclose(diagnostic['first_contact_candidate_pressing_direction_xy'], approach)
+    assert diagnostic['first_contact_search_normal_alignment'] == pytest.approx(1.)
+    assert np.linalg.norm(diagnostic['first_contact_mean_force_base_xy']) > 1.
 
 
 def test_terminal_hold_keeps_healthy_watchdog_alive(config,monkeypatch,tmp_path):

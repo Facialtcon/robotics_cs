@@ -442,16 +442,25 @@ class ContinuousTrackingPolicy:
             if magnitude >= float(self.c['direction_min_filtered_force']) and coherence >= float(self.c['direction_min_coherence']):
                 candidate, tangent, _ = control_directions(
                     mean, self.c['force_direction_sign'], self.follow_hand)
+                if self.real_execution and self.state == State.FIRST_CONTACT:
+                    alignment = float(candidate @ self.search_direction)
+                    # Reuse diagnostics serialized in software_warnings/run
+                    # summaries. These are the actual stable-window inputs, not
+                    # a later wrench or a normal inferred from search motion.
+                    self.diagnostics.update(
+                        first_contact_force_direction_sign=self.c['force_direction_sign'],
+                        first_contact_search_direction_xy=self.search_direction.tolist(),
+                        first_contact_mean_force_base_xy=mean.tolist(),
+                        first_contact_candidate_pressing_direction_xy=candidate.tolist(),
+                        first_contact_search_normal_alignment=alignment,
+                        first_contact_search_normal_angle_deg=float(
+                            np.rad2deg(np.arccos(np.clip(alignment, -1., 1.)))))
                 if (self.real_execution and self.state == State.FIRST_CONTACT and
                         float((robot.pose[:2]-self._start_pose[:2]) @ self.search_direction) > 1e-6):
                     # Search displacement is a consistency check, not a normal
                     # calibration. A pressing normal opposing the approach that
                     # established contact cannot authorize inward feedback. Do
                     # not flip the sign, rotate force data, or invent a normal.
-                    alignment = float(candidate @ self.search_direction)
-                    self.diagnostics['first_contact_search_normal_alignment'] = alignment
-                    self.diagnostics['first_contact_search_normal_angle_deg'] = float(
-                        np.rad2deg(np.arccos(np.clip(alignment, -1., 1.))))
                     if alignment <= 0.:
                         self.request_stop(now, robot.pose,
                             'contact pressing direction contradicts observed search approach; check force frame/sign',

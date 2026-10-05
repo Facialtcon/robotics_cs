@@ -30,6 +30,11 @@ force_model:
   probe_tip_radius: 0.001  # compliant 1 mm sensing envelope; TCP is never snapped/clipped
   friction_coefficient: 0.03
 
+continuous_tracking:
+  # SimulatedForceSensor reports targetward (-outward) normal force, unlike
+  # real Base environment-on-probe force. Keep this model convention explicit.
+  force_direction_sign: 1
+
 preprocessing:
   filter_alpha: 0.15  # legacy compatibility only
   kalman:

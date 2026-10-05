@@ -13,7 +13,8 @@ from test_real_tracking_guards import clock
 
 
 def test_bad_force_direction_never_reaches_tracking_speedl(config, monkeypatch, tmp_path, clock):
-    target = prepare(config, monkeypatch)
+    # Deliberately wrong sign for the external reaction below; exercise STOP.
+    target = prepare(config, monkeypatch, synthetic_force_sign=1)
     direction = np.array(load_scan_calibration(PROJECT_ROOT/'scan_calibration.yaml')['scan_direction_xy'])
     devices = Devices(config, target)
     class ContactSensor(Sensor):

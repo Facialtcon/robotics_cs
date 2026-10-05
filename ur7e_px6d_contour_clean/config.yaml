@@ -199,10 +199,12 @@ continuous_tracking:
   force_gain: 0.0005              # (m/s)/N
   force_deadband: 0.15            # N
   normal_speed_limit: 0.0005      # m/s
-  force_direction_sign: 1         # n = sign * unit(filtered Base XY); n is compression/targetward
+  force_direction_sign: -1        # Base force = environment ON probe; n = -unit(Base XY)
   # v = vt*t + vn*n; high force -> vn<0 -> unloading along -n.
-  # If Base reported force is environment ON probe: sign=-1; opposite convention: +1.
-  # Current +1 is unverified. Do NOT auto-flip; verify known external force vectors.
+  # n presses toward the target; -n unloads along the reported reaction force.
+  # This physical force convention does NOT verify the sensor mounting matrix.
+  # Sign applies only to control directions, never raw/filtered force or R_BS.
+  # Do NOT auto-flip; check known Base external force vectors with motion off.
   # Viewed from +Base Z: CW t=R90*n, CCW t=-R90*n (target respectively right/left).
   force_direction_filter_alpha: 0.8  # weight of PREVIOUS filtered XY vector
   search_speed: 0.018             # m/s; initial P0 -> P1 only, same as original search

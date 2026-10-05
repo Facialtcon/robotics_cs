@@ -166,7 +166,10 @@ Linux 上本项目的读取器以排他文件锁打开串口，重复打开会�
 
 方向观察不是启动前置步骤，不生成验证文件，不绑定配置，不修改旋转矩阵或 `force_direction_sign`。
 `rotation_sensor_to_base` 直接将传感器分量旋转到 Base；未知安装旋转不能仅从 TCP 姿态推导。
-当前单位矩阵及符号尚未实测；缺少安装关系时显示传感器分量，不能给出 Base 卸力方向。
+当前控制采用“Base 力为环境作用在探针上的反作用力”的约定，`force_direction_sign=-1`，
+即 `n=-unit(Base XY)` 补压、`-n` 沿反作用力方向卸力。首次接触接近 180° 的矛盾记录
+支持原符号错误的怀疑，但不能证明当前 45° 安装矩阵或真实传感器方向正确。
+符号只参与控制方向计算；首次接触一致性检查及 `STOP_DIRECTION_UNCONFIRMED` 保留。
 方向工具默认展示派生的最终扫描姿态，但不会读取或调整机器人姿态；实际姿态不同可用
 `--tool-orientation RX RY RZ` 明确输入旋转向量（rad）。观察前必须确认机器人已在显示姿态且空载。
 
@@ -176,6 +179,9 @@ Linux 上本项目的读取器以排他文件锁打开串口，重复打开会�
 
 以下命令只连接 PX6D、不连接机器人。机器人静止、探针脱离目标时按需单独运行；方向工具在
 初次采零前提示按 Enter，运行中 Q/Esc/Ctrl+C 退出，不提供接触后再次采零入口。
+自动运动关闭、探针空载静止且姿态已核对时，先空载采零，再分别沿已知 Base +X/+Y
+轻施外力，检查处理后 Base 分量及正负号；对应主要分量应为 +Fx/+Fy，补压 n 应反向。
+方向工具不读取实际机器人姿态，须核对显示姿态或提供实际 `--tool-orientation`。
 
 ```bash
 /home/user-linux/robotics_cs/.venv312/bin/python tools/check_px6d.py --samples 3000 --diagnostics-output /tmp/px6d_readonly.json

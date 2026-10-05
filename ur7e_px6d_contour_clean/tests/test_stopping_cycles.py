@@ -101,7 +101,7 @@ def test_search_limit_brakes_across_logged_cycles(config, monkeypatch, tmp_path,
 
 
 def test_first_contact_uses_same_braking_monitor(config, monkeypatch, tmp_path):
-    target = prepare(config, monkeypatch)
+    target = prepare(config, monkeypatch, synthetic_force_sign=1)  # targetward +X double
     devices = Devices(config, target)
     record = braking_device(devices)
     original_speed = devices.control.speedL

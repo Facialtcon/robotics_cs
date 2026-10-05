@@ -94,6 +94,10 @@ class SimulationSession:
         self.scene['policy']['search_direction_xy'] = self.scene['scan_direction_xy']
         self.config['continuous_simulation'] = self.scene
         self.config['policy']['search_direction_xy'] = self.scene['scan_direction_xy']
+        # This sensor's legacy normal force is targetward. Resolve its sign
+        # from the simulation scene, independently of real PX6D configuration.
+        self.config['continuous_tracking']['force_direction_sign'] = self.scene.get(
+            'continuous_tracking', {}).get('force_direction_sign', 1)
         kalman = deepcopy(self.config['preprocessing'].get('kalman', {}))
         self.config['preprocessing'] = deepcopy(self.scene['preprocessing'])
         self.config['preprocessing']['kalman'] = kalman
