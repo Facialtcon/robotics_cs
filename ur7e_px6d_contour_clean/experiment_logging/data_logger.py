@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
 from core.models import BoundaryPoint, CornerSearchRay, PolicyCommand, PolicyWaypoint, RobotState, Wrench
-from experiment_logging.termination import TerminationRecorder
-from experiment_logging.paths import create_run, read_metadata
+from experiment_logging.termination import TerminationRecorder, continuous_label
+from experiment_logging.paths import create_run, read_metadata, wall_time_fields
 from sensor.force_features import extract_force_features
 
 
 SAMPLE_FIELDS = [
-    "timestamp_utc", "monotonic_sec",
+    "timestamp_utc", "timestamp_local", "timezone", "monotonic_sec",
     "raw_fx", "raw_fy", "raw_fz", "raw_tx", "raw_ty", "raw_tz",
     "dfx", "dfy", "dfz", "dtx", "dty", "dtz",
     "force_base_fx", "force_base_fy", "force_base_fz",
@@ -46,6 +45,7 @@ BOUNDARY_FIELDS = [
 WAYPOINT_FIELDS = [
     "timestamp", "state", "event_type", "x", "y", "z", "corner_id", "ray_index",
     "target_direction_x", "target_direction_y", "tangent_x", "tangent_y",
+    "reacquire_round", "event_label",
 ]
 
 RECOVERY_RAY_FIELDS = [
@@ -82,6 +82,8 @@ class ExperimentLogger:
             raise ValueError("sample field names must be unique")
         self.run_dir = create_run(mode, strategy, config_source or config.get('_config_source'), data_root=root)
         self.metadata = read_metadata(self.run_dir)
+        self._reacquire_round = 0
+        self._reacquire_event_active = False
         self.processed_force_frame = config.get('force_display', {}).get('frame', 'configured_output_frame')
         self.termination = TerminationRecorder().bind(self.run_dir)
         self.write_config_snapshot(config)
@@ -140,7 +142,7 @@ class ExperimentLogger:
             else features.interaction_direction
         )
         row = {
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            **wall_time_fields(),
             "monotonic_sec": f"{monotonic_sec:.9f}",
             **dict(zip(("raw_fx", "raw_fy", "raw_fz", "raw_tx", "raw_ty", "raw_tz"), raw_values)),
             **dict(zip(("dfx", "dfy", "dfz", "dtx", "dty", "dtz"), processed_values)),
@@ -219,10 +221,20 @@ class ExperimentLogger:
     def log_waypoint(self, waypoint: PolicyWaypoint) -> None:
         target = waypoint.target_direction_xy
         tangent = waypoint.tangent_xy
+        round_number, label = '', waypoint.event_type
+        if self.metadata['strategy'] == 'continuous':
+            if waypoint.event_type == 'LOCAL_REACQUIRE':
+                self._reacquire_round += 1
+                self._reacquire_event_active = True
+            round_number = self._reacquire_round if self._reacquire_event_active else ''
+            label = continuous_label(waypoint.event_type, round_number or 0)
+            if waypoint.event_type == 'REACQUIRED' or waypoint.state == 'STOP':
+                self._reacquire_event_active = False
         self._waypoints.writerow({
             "timestamp": f"{waypoint.timestamp:.9f}",
             "state": waypoint.state,
             "event_type": waypoint.event_type,
+            "reacquire_round": round_number, "event_label": label,
             "x": waypoint.pose[0], "y": waypoint.pose[1], "z": waypoint.pose[2],
             "corner_id": "" if waypoint.corner_id is None else waypoint.corner_id,
             "ray_index": "" if waypoint.ray_index is None else waypoint.ray_index,
@@ -270,7 +282,7 @@ class ExperimentLogger:
         with (self.run_dir / "scan_stop_snapshot.json").open("w", encoding="utf-8") as handle:
             json.dump(
                 {
-                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    **wall_time_fields(),
                     "state": state,
                     "tcp_pose": robot.pose.tolist(),
                     "tcp_speed": robot.tcp_speed.tolist(),

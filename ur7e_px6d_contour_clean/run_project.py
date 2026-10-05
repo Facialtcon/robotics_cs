@@ -180,19 +180,21 @@ def describe_run(path: Path) -> tuple[str, str]:
 
 
 def choose_run() -> Path:
-    from experiment_logging.paths import DATA_ROOT
+    from experiment_logging.paths import DATA_ROOT, run_sort_key, read_metadata, local_time_text
     candidates = set()
     for base in (DATA_ROOT,):
         if base.is_dir():
             for marker in ("metadata.json",):
                 candidates.update(p.parent.resolve() for p in base.rglob(marker))
-    ordered = sorted(candidates, key=str)
+    ordered = sorted(candidates, key=run_sort_key)
     for index, path in enumerate(ordered, 1):
         try:
             strategy, mode = describe_run(path)
+            created = local_time_text(read_metadata(path)['timestamp'])
         except (ValueError, OSError) as exc:
             strategy, mode = "未知", f"元数据错误：{exc}"
-        print(f"{index}. [{strategy} / {mode}] {path}")
+            created = '创建时间不可用'
+        print(f"{index}. [{strategy} / {mode}] {path}（目录创建：{created}）")
     if not ordered:
         print("默认目录没有运行记录；可输入实际运行目录完整路径。")
     while True:

@@ -7,7 +7,6 @@ tracebacks without replacing the initial cause.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
 from enum import Enum
 import json
 import math
@@ -19,6 +18,27 @@ import time
 import traceback
 
 import numpy as np
+from experiment_logging.paths import wall_time_fields, local_time_text
+
+
+def continuous_label(code, round_number=0, detail=''):
+    """Display text only. A recovery round is not an identified object corner."""
+    prefix = f'第 {round_number} 次局部找回' if round_number else '局部找回'
+    if code == 'CONTACT_LOST':
+        return '接触减弱持续达到判定条件'
+    if code == 'LOCAL_REACQUIRE':
+        return prefix+'开始'
+    if code == 'REACQUIRED':
+        return prefix+'成功，继续贴边' if round_number else '接触重新确认，继续贴边'
+    if 'local reacquire angle exhausted' in detail:
+        return prefix+'达到角度上限，未确认重新接触'
+    if detail.startswith('local reacquire ') and 'budget exhausted' in detail:
+        budget = detail.removeprefix('local reacquire ').removesuffix(' budget exhausted')
+        name = {'time': '总时间', 'path': '实际路程', 'displacement': '位移'}.get(budget, budget)
+        return prefix+name+'预算用尽，未确认重新接触'
+    if code == 'BUDGET_STOP' and round_number:
+        return prefix+'预算停止（具体原因见终止记录）'
+    return {'CONTINUOUS_TRACKING': '连续跟踪阶段', 'FIRST_CONTACT': '首次接触确认'}.get(code, code)
 
 
 class TerminationReason(str, Enum):
@@ -329,6 +349,43 @@ class TerminationRecorder:
                 break
         if last_contact is None and getattr(policy, "boundary_points", []):
             last_contact = policy.boundary_points[-1].pose
+        continuous = hasattr(policy, 'last_reliable_contact')
+        contact_meaning = None
+        local_reacquire = previous_reacquire = None
+        if continuous:
+            memory = getattr(policy, 'last_reliable_contact', None)
+            last_contact = getattr(policy, 'last_contact_pose', None)
+            if last_contact is None and memory is not None:
+                last_contact = memory.get('pose')
+            contact_meaning = '最后方向有效的接触记忆样本；不等同于最近一次接触阈值确认位置'
+            round_number = getattr(policy, '_recovery_count', 0)
+            origin = getattr(policy, 'reacquire_origin', None)
+            if round_number and origin is not None:
+                active = state == 'LOCAL_REACQUIRE'
+                stopped_here = state == 'STOP' and getattr(policy, 'stop_from_state', None) == 'LOCAL_REACQUIRE'
+                c, p = policy.c, policy.p
+                info = dict(round=round_number, active=active, caused_stop=stopped_here,
+                    origin_pose=origin, normal=getattr(policy, '_memory_normal', None),
+                    tangent=getattr(policy, '_memory_tangent', None),
+                    angle_deg=getattr(policy, 'reacquire_heading_deg', None), max_angle_deg=c['reacquire_max_angle_deg'],
+                    reference_xy=getattr(policy, 'reacquire_reference', None),
+                    actual_path_m=getattr(policy, 'reacquire_path_length', None),
+                    actual_speed_path_m=getattr(policy, 'reacquire_speed_path_length', None),
+                    raw_pose_path_m=getattr(policy, 'reacquire_raw_pose_path_length', None),
+                    max_displacement_m=getattr(policy, 'reacquire_max_displacement', None),
+                    elapsed_sec=getattr(policy, 'reacquire_elapsed_sec', None),
+                    started_monotonic=getattr(policy, '_reacquire', None),
+                    current_fxy_N=getattr(policy, 'fxy', None) if active or stopped_here else None,
+                    contact_threshold_N=p['contact_threshold'],
+                    confirmation_active=active and getattr(policy, '_confirm_started', None) is not None,
+                    max_time_sec=c['reacquire_max_time_sec'], max_path_m=c['reacquire_max_path'],
+                    max_distance_m=c['reacquire_max_distance'], boundary_margin_m=c['boundary_margin'],
+                    stop_reason=getattr(policy, 'stop_reason', None) if stopped_here else None,
+                    stop_detail=getattr(policy, 'reason', None) if stopped_here else None)
+                if active or stopped_here:
+                    local_reacquire = info
+                else:
+                    previous_reacquire = info
         diagnostic_state = state if state is not None else refs.get("state", getattr(command, "state", None))
         if getattr(command, "state", None) == "RETURN_TO_START":
             diagnostic_state = "RETURN_TO_START"
@@ -368,6 +425,11 @@ class TerminationRecorder:
             "policy_processed_wrench": None if processed is None else processed,
             "command": command_data,
         })
+        if continuous:
+            snapshot.update(last_contact_meaning=contact_meaning,
+                last_reliable_contact=getattr(policy, 'last_reliable_contact', None),
+                local_reacquire=local_reacquire, previous_local_reacquire=previous_reacquire,
+                stop_from_state=getattr(policy, 'stop_from_state', None))
         return snapshot, refs
 
     def set_stop_reason(self, reason=None, detail="", *, exception=None, source="", terminal=True, replace=False, **context):
@@ -386,7 +448,7 @@ class TerminationRecorder:
                         detail = str(reason)
             event = _safe({**snapshot,
                 "reason": classified.value, "detail": str(detail), "source": source,
-                "terminal": bool(terminal), "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "terminal": bool(terminal), **wall_time_fields(),
                 "monotonic_sec": refs.get("timestamp", time.monotonic()),
                 "context": snapshot,
                 "exception_type": None if exception is None else type(exception).__name__,
@@ -407,7 +469,7 @@ class TerminationRecorder:
             state = _best_effort(lambda: state.value, state)
             event = _safe({"reason": TerminationReason.STOP_UNKNOWN_REASON.value, "detail": _text(detail),
                      "source": source, "terminal": bool(terminal), "diagnostic_error": _text(diagnostic_error),
-                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                     **wall_time_fields(),
                      "monotonic_sec": refs.get("timestamp", time.monotonic()), "state": state, "policy_state": state,
                      "command": None if command is None else {name: _best_effort(lambda name=name: getattr(command, name))
                          for name in ("state", "move", "direction_xy", "speed", "target_pose")},
@@ -437,10 +499,26 @@ class TerminationRecorder:
                  f"Detail: {payload.get('detail', '')}", f"TCP: {payload.get('tcp_pose')}",
                  f"Force: {payload.get('actual_force')} (source={payload.get('force_source')}, frame={payload.get('force_frame')})",
                  f"Last contact: {payload.get('last_contact')}",
-                 f"Current anchor: {payload.get('anchor_pose')}",
-                 f"Timestamp: {payload.get('timestamp_utc')} (monotonic={payload.get('monotonic_sec')})",
+                 f"Timestamp: {local_time_text(payload['timestamp_utc'])} (monotonic={payload.get('monotonic_sec')})",
                  f"Source: {payload.get('source', '')}", f"Raw sensor: {payload.get('raw_wrench')}",
                  f"Diagnostics: {None if self.run_dir is None else self.run_dir / 'termination.json'}"]
+        if 'local_reacquire' in payload:
+            lines.append('最后接触记录含义：'+payload['last_contact_meaning'])
+            info = payload.get('local_reacquire')
+            if info:
+                lines.extend([continuous_label(payload.get('state'), info['round'], payload.get('detail', '')),
+                    f"局部找回起点（Base）：{info['origin_pose']}",
+                    f"保存的补压方向：{info['normal']}；切向：{info['tangent']}",
+                    f"角度：{info['angle_deg']} / {info['max_angle_deg']} deg；实际路程：{info['actual_path_m']} m；耗时：{info['elapsed_sec']} s",
+                    f"当前 Fxy：{info['current_fxy_N']} N；接触确认阈值：{info['contact_threshold_N']} N",
+                    f"找回停止原因：{info['stop_reason']} / {info['stop_detail']}"])
+            else:
+                lines.append('当前局部找回起点：null')
+                history = payload.get('previous_local_reacquire')
+                if history:
+                    lines.append(f"历史：第 {history['round']} 次局部找回起点（当前不活动）：{history['origin_pose']}")
+        else:
+            lines.append(f"Current anchor: {payload.get('anchor_pose')}")
         if payload.get("traceback"):
             lines.append(payload["traceback"])
         for error in self.secondary_errors:

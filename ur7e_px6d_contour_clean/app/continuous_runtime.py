@@ -594,6 +594,14 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             if any(any(component.values()) for component in warnings.values()):
                 print('WARNING / diagnostics: '+json.dumps(warnings, ensure_ascii=False), flush=True)
         termination.flush(emit=True)
+        # Devices and log files are closed. Plotting never runs in a control tick.
+        if logger is not None and policy is not None and policy.initial_contact is not None:
+            try:
+                from tools.visualize_continuous_run import render_contact_trajectory
+                for path in render_contact_trajectory(logger.run_dir):
+                    print(f'TCP 轨迹图：{path}', flush=True)
+            except Exception as exc:
+                print(f'轨迹图生成失败，可离线回放重试：{type(exc).__name__}: {exc}', flush=True)
     return result
 
 

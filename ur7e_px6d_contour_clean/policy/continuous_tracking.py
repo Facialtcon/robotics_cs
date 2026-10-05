@@ -117,7 +117,7 @@ def validate_config(config: dict) -> None:
     if float(c["force_reference"]) + float(c["force_deadband"]) >= float(p["safety_force_threshold"]):
         raise ValueError("reference + deadband must be below processed force safety limit")
     if float(c["reacquire_max_angle_deg"]) > 90:
-        raise ValueError("local reacquire half-angle must not exceed 90 degrees")
+        raise ValueError("local reacquire path angle must not exceed 90 degrees")
     if not isinstance(c["reacquire_enabled"], bool):
         raise ValueError("reacquire_enabled must be boolean")
     if not 0 < float(c["direction_min_coherence"]) <= 1:
@@ -189,6 +189,8 @@ UNLOAD_FIELDS = ('tangent_limit_reason', 'unload_active', 'unload_elapsed_sec',
                 'unload_resume_scale', 'settle_hold_start_host_monotonic',
                 'tcp_displacement_from_contact_m', 'actual_v_n_mps', 'actual_v_t_mps')
 EXTRA_SAMPLE_FIELDS += UNLOAD_FIELDS
+EXTRA_SAMPLE_FIELDS += ('reacquire_round', 'reacquire_active', 'reacquire_elapsed_sec',
+                        'reacquire_max_angle_deg', 'reacquire_contact_threshold')
 
 
 class ContinuousTrackingPolicy:
@@ -215,6 +217,7 @@ class ContinuousTrackingPolicy:
         self.follow_hand = self.p['follow_hand']
         self.search_direction = unit(self.p['search_direction_xy'])
         self.state, self.reason, self.stop_reason = State.READY, '', None
+        self.stop_from_state = None  # Preserve the source of the first terminal transition for diagnostics.
         self.events = []
         self.initial_contact = self.first_threshold_pose = self.last_contact_pose = None
         self.last_reliable_tangent = self.last_contact_direction = None
@@ -259,6 +262,7 @@ class ContinuousTrackingPolicy:
         self.direction_limited = False
         self.contact_hold_elapsed = self.settle_hold_elapsed = 0.
         self.reacquire_tracking_error = self.reacquire_path_length = 0.
+        self.reacquire_elapsed_sec = 0.
         self.reacquire_speed_path_length = self.reacquire_raw_pose_path_length = 0.
         self.reacquire_max_displacement = 0.
         self.unload_active = False
@@ -346,6 +350,7 @@ class ContinuousTrackingPolicy:
 
     def request_stop(self, now, pose, reason, *, event='SAFETY_STOP', code=None):
         if self.state != State.STOP:
+            self.stop_from_state = self.state
             self.state, self.reason, self.stop_reason = State.STOP, reason, code
             self._event(now, pose, event)
         if self.stop_reason is None:
@@ -661,6 +666,8 @@ class ContinuousTrackingPolicy:
         self._last_recovery_origin = pose.copy()
         self._memory_normal, self._memory_tangent = memory['normal'].copy(), memory['tangent'].copy()
         self._reacquire, self._theta = now, 0.
+        self.reacquire_heading_deg = 0.
+        self.reacquire_elapsed_sec = 0.
         self.reacquire_path_length = self.reacquire_tracking_error = 0.
         self.reacquire_speed_path_length = self.reacquire_raw_pose_path_length = 0.
         self.reacquire_max_displacement = 0.
@@ -698,6 +705,7 @@ class ContinuousTrackingPolicy:
 
     def _recover(self, now, robot, vector):
         pose = robot.pose
+        self.reacquire_elapsed_sec = max(0., now-self._reacquire)
         self._observe_reacquire_path(robot)
         self.reacquire_tracking_error = float(np.linalg.norm(self.reacquire_reference-pose[:2]))
         margin = float(self.c['boundary_margin'])
@@ -1009,6 +1017,11 @@ class ContinuousTrackingPolicy:
             (self.state.value if self.state != State.CONTINUOUS_TRACKING else
              ('VERIFY_RESUME' if self._direction_resume_started is not None else ('LOW_FORCE_CONFIRM' if self._low_force_pending else 'TRACK'))))))
         result['force_rate_guard_active'] = int(self.force_rate_guard_active)
+        result.update(reacquire_round=self._recovery_count,
+            reacquire_active=int(self.state == State.LOCAL_REACQUIRE),
+            reacquire_elapsed_sec=self.reacquire_elapsed_sec,
+            reacquire_max_angle_deg=float(self.c['reacquire_max_angle_deg']),
+            reacquire_contact_threshold=float(self.p['contact_threshold']))
         result.update(zip(UNLOAD_FIELDS, (self.tangent_limit_reason, int(self.unload_active), self.unload_elapsed,
             self.unload_displacement, self.unload_projected, self.unload_force_mean, self.unload_improvement,
             self.unload_force_slope, self.unload_resume_scale,

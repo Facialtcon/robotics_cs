@@ -213,7 +213,7 @@ continuous_tracking:
   contact_lost_threshold: 0.5     # N, below existing stable contact threshold
   contact_lost_hold_sec: 0.15
   reacquire_speed: 0.0005         # m/s
-  reacquire_max_angle_deg: 60.0   # arc theta: monotonic 0 -> max, NOT a heading sector
+  reacquire_max_angle_deg: 90.0   # recovery path theta, NOT an identified object corner; other budgets still apply
   reacquire_angular_speed_deg_s: 30.0
   reacquire_max_time_sec: 8.0
   reacquire_max_distance: 0.004   # m displacement bound about actual stopped recovery origin

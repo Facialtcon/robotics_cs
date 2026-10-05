@@ -27,7 +27,8 @@ def read_run(run_dir):
     if not np.all(np.isfinite(data["monotonic_sec"])) or np.any(np.diff(data["monotonic_sec"]) < 0):
         raise ValueError("sample timestamps must be finite and ordered")
     for key in ('direction_valid', 'command_vx', 'command_vy', 'reacquire_origin_x', 'reacquire_origin_y',
-                'reacquire_reference_x', 'reacquire_reference_y'):
+                'reacquire_reference_x', 'reacquire_reference_y', 'reacquire_normal_x', 'reacquire_normal_y',
+                'reacquire_tangent_x', 'reacquire_tangent_y', 'reacquire_heading_deg', 'reacquire_round'):
         data[key] = np.array([float(row.get(key) or ('0' if key=='direction_valid' else 'nan')) for row in rows])
     for key in ('tcp_vx','tcp_vy','tcp_vz','v_t','v_n','stop_requested','raw_fx','raw_fy',
                 'sim_components_available','sim_object_fx','sim_object_fy','sim_friction_fx','sim_friction_fy',
@@ -55,6 +56,181 @@ def read_run(run_dir):
     return data, config, events
 
 
+def recovery_windows(data, events):
+    """Count starts across the entire run, independently of object geometry."""
+    windows = []
+    ordered = sorted(events, key=lambda e: float(e['timestamp']))
+    for index, event in enumerate(ordered):
+        if event['event_type'] != 'LOCAL_REACQUIRE':
+            continue
+        later = ordered[index+1:]
+        end = next((e for e in later if e['event_type'] in ('REACQUIRED', 'LOCAL_REACQUIRE')
+                    or e['state'] == 'STOP'), None)
+        lost = next((e for e in reversed(ordered[:index]) if e['event_type'] == 'CONTACT_LOST'), None)
+        windows.append(dict(round=len(windows)+1, start=event, lost=lost, end=end,
+            start_time=float(event['timestamp']),
+            end_time=float(end['timestamp']) if end else data['monotonic_sec'][-1],
+            success=end is not None and end['event_type'] == 'REACQUIRED'))
+    return windows
+
+
+def recovery_reference(data, config, window):
+    """Only reconstruct from this run's saved radius/angle/origin/n/t."""
+    c = config.get('continuous_tracking', {})
+    if 'reacquire_radius' not in c or 'reacquire_max_angle_deg' not in c:
+        return None
+    times = data['monotonic_sec']
+    indices = np.flatnonzero((times >= window['start_time']-1e-8) & (times <= window['end_time']+1e-8))
+    keys = ('reacquire_origin_x', 'reacquire_origin_y', 'reacquire_normal_x', 'reacquire_normal_y',
+            'reacquire_tangent_x', 'reacquire_tangent_y')
+    values = np.column_stack([data.get(k, np.full(len(times), np.nan)) for k in keys])
+    indices = indices[np.isfinite(values[indices]).all(axis=1)]
+    if not len(indices):
+        return None
+    origin, normal, tangent = values[indices[0]].reshape(3, 2)
+    if not (np.isclose(np.linalg.norm(normal), 1.) and np.isclose(np.linalg.norm(tangent), 1.)
+            and abs(normal @ tangent) < 1e-5):
+        return None
+    from policy.continuous_tracking import arc_reference
+    theta = np.linspace(0, np.deg2rad(float(c['reacquire_max_angle_deg'])), 181)[:, None]
+    return arc_reference(origin, normal, tangent, float(c['reacquire_radius']), theta)*1000
+
+
+def contact_trajectory_figures(data, config, events):
+    """Actual Base TCP path, with gaps between tracking/recovery phases."""
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+    from matplotlib.patches import Rectangle
+    from matplotlib.ticker import MaxNLocator
+    from simulation.continuous_view import CJK_FONT
+    from experiment_logging.termination import continuous_label
+
+    times = data['monotonic_sec']
+    states = np.asarray(data['state'])
+    first = next((e for e in events if e['event_type'] == 'FIRST_CONTACT'), None)
+    confirmed = np.flatnonzero(states == 'CONTINUOUS_TRACKING')
+    if first is None and not len(confirmed):
+        return []  # No invented first-contact position or target contour.
+    first_time = float(first['timestamp']) if first else times[confirmed[0]]
+    start = np.searchsorted(times, first_time-1e-8)
+    points = np.column_stack((data['tcp_x'], data['tcp_y']))*1000
+    included = (np.arange(len(times)) >= start) & np.isfinite(points).all(axis=1)
+    windows = recovery_windows(data, events)
+    colors = plt.get_cmap('tab10')
+    phase = np.full(len(times), -1, dtype=int)
+    phase[included & (states == 'CONTINUOUS_TRACKING')] = 0
+    for window in windows:
+        mask = included & (times >= window['start_time']-1e-8) & (times < window['end_time']-1e-8)
+        phase[mask] = window['round']
+        if not window['success']:
+            phase[included & (times >= window['end_time']-1e-8)] = window['round']
+
+    def setup(title):
+        fig, axis = plt.subplots(figsize=(10, 5))
+        axis.set(xlabel='Base X [mm]', ylabel='Base Y [mm]', title=title)
+        axis.title.set_fontfamily(CJK_FONT)
+        axis.set_aspect('equal', adjustable='box')
+        axis.ticklabel_format(style='plain', useOffset=False)
+        axis.grid(alpha=.25)
+        return fig, axis
+
+    def paths(axis, mask):
+        for value in (-1, 0, *(w['round'] for w in windows)):
+            selected = mask & (phase == value)
+            adjacent = selected[:-1] & selected[1:]
+            segments = np.stack((points[:-1][adjacent], points[1:][adjacent]), axis=1)
+            label = ('接触减弱 / 停止确认' if value == -1 else
+                     ('连续跟踪阶段' if value == 0 else f'第 {value} 次局部找回'))
+            color = '.6' if value == -1 else colors(value % 10)
+            if len(segments):
+                axis.add_collection(LineCollection(segments, colors=[color], linewidths=1.5, label=label))
+                # A few arrows stay inside one uninterrupted phase.
+                index = len(segments)//2
+                middle = segments[index]
+                nearby = segments[max(0, index-10):index+11]
+                advance = np.sum(nearby[:, 1]-nearby[:, 0], axis=0)
+                if value != -1 and np.linalg.norm(advance) > 1e-5:
+                    direction = advance/np.linalg.norm(advance)
+                    length = np.clip(np.ptp(points[selected], axis=0).max()*.02, .12, 1.)
+                    axis.annotate('', xy=middle[1]+length*direction, xytext=middle[1]-length*direction,
+                                  arrowprops=dict(arrowstyle='->', color=color))
+        axis.update_datalim(points[mask]);axis.autoscale_view()
+
+    def mark(axis, event, label, marker, color):
+        xy = np.array([float(event['x']), float(event['y'])])*1000
+        axis.scatter(*xy, label=label, marker=marker, color=color, s=42, zorder=5)
+
+    final = dict(x=data['tcp_x'][-1], y=data['tcp_y'][-1])
+    stop_detail = next((reason for reason in reversed(data.get('reason', [])) if reason), '')
+    stop_label = continuous_label('STOP', len(windows), stop_detail)
+    first = first or dict(x=data['tcp_x'][start], y=data['tcp_y'][start])
+    fig, axis = setup('首次接触确认至最终停止：实测 TCP 轨迹（不代表物体真实外形）')
+    paths(axis, included)
+    mark(axis, first, '首次接触确认', '*', 'green')
+    mark(axis, final, '最终停止'+(('：'+stop_label) if stop_label != 'STOP' else ''), 'X', 'black')
+    artifacts = [('continuous_contact_trajectory.png', fig)]
+    for window in windows:
+        number = window['round']
+        color = colors(number % 10)
+        lower = float(window['lost']['timestamp']) if window['lost'] else window['start_time']
+        upper = window['end_time'] if window['success'] else times[-1]
+        mask = included & (times >= lower-.3) & (times <= upper+1e-8)
+        reference = recovery_reference(data, config, window)
+        bound_points = points[mask] if reference is None else np.vstack((points[mask], reference))
+        low, high = bound_points.min(axis=0)-.35, bound_points.max(axis=0)+.35
+        axis.add_patch(Rectangle(low, *(high-low), fill=False, edgecolor=color, linestyle='--'))
+        axis.annotate(f'局部找回 {number}', high, xytext=(2, 4), textcoords='offset points',
+                      color=color, fontfamily=CJK_FONT, fontsize=8)
+        zoom, zoom_axis = setup(f'第 {number} 次局部找回：实测 TCP / 保存配置的参考路径')
+        zoom.set_size_inches(6, 6)
+        paths(zoom_axis, mask)
+        if reference is not None:
+            zoom_axis.plot(*reference.T, '--', color='purple', lw=1,
+                label=f"保存配置参考圆弧（{config['continuous_tracking']['reacquire_max_angle_deg']:g}°）")
+        for target_axis in (axis, zoom_axis):
+            if window['lost']:
+                mark(target_axis, window['lost'], '接触减弱持续达到判定条件', 'x', 'red')
+            mark(target_axis, window['start'], continuous_label('LOCAL_REACQUIRE', number), 's', color)
+            if window['success']:
+                mark(target_axis, window['end'], continuous_label('REACQUIRED', number), 'o', 'green')
+        if not window['success']:
+            mark(zoom_axis, final, stop_label if stop_label != 'STOP' else '最终停止（停止原因见运行终止记录）', 'X', 'black')
+        zoom_axis.set_xlim(low[0], high[0]);zoom_axis.set_ylim(low[1], high[1])
+        zoom_axis.xaxis.set_major_locator(MaxNLocator(4))
+        zoom_axis.legend(prop={'family': CJK_FONT, 'size': 7}, loc='upper center', bbox_to_anchor=(.5, -.18))
+        zoom.tight_layout()
+        artifacts.append((f'continuous_reacquire_{number}.png', zoom))
+    # Deduplicate the weak-contact label, retaining separate recovery rounds.
+    handles, labels = axis.get_legend_handles_labels()
+    legend = dict(zip(labels, handles))
+    axis.legend(legend.values(), legend.keys(), prop={'family': CJK_FONT, 'size': 7},
+                loc='upper center', bbox_to_anchor=(.5, -.4), ncol=2)
+    fig.tight_layout()
+    return artifacts
+
+
+def render_contact_trajectory(run_dir, *, output_dir=None):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from experiment_logging.paths import wall_time_fields
+    data, config, events = read_run(run_dir)
+    output = Path(run_dir if output_dir is None else output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    artifacts = []
+    for name, figure in contact_trajectory_figures(data, config, events):
+        path = output/name
+        if path.exists():
+            suffix = wall_time_fields()['timestamp_local'].replace(':', '-').replace('+08-00', '')
+            path = path.with_name(path.stem+'_'+suffix+path.suffix)
+        try:
+            figure.savefig(path, dpi=160, bbox_inches='tight')
+            artifacts.append(path)
+        finally:
+            plt.close(figure)
+    return artifacts
+
+
 def frame_indices(times, fps, max_frames=1200):
     if not np.isfinite(fps) or fps <= 0:
         raise ValueError("fps must be finite and positive")
@@ -75,6 +251,8 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
     from simulation.continuous_view import (XYViewport, VectorDisplay, force_demonstration, CJK_FONT,
         FORCE_CURVES, SPEED_CURVES, line_style, component_note)
     from simulation.continuous_preview import extrema_indices
+    from experiment_logging.termination import continuous_label
+    windows = recovery_windows(data, events)
 
     fig=plt.figure(figsize=(14,8))
     grid=fig.add_gridspec(2,2,width_ratios=[3,1],hspace=.5,wspace=.18)
@@ -124,7 +302,7 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
     for name,marker,color in [('FIRST_CONTACT','*','green'),('CONTACT_LOST','x','red'),('DIRECTION_STOP_REQUEST','x','orange'),
                               ('DIRECTION_CONFIRMED','s','purple'),('DIRECTION_RESUME_VERIFIED','+','green')]:
         selected=[e for e in events if e['event_type']==name]
-        if selected:markers.append((xy.scatter([],[],marker=marker,color=color,s=30,label=name),selected))
+        if selected:markers.append((xy.scatter([],[],marker=marker,color=color,s=30,label=continuous_label(name)),selected))
     force_values=np.column_stack((data['dfx'],data['dfy'],data['fxy'],data['force_reference'],
                                   data['force_reference']-data['fxy'],np.hypot(data['raw_fx'],data['raw_fy'])))
     speeds=np.column_stack((np.hypot(data['command_vx'],data['command_vy']),
@@ -141,7 +319,7 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
     force.set(xlabel='Elapsed time [s]',ylabel=f'Processed {curve_frame} / raw force [N]')
     velocity.set(xlabel='Elapsed time [s]',ylabel='Velocity [mm/s]')
     for axis in (force,velocity):axis.legend(prop={'family': CJK_FONT, 'size': 6},ncol=2,loc='upper right');axis.grid(alpha=.2)
-    title=fig.suptitle('',fontsize=10)
+    title=fig.suptitle('',fontsize=10,fontfamily=CJK_FONT)
     note=fig.text(.055,.08,'',fontsize=8,va='bottom',fontfamily=['Noto Sans CJK JP', 'DejaVu Sans'])
 
     # Exposed only for offline tests/interactive notebook inspection.
@@ -230,7 +408,8 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
         f=force_values[index];v=speeds[index]
         force.set_title(f'Fx {f[0]:.2f}, Fy {f[1]:.2f}, Fxy {f[2]:.2f} N\nF_ref {f[3]:.2f}, error {f[4]:+.2f} N' if debug else 'Control feedback load [N]',fontsize=8)
         velocity.set_title(f'cmd {v[0]:.3f}, actual {v[1]:.3f} mm/s\nv_t {v[2]:+.3f}, v_n {v[3]:+.3f} mm/s',fontsize=8)
-        title.set_text(f"{data['time'][index]:.2f}s | {data['state'][index]} / {data['direction_phase'][index]} | "
+        number = sum(w['start_time'] <= data['monotonic_sec'][index]+1e-8 for w in windows)
+        title.set_text(f"{data['time'][index]:.2f}s | {continuous_label(data['state'][index], number, data['reason'][index])} / {data['direction_phase'][index]} | "
                        f"tangent limit: {data['tangent_limit_reason'][index]} | {data['reason'][index]}")
         note.set_text('\n'.join(part for part in (physical['note'],
             f'Processed force frame: {frames[index]}' +
@@ -250,7 +429,7 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
     return fig,update
 
 
-def render(run_dir, *, fps=None, output_format="none", local_xy=False, view=None, components=False, debug=False, true_tangent=False):
+def render(run_dir, *, fps=None, output_format="none", local_xy=False, view=None, components=False, debug=False, true_tangent=False, output_dir=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -266,7 +445,8 @@ def render(run_dir, *, fps=None, output_format="none", local_xy=False, view=None
         fps = (len(indices)-1)/max(data['time'][-1], 1/fps)
         print(f'Bounded replay: {len(indices)} frames, {fps:.2f} fps')
     fig, update = make_figure(data, config, events, local_xy=local_xy, view=view, components=components, debug=debug, true_tangent=true_tangent)
-    output = Path(run_dir)
+    output = Path(run_dir if output_dir is None else output_dir)
+    output.mkdir(parents=True, exist_ok=True)
     suffix = "_local" if local_xy else ("_"+view if view else "")
     summary = output / f"continuous_summary{suffix}.png"
     if summary.exists():
@@ -303,12 +483,13 @@ def render(run_dir, *, fps=None, output_format="none", local_xy=False, view=None
         print(f"Animation unavailable ({type(exc).__name__}: {exc}); static summary saved.")
     finally:
         plt.close(fig)
-    return artifacts
+    return artifacts + render_contact_trajectory(run_dir, output_dir=output)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
+    parser.add_argument('--output', type=Path, help='write replay figures elsewhere without changing historical records')
     parser.add_argument("--fps", type=float)
     parser.add_argument("--local-xy", action="store_true", help="crop XY around actual path, preserving equal scale")
     parser.add_argument("--format", choices=("auto", "mp4", "gif", "none"), default="none")
@@ -317,7 +498,7 @@ def main():
     parser.add_argument("--debug", action="store_true", help="show shared arrow legend, velocity and internal diagnostics")
     parser.add_argument('--true-tangent', action='store_true', help='display-only model tangent comparison (simulation only)')
     args = parser.parse_args()
-    for path in render(args.run_dir, fps=args.fps, output_format=args.format, local_xy=args.local_xy, view=args.view, components=args.components, debug=args.debug, true_tangent=args.true_tangent):
+    for path in render(args.run_dir, fps=args.fps, output_format=args.format, local_xy=args.local_xy, view=args.view, components=args.components, debug=args.debug, true_tangent=args.true_tangent, output_dir=args.output):
         print(path)
 
 

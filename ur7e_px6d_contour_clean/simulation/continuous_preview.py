@@ -15,7 +15,7 @@ import numpy as np
 import yaml
 
 from experiment_logging.data_logger import ExperimentLogger
-from experiment_logging.termination import TerminationReason, classify_stop_reason
+from experiment_logging.termination import TerminationReason, classify_stop_reason, continuous_label
 from policy.continuous_tracking import EXTRA_SAMPLE_FIELDS, State
 from simulation.continuous_session import SimulationSession, validate_scene, SIMULATION_SAMPLE_FIELDS
 from simulation.simulator import load_simulation_config
@@ -166,7 +166,8 @@ class PreviewRun:
             self.status = 'ENDED'
             logger.termination.set_stop_reason(session.policy.stop_reason, session.policy.reason, source='continuous.preview')
             display_code = getattr(session.policy.stop_reason, 'value', session.policy.stop_reason)
-            self.message = f'Ended: {display_code or TerminationReason.STOP_UNKNOWN_REASON.value}: {session.policy.reason}'
+            self.message = f'Ended: {display_code or TerminationReason.STOP_UNKNOWN_REASON.value}: '+continuous_label(
+                'STOP', session.policy._recovery_count, session.policy.reason)+f' ({session.policy.reason})'
             # The same simulated execution adapter integrates its braking tail.
             # Record fresh force/pose samples during the tail, with STOP commands.
             for _ in range(int(session.policy.c['confirmation_timeout_sec']/session.dt)+1):
@@ -611,7 +612,7 @@ class ContinuousPreview:
             self.executed.set_data([p[1]*1000 for p in model.path_history],[p[2]*1000 for p in model.path_history])
             current = f'Fx {values[-1,0]:.2f}, Fy {values[-1,1]:.2f}, Fxy {values[-1,2]:.2f} N\nF_ref {values[-1,3]:.2f}, error {values[-1,4]:+.2f} N'
             motion = f'cmd {velocities[-1,0]:.3f}, actual {velocities[-1,1]:.3f} mm/s\nv_t {velocities[-1,2]:+.3f}, v_n {velocities[-1,3]:+.3f} mm/s'
-            policy_state = last.command.state+' / '+last.telemetry['direction_phase']
+            policy_state = continuous_label(last.command.state, model.session.policy._recovery_count)+' / '+last.telemetry['direction_phase']
         else:
             self.display_time=0.
             xy=model.session.robot.pose[:2]*1000
@@ -629,7 +630,9 @@ class ContinuousPreview:
         for cursor in (self.cursor,self.velocity_cursor):cursor.set_xdata([self.display_time]*2)
         event_xy=np.array([e.pose[:2]*1000 for e in model.events]).reshape(-1,2)
         self.event_points.set_data(event_xy[:,0],event_xy[:,1])
-        self.event_text.set_text('\n'.join(f'{e.timestamp:.2f}s {e.event_type}' for e in list(model.events)[-2:]))
+        self.event_text.set_text('\n'.join(f'{e.timestamp:.2f}s '+continuous_label(e.event_type,
+            model.session.policy._recovery_count-sum(later.event_type == 'LOCAL_REACQUIRE' and later.timestamp > e.timestamp
+                for later in model.events)) for e in list(model.events)[-2:]))
         self.xy.set_title('')
         self.force.set_title(current if self.debug else 'Control feedback load [N]',fontsize=9)
         self.force.set_ylabel('Control feedback [N]')

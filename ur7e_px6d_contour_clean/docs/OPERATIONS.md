@@ -20,6 +20,27 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 `tracking_base_speed_mps`、`tracking_speed_multiplier`、`tracking_nominal_speed_mps`（速度按 m/s 记录）。
 搜索、启动/返回、法向补压/卸力、丢边探索速度及原阶段监测阈值均保持不变。
 
+连续策略中的 `CONTACT_LOST` 表示“接触减弱持续达到判定条件”，是低力判断，不是物体拐角识别，也不证明完全脱离。
+`LOCAL_REACQUIRE` / `REACQUIRED` 的第 N 次表示整次运行中的局部找回轮次，与拐角数量无关。
+找回路径角度上限为 90°，沿用原圆弧与方向；半径 2 mm、找回速度 0.5 mm/s、总时间 8 s、
+实际路程和位移上限 4 mm、停止余量 0.5 mm 均保持不变。理论弧长 3.142 mm、理想时间 6.283 s
+不包含跟随误差和停稳确认，不能据此认定一定够用或保证通过拐角；接触确认期间参考点冻结，总时间预算继续计时。
+终止报告的“最后接触记录”来自最后方向有效的记忆样本，不等同于最近一次达到阈值并确认成功的位置；缺失时为 null。
+
+新运行目录如 `run_2026-10-05_17-33-05_896939` 使用北京时间 `Asia/Shanghai`，表示目录创建时间。
+metadata 保留 UTC `timestamp`，另记 `timestamp_local` 和 `timezone`；逐帧日志及终止记录同样保留 UTC 并增加本地时间。
+菜单按 metadata 创建时间排序并显示北京时间，旧目录无需改名。
+停止后生成首次接触至最终停止的 Base XY TCP 全轨迹，以及每次找回放大图；图中不是已知物体外形。
+离线回放可指定独立输出目录，保留历史日志及已有图：
+
+```bash
+/home/user-linux/robotics_cs/.venv312/bin/python tools/visualize_continuous_run.py \
+  data/real/continuous/run_20261005_093305_896939/ --format none \
+  --output data/replay_figures/run_20261005_093305_896939/
+```
+
+旧运行参考圆弧按旧 `config_snapshot.yaml` 的 60°重建，不读取当前 90°配置；缺少起点或保存方向时不补画参考圆弧。
+
 原菜单 **11** 用于手动返回 reset（没有 reset 文件则返回 P0）：按 Enter 打开任务，核对路径后再按 Enter 执行。手动返回不连接 PX6D；自动启动返回有 PX6D 力监控。返回中 Q/Esc/Ctrl+C 中止。
 
 原菜单 **12** 是离散扫描，启动同样逐步按 Enter；Q 按原配置正常停止并可能返回，Esc/Ctrl+C 不自动返回。急迫危险使用现场物理急停。

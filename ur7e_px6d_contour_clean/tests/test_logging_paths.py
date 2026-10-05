@@ -1,6 +1,40 @@
 import json
 import pytest
 from experiment_logging.paths import create_run, run_root, read_metadata, PROJECT_ROOT
+
+
+def test_beijing_creation_names_and_utc_local_fields_use_same_instant(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from experiment_logging import paths
+    fixed = datetime(2026, 10, 5, 9, 33, 5, 896939, tzinfo=timezone.utc)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed.astimezone(tz)
+    monkeypatch.setattr(paths, 'datetime', Clock)
+    directory = paths.create_run('real', 'continuous', PROJECT_ROOT/'config.yaml', data_root=tmp_path)
+    assert directory.name == 'run_2026-10-05_17-33-05_896939'
+    metadata = paths.read_metadata(directory)
+    assert metadata['timestamp'] == fixed.isoformat()
+    assert metadata['timestamp_local'] == '2026-10-05T17:33:05.896939+08:00'
+    assert metadata['timezone'] == 'Asia/Shanghai'
+    assert metadata['timestamp_meaning'] == 'run_directory_created_at'
+    assert datetime.fromisoformat(metadata['timestamp_local']) == fixed
+    assert '北京时间 (Asia/Shanghai)' in paths.local_time_text(metadata['timestamp'])
+
+
+def test_sorting_prefers_metadata_and_accepts_old_and_new_names(tmp_path):
+    import json
+    from experiment_logging.paths import run_sort_key
+    old = tmp_path/'run_20261005_093305_896939'
+    new = tmp_path/'run_2026-10-05_17-34-00_000000'
+    for path in (old, new):
+        path.mkdir()
+    assert sorted([new, old], key=run_sort_key) == [old, new]
+    (new/'metadata.json').write_text(json.dumps(dict(schema_version=1, mode='real', strategy='continuous',
+        timestamp='2026-10-05T08:00:00+00:00', git={}, config_source=None)))
+    assert sorted([old, new], key=run_sort_key) == [new, old]
+    assert read_metadata(new)['schema_version'] == 1
 from experiment_logging.data_logger import ExperimentLogger
 from experiment_logging.termination import TerminationRecorder
 from simulation.simulator import ContourSimulator, load_simulation_config
