@@ -170,3 +170,27 @@ def test_return_monitor_uses_pose_after_serial_acquisition(config):
     assert order == ['sensor', 'rtde']
     np.testing.assert_allclose(monitor.processed.force, [-.2, .1, .3], atol=1e-14)
     assert monitor.force_frame == 'Base'
+
+
+@pytest.mark.parametrize('orientation,rotation_base_tool', [([0., 0., 0.], np.eye(3)),
+                                                         ([np.pi/2, 0., 0.], RX)])
+def test_configured_mount_force_axes_and_positive_reference_point_shift(config, orientation, rotation_base_tool):
+    from copy import deepcopy
+    settings = deepcopy(config['preprocessing'])
+    settings['kalman']['enabled'] = False
+    p = WrenchPreprocessor.from_config(settings, tool_orientation=orientation)
+    a = .70710678
+    expected_rotation = np.array([[a, -a, 0.], [a, a, 0.], [0., 0., 1.]])
+    np.testing.assert_array_equal(settings['coordinate_transform']['rotation_sensor_to_tool'], expected_rotation)
+    np.testing.assert_array_equal(settings['coordinate_transform']['sensor_origin_in_tool_m'], [0., 0., .024])
+    # Unit Sensor X/Y/Z: r_T=[0,0,.024] gives (-.024*Fy, +.024*Fx, 0).
+    expected_forces_tool = ([a, a, 0.], [-a, a, 0.], [0., 0., 1.])
+    expected_torques_tool = ([-.024*a, .024*a, 0.], [-.024*a, -.024*a, 0.], [0., 0., 0.])
+    for axis, force_tool, torque_tool in zip(np.eye(3), expected_forces_tool, expected_torques_tool):
+        result = p.process(wrench(axis))
+        np.testing.assert_allclose(result.force, rotation_base_tool @ force_tool, atol=1e-14)
+        np.testing.assert_allclose(result.torque, rotation_base_tool @ torque_tool, atol=1e-14)
+    # Also rotate a nonzero intrinsic Sensor moment before adding the lever arm.
+    result = p.process(Wrench(1., 0., 0., 0., 1., 0.))
+    np.testing.assert_allclose(result.torque,
+        rotation_base_tool @ np.array([-a-.024*a, a+.024*a, 0.]), atol=1e-14)

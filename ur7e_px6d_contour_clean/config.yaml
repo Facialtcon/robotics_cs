@@ -36,9 +36,13 @@ preprocessing:
     # expressed in the active TCP frame (not the flange frame). Or supply R_BS
     # together with the actual TCP rotvec (rad) at which R_BS was measured.
     # Neither is inferred from TCP offset/pose or the probe shaft = TCP +Z.
-    rotation_sensor_to_tool: null
-    # Unknown mounting: confirm each Sensor +X/+Y/+Z axis (including signs)
-    # in the ACTIVE TCP frame. Leave null until measured; do not guess identity.
+    # Site-confirmed Sensor -> active TCP/tool rotation: F_T = R_TS @ F_S.
+    # Sensor +Z and Tool +Z coincide and point downward; use the confirmed
+    # matrix below for the 45-degree XY mounting relationship.
+    rotation_sensor_to_tool:
+      - [0.70710678, -0.70710678, 0.0]
+      - [0.70710678,  0.70710678, 0.0]
+      - [0.0,         0.0,        1.0]
     reference_tool_orientation: null
     # Unverified identity, NOT a measured calibration. R_BS maps sensor -> Base
     # at the saved fixed scan orientation. R_BS = R_BT @ R_TS only when the
@@ -54,9 +58,12 @@ preprocessing:
     # Vector from output-frame origin to sensor origin, expressed in output frame.
     sensor_origin_in_base_m: [0, 0, 0]
     # Null = rotate torque at the sensor origin only, no claim of TCP torque.
-    # A measured vector TCP origin -> sensor origin, expressed in TCP (m),
+    # Vector active TCP/tool origin -> sensor origin, expressed in tool (m),
     # enables M_Base_at_TCP = R_BS M_S + (R_BT r_TS) x (R_BS F_S).
-    sensor_origin_in_tool_m: null
+    # PROVISIONAL ASSUMPTION: coaxial origins; use the PX6D drawing's 24 mm
+    # total height and assume the load reference plane center is the sensor
+    # reference origin. This origin definition is NOT confirmed by the maker.
+    sensor_origin_in_tool_m: [0.0, 0.0, 0.024]
   # No-target response at the chosen granular insertion depth, in output frame.
   granular_baseline_output: [0, 0, 0, 0, 0, 0]  # MUST MEASURE
 

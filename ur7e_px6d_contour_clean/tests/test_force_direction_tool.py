@@ -11,7 +11,7 @@ from experiment_logging.paths import PROJECT_ROOT
 from tools import check_force_direction as tool
 
 
-def test_readonly_tool_reports_3_4_5_without_any_rtde_access(monkeypatch):
+def test_readonly_tool_reports_rotated_3_4_5_without_any_rtde_access(monkeypatch):
     import rtde_control, rtde_receive
     attempts = []
     def forbidden(*a, **k):
@@ -22,16 +22,20 @@ def test_readonly_tool_reports_3_4_5_without_any_rtde_access(monkeypatch):
     sensor = Sensor(); sensor.read_wrench = lambda: Wrench(3, 4, 0, 0, 0, 0)
     messages = []
     before = (PROJECT_ROOT/'config.yaml').read_bytes()
-    assert tool.run(reader_factory=lambda *a: sensor, samples=1, bias_samples=0, emit=messages.append) == 0
+    assert tool.run(reader_factory=lambda *a: sensor, samples=1, bias_samples=0, emit=messages.append,
+                    tool_orientation=[0., 0., 0.]) == 0
     output = '\n'.join(messages)
-    assert 'processed Fx=3.000000' in output and 'processed Fy=4.000000' in output
-    assert 'Fxy=5.000000' in output and 'normalized=[0.600000, 0.800000]' in output
+    assert 'processed Fx=-0.707107' in output and 'processed Fy=4.949747' in output
+    assert 'Fxy=5.000000' in output and 'normalized=[-0.141421, 0.989949]' in output
     assert 'Base +X' in output and 'Base +Y' in output
     assert not attempts and not sensor.connected
     assert (PROJECT_ROOT/'config.yaml').read_bytes() == before
 
 
 def test_tool_applies_configured_transform_and_displays_sign_without_saving(config, tmp_path):
+    # Explicit synthetic legacy-reference fixture, independent of the site mount.
+    config['preprocessing']['coordinate_transform']['rotation_sensor_to_tool'] = None
+    config['preprocessing']['coordinate_transform']['sensor_origin_in_tool_m'] = None
     config['preprocessing']['coordinate_transform']['rotation_sensor_to_base'] = [[0,-1,0],[1,0,0],[0,0,1]]
     config['preprocessing']['coordinate_transform']['reference_tool_orientation'] = [0, 0, 0]
     config['continuous_tracking']['force_direction_sign'] = -1
@@ -54,8 +58,8 @@ def test_software_bias_only_uses_raw_then_reports_direction():
     sensor.read_wrench = lambda: next(readings)
     output = []
     assert tool.run(reader_factory=lambda *a: sensor, bias_samples=2, samples=1, emit=output.append,
-                    confirm=lambda _: '') == 0
-    assert any('normalized=[0.600000, 0.800000]' in line for line in output)
+                    confirm=lambda _: '', tool_orientation=[0., 0., 0.]) == 0
+    assert any('normalized=[-0.141421, 0.989949]' in line for line in output)
 
 
 def test_optional_direction_tool_cancel_prevents_connection_and_bias():

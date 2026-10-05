@@ -29,6 +29,8 @@ def prepare(config, monkeypatch, *, watchdog=False):
         # These SDK/sensor doubles emit vectors already in the model's Base
         # frame at the final pose. This is explicit synthetic setup, not a
         # calibration supplied for the real installation in config.yaml.
+        c['preprocessing']['coordinate_transform']['rotation_sensor_to_tool'] = None
+        c['preprocessing']['coordinate_transform']['sensor_origin_in_tool_m'] = None
         c['preprocessing']['coordinate_transform']['reference_tool_orientation'] = list(target[3:])
         return c
     monkeypatch.setattr(runtime,'load_config',load)

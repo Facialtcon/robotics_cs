@@ -42,8 +42,9 @@ SDK 接受指令不代表已完成运动，仍以实际 TCP 和接触力判断�
 `reference_tool_orientation`（TCP 旋转向量，rad）。这两个输入都没有时，只显示
 `sensor_uncalibrated`，不冒称 Base 力；程序在连接设备、启动返回及 SEARCH 之前报告
 `STOP_CONFIG_ERROR / CONFIG_PREFLIGHT`，不会等到接触后才发现缺少安装方向。
-当前两项均为 null，旧单位矩阵是占位值。缺少的是 PX6D +X/+Y/+Z 在当前 TCP 中的方向，
-即 `rotation_sensor_to_tool` 的三列；“探针轴等于 TCP +Z”不能替代这项安装信息。
+当前采用现场确认的 `rotation_sensor_to_tool = Rz(+45°)`，Sensor +Z 与 Tool +Z 同向朝下，
+矩阵三列分别表示 PX6D +X/+Y/+Z 在当前 TCP/tool 中的方向。旧 Base 单位矩阵仍是占位值，
+直接安装矩阵优先生效；`reference_tool_orientation` 保持 null。
 也不能把保存的 TCP 姿态与旧占位单位阵组合成所谓实测标定。
 不生成强制验证文件，也不自动推导安装旋转或翻转 `force_direction_sign`。
 `force_transform_at_start.json` 记录安装矩阵、参考姿态、最终实际 TCP 姿态和合成的 Base 矩阵。
@@ -74,10 +75,11 @@ Q/R/P 为 N²，Q 按每个有效采样步计；可用标量或按 Fx/Fy/Fz 的�
 它们属于原跟踪策略，不是 Sensor-frame wrench 滤波。
 卸力配置校验中的滤波稳定时间改为 Kalman 增益的保守估计，卸力预算与策略不变。
 
-当前 `sensor_origin_in_tool_m: null` 表示几何偏置未知，力矩只在传感器原点处旋转到 Base，
-不是 TCP 原点的力矩。旧 `sensor_origin_in_base_m: [0,0,0]` 不证明原点重合。
-如需完整参考点变换，实测从 TCP 原点指向 Sensor 原点的向量（TCP 表达，m）后填写
-`sensor_origin_in_tool_m`；届时使用 `M_B@TCP = R_BS M_S + (R_BT r_TS) × (R_BS F_S)`。
+当前 `sensor_origin_in_tool_m: [0,0,0.024]` 表示从当前 TCP/tool 原点指向 Sensor 原点，
+以 tool 坐标表达，暂按两者同轴及 PX6D 图纸的 24 mm 总高度填写。
+这是“载荷参考平面中心为 Sensor 参考原点”的暂定假设，不是厂家已确认的原点定义。
+该配置启用 `M_B@TCP = R_BS M_S + (R_BT r_TS) × (R_BS F_S)`，力矩参考点结果依赖此假设。
+旧 `sensor_origin_in_base_m: [0,0,0]` 不证明原点重合；显式 tool 偏置优先生效。
 已有非零 Base 偏置配合实测参考姿态的配置也继续支持。
 `force_transform_at_start.json` 中 `torque_reference_point` 和
 `wrench_reference_point_transform_complete` 明确记录当前范围。

@@ -83,6 +83,14 @@ def test_discrete_known_mount_uses_final_actual_pose(config,monkeypatch,tmp_path
 
 
 def test_discrete_unknown_mount_fails_before_devices_or_policy(config, monkeypatch, tmp_path):
+    original = runtime.load_config
+    def load(path):
+        value = original(path)
+        value['preprocessing']['coordinate_transform']['rotation_sensor_to_tool'] = None
+        value['preprocessing']['coordinate_transform']['reference_tool_orientation'] = None
+        value['preprocessing']['coordinate_transform']['sensor_origin_in_tool_m'] = None
+        return value
+    monkeypatch.setattr(runtime, 'load_config', load)
     def forbidden(*args, **kwargs):
         pytest.fail('unknown Sensor frame must never reach devices or policy')
     monkeypatch.setattr(runtime.RuleBasedPolicy, 'update', forbidden)
