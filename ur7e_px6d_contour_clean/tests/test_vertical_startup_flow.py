@@ -59,13 +59,49 @@ def test_cancel_vertical_return_never_activates_control_or_zeroes(real, clock):
     assert devices.control_count == 0 and sensor.count == 0
 
 
-def test_raw_return_force_limit_prevents_motion_without_zero(real, clock):
+@pytest.mark.parametrize('raw,reason', [
+    (Wrench(60, 0, 0, 0, 0, 0), 'absolute raw force limit'),
+    (Wrench(65, 0, 0, 0, 0, 0), 'absolute raw force limit'),
+    (Wrench(0, 0, 0, 0, 5, 0), 'absolute raw torque limit'),
+    (Wrench(0, 0, 0, 0, 5.1, 0), 'absolute raw torque limit'),
+    (Wrench(np.nan, 0, 0, 0, 0, 0), 'nonfinite return wrench'),
+    (Wrench(0, 0, 0, 0, np.inf, 0), 'nonfinite return wrench'),
+])
+def test_unbiased_startup_hard_limits_prevent_control_without_zero(real, clock, raw, reason):
     config, start, devices, owner = vertical_case(real)
     sensor = Sensor()
-    sensor.read_wrench = lambda: Wrench(9, 0, 0, 0, 0, 0)
-    with pytest.raises(Exception, match='return force limit'):
-        scan_startup.startup_scan(config, start, owner, sensor, None, lambda: None, confirm=lambda _: '')
+    sensor.read_wrench = lambda: raw
+    def forbidden(_):
+        raise AssertionError('unsafe raw data must stop before raised bias acquisition')
+    with pytest.raises(ReturnAborted, match=reason):
+        scan_startup.startup_scan(config, start, owner, sensor, None, lambda: None,
+                                 confirm=lambda _: '', before_descent=forbidden)
+    assert devices.control_count == 0
     assert not any(c[0] == 'moveL' for c in devices.control.calls)
+
+
+@pytest.mark.parametrize('raw', [
+    # Actual pre-zero readings from the two failed 2026-10-06 startup runs.
+    Wrench(-.5301094651222229, -.6429791450500488, 9.412951469421387,
+           -.06993899494409561, .00815560668706894, -.018871838226914406),
+    Wrench(-.5171158313751221, -.6167802810668945, 9.354061126708984,
+           -.06934390962123871, .008845433592796326, -.018336046487092972),
+    Wrench(0, 0, 9.4, 0, .8, 0),  # Uncompensated torque above the soft return threshold.
+])
+def test_unbiased_real_reading_is_diagnostic_until_raised_zero(real, raw):
+    config, _, _, _ = real
+    processor = WrenchPreprocessor.from_config(config['preprocessing'])
+    processor.zero_bias_sensor[:] = 100  # An old bias must not hide the raw load.
+    sensor = Sensor()
+    sensor.read_wrench = lambda: raw
+    monitor = PX6DForceMonitor(config, sensor, processor, raw_only=True)
+    monitor.sample()
+    assert monitor.force_frame == 'Sensor'
+    np.testing.assert_array_equal(monitor.raw.array(), raw.array())
+    np.testing.assert_array_equal(monitor.processed.array(), raw.array())
+    assert 'uncompensated raw' in monitor.diagnostics['return force']
+    if raw.torque[1] == .8:
+        assert 'uncompensated raw' in monitor.diagnostics['return torque']
 
 
 def test_raw_monitor_ignores_wrong_old_bias_and_transform(config):
@@ -110,7 +146,8 @@ def test_runtime_captures_single_bias_above_p0_before_vertical_insertion(config,
     np.testing.assert_allclose(moves[-1][[0, 1, 3, 4, 5]], captures[0][[0, 1, 3, 4, 5]])
 
 
-def test_insertion_load_is_preserved_instead_of_zeroed_at_depth(config, clock, monkeypatch, tmp_path):
+@pytest.mark.parametrize('unloaded_offset', [.2, 9.412951469421387])
+def test_insertion_load_is_preserved_instead_of_zeroed_at_depth(config, clock, monkeypatch, tmp_path, unloaded_offset):
     import json
     from app import continuous_runtime as runtime
     from doubles import Devices
@@ -121,7 +158,7 @@ def test_insertion_load_is_preserved_instead_of_zeroed_at_depth(config, clock, m
         def read_wrench(self):
             self.count += 1
             # Synthetic unloaded offset above P0, added insertion load at depth.
-            force = .2 if devices.receive.pose[2] > target[2]+.015 else 1.2
+            force = unloaded_offset if devices.receive.pose[2] > target[2]+.015 else unloaded_offset+1.
             return Wrench(0., 0., force, 0., 0., 0.)
     forces = []
     update = runtime.ContinuousTrackingPolicy.update
@@ -134,8 +171,12 @@ def test_insertion_load_is_preserved_instead_of_zeroed_at_depth(config, clock, m
     bias = json.loads((directory/'scan_bias_at_start.json').read_text())
     assert bias['reference'] == 'above_P0_before_vertical_insertion'
     assert bias['tcp_pose'][2] == pytest.approx(target[2]+.030)
-    assert bias['zero_bias_sensor'][2] == pytest.approx(.2)
+    assert bias['zero_bias_sensor'][2] == pytest.approx(unloaded_offset)
     assert forces and min(forces) > .5  # Insertion force reaches the real preprocessing/policy path.
+    if unloaded_offset > config['safe_return']['return_force_limit']:
+        returned = json.loads((directory/'return_status.json').read_text())
+        assert returned['return_status'] == 'complete'
+        assert 'uncompensated raw' in returned['software_warnings']['return force']
 
 
 def test_bias_failure_above_p0_prevents_descent(config, clock, monkeypatch, tmp_path):

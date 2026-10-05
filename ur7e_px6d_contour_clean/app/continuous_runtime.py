@@ -241,6 +241,12 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     # return/reacquire/normal speeds and execution protections.
                     config['continuous_tracking']['tangential_speed'] = selection['tracking_nominal_speed_mps']
                     policy.c['tangential_speed'] = selection['tracking_nominal_speed_mps']
+                    # Reuse prepare_real's combined tangent/normal envelope
+                    # with this run's selected tangent, leaving other phases
+                    # and the global TCP speed guard unchanged.
+                    tracking_limit = float(np.hypot(policy.c['tangential_speed'], policy.c['normal_speed_limit']))
+                    controller.config['continuous_speed_limits']['CONTINUOUS_TRACKING'] = tracking_limit
+                    config['continuous_execution_envelope']['nominal_speed_limits_mps']['CONTINUOUS_TRACKING'] = tracking_limit
                     config['continuous_speed_selection'] = selection
                     timing.update(selection)
                     logger.write_config_snapshot(config)

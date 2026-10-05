@@ -895,6 +895,19 @@ class ContinuousTrackingPolicy:
             return self._direction_reconfirm(now, robot, vector)
         if self.state == State.CONTINUOUS_TRACKING:
             self.stop_confirmed = False
+            if (self._low_force_pending and
+                    now-self._confirm_started+1e-12 >= float(self.c['confirmation_timeout_sec'])):
+                # One deadline covers the whole stopped recovery attempt,
+                # including force returning only to the 0.5--1 N band. Keep
+                # it when entering CONTACT_LOST; do not open another wait.
+                self.state = State.CONTACT_LOST
+                self._low_force_pending = False
+                self._direction_resume_started = None
+                self.loss_detection_pose = pose.copy()
+                self.diagnostics['low_force_confirmation'] = (
+                    'WARNING: low-force contact recovery confirmation timeout; entering CONTACT_LOST')
+                self._event(now, pose, 'CONTACT_LOST')
+                return self._command(pose)
             if self.fxy < float(self.c['contact_lost_threshold']):
                 self.tangent_limit_reason = 'LOW_FORCE_CONTACT_CONFIRMATION'
                 self.direction_valid = False
@@ -973,7 +986,12 @@ class ContinuousTrackingPolicy:
                     self.state = State.CONTINUOUS_TRACKING
                     self._lost, self.lost_timer, self._confirm_started = None, 0., None
                     self._event(now, pose, 'REACQUIRED')
-                return self._command(pose)
+                    return self._command(pose)
+                if now-self._confirm_started+1e-12 < float(self.c['confirmation_timeout_sec']):
+                    return self._command(pose)
+                # A failed confirmation cannot keep this stop pending forever.
+                # If recovery is unavailable, _begin_recovery retains the old
+                # stationary hold; later valid contact may still be accepted.
             if self._settled(now, robot):
                 self._begin_recovery(now, pose, robot=robot)
             elif now-self._confirm_started >= float(self.c['confirmation_timeout_sec']):

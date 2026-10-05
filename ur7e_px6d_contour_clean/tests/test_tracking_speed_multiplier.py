@@ -13,6 +13,7 @@ from doubles import Devices, Sensor, Keyboard
 from experiment_logging.paths import PROJECT_ROOT
 from policy.continuous_tracking import ContinuousTrackingPolicy, State
 from test_continuous_runtime import args, prepare
+from test_real_tracking_guards import clock
 
 
 @pytest.mark.parametrize('answer,multiplier', [('', 1.), ('3', 3.), ('2.5', 2.5), ('30', 30.)])
@@ -113,7 +114,7 @@ def test_combined_cap_acceleration_limit_and_stop_remain_effective(config):
     assert not sample(scaled, 5.01, 1.1).move
 
 
-@pytest.mark.parametrize('multiplier', [1., 3.])
+@pytest.mark.parametrize('multiplier', [1., 2., 3.])
 def test_real_entry_selects_before_scan_and_records_effective_settings_without_source_write(
         config, monkeypatch, tmp_path, capsys, multiplier):
     source_before = (PROJECT_ROOT/'config.yaml').read_bytes()
@@ -153,7 +154,10 @@ def test_real_entry_selects_before_scan_and_records_effective_settings_without_s
     assert devices.owner.config['max_tcp_speed'] == config['robot']['max_tcp_speed']
     assert devices.owner.config['speed_acceleration'] == config['robot']['speed_acceleration']
     assert devices.owner.config['continuous_speed_limits']['CONTINUOUS_TRACKING'] == pytest.approx(
-        np.hypot(config['continuous_tracking']['tangential_speed'], config['continuous_tracking']['normal_speed_limit']))
+        np.hypot(nominal, config['continuous_tracking']['normal_speed_limit']))
+    assert snapshot['continuous_execution_envelope']['nominal_speed_limits_mps'] == devices.owner.config['continuous_speed_limits']
+    assert devices.owner.config['continuous_speed_limits']['TARGET_SEARCH'] == config['continuous_tracking']['search_speed']
+    assert devices.owner.config['continuous_speed_limits']['LOCAL_REACQUIRE'] == config['continuous_tracking']['reacquire_speed']
     with (run_dir/'samples.csv').open(newline='') as handle:
         rows = list(csv.DictReader(handle))
     assert rows
@@ -166,6 +170,47 @@ def test_real_entry_selects_before_scan_and_records_effective_settings_without_s
     assert '基准速度：1 mm/s' in output and f'所选倍率：{multiplier:g} 倍' in output
     assert f'本次名义贴边速度：{nominal*1000:g} mm/s' in output
     assert (PROJECT_ROOT/'config.yaml').read_bytes() == source_before
+
+
+@pytest.mark.parametrize('multiplier', [1., 2., 3.])
+def test_effective_tracking_envelope_allows_selected_speed_without_phase_warning(
+        config, monkeypatch, tmp_path, multiplier, clock):
+    target = prepare(config, monkeypatch)
+    devices = Devices(config, target)
+    # prepare_real supplies the saved search direction to the runtime; use
+    # that same calibration for this explicitly synthetic reaction force.
+    from calibration.scan_calibration import load_scan_calibration
+    direction = np.asarray(load_scan_calibration(PROJECT_ROOT/'scan_calibration.yaml')['scan_direction_xy'])
+    class ContactSensor(Sensor):
+        scan_reads = 0
+        def read_wrench(self):
+            self.count += 1
+            if devices.owner.control is not None and not devices.owner._return_mode:
+                self.scan_reads += 1
+            force = -1.5*direction if self.scan_reads >= 5 else np.zeros(2)
+            return Wrench(*force, 0., 0., 0., 0.)
+    scan_started = None
+    def poll(self):
+        nonlocal scan_started
+        if not self.main_loop:
+            return None
+        if scan_started is None:
+            scan_started = clock.now
+        return 'Q' if clock.now-scan_started >= .6 else None
+    monkeypatch.setattr(Keyboard, 'poll', poll)
+    monkeypatch.setattr(Keyboard, 'read_text', lambda *args: str(multiplier))
+    assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=ContactSensor) == 0
+    run_dir, = (tmp_path/'real/continuous').glob('run_*')
+    with (run_dir/'samples.csv').open(newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    moving = [r for r in rows if r['current_state'] == 'CONTINUOUS_TRACKING' and float(r['commanded_speed_mps']) > 0]
+    nominal = config['continuous_tracking']['tangential_speed']*multiplier
+    envelope = np.hypot(nominal, config['continuous_tracking']['normal_speed_limit'])
+    assert moving and max(float(r['commanded_speed_mps']) for r in moving) == pytest.approx(nominal)
+    for row in moving:
+        assert float(row['speed_guard_nominal_mps']) == pytest.approx(envelope)
+        assert 'phase_command_speed' not in json.loads(row['software_warnings'])['controller']
+    assert 'phase_command_speed' not in devices.owner.diagnostics
 
 
 def test_cancel_choice_never_starts_scan(config, monkeypatch, tmp_path):

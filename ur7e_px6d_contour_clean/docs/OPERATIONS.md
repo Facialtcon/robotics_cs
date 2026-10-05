@@ -15,12 +15,19 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 4. 运行中按 **Q / Esc / Ctrl+C** 原地停止，不自动返回。等待停稳确认和日志保存、回到菜单，再执行下一项；菜单 **0** 退出。
 
 每个确认提示出现后单独按一次 Enter。程序清除积压按键，不接受预先粘贴或管道传入的回车；确认时按 Q/Esc/Ctrl+C 可取消。菜单选择和数值输入仍按原方式填写。探针接触目标时不能采零。
+连续真机启动在抬升位置采零之前，原始 F/T 含未确定的零偏、重力及可能的接触载荷。
+此时返回力 8 N / 力矩 0.7 Nm 按连续模式原有规则记录诊断，不能把未补偿读数当作补偿后的接触力停止条件；
+原始力 60 N / 力矩 5 Nm 硬上限、非有限值及通信故障仍停止。上述数值均未提高。
+这不证明原始读数全部属于零偏；到 P0 正上方后仍须确认脱离颗粒、静止空载，才采集扫描零偏。
 倍率选择仅用于本次菜单 18 / 命令行 `--execute`，每次重新读取原配置基准，不修改 `config.yaml`。
 `config_snapshot.yaml` 的 `continuous_speed_selection`、`tracking_speed_selection.json` 和逐帧日志保存
 `tracking_base_speed_mps`、`tracking_speed_multiplier`、`tracking_nominal_speed_mps`（速度按 m/s 记录）。
 搜索、启动/返回、法向补压/卸力、丢边探索速度及原阶段监测阈值均保持不变。
+贴边阶段速度 envelope 同步本次名义切向速度，沿用切向速度与原法向速度上限的合成模长；配置快照记录相同值，总 TCP 速度上限继续生效。
 
 连续策略中的 `CONTACT_LOST` 表示“接触减弱持续达到判定条件”，是低力判断，不是物体拐角识别，也不证明完全脱离。
+低力停车后，接触恢复确认最多等待 `confirmation_timeout_sec`（当前 1 s）；力仅回到 0.5～低于 1.0 N 或再次短暂下降，不重启该次等待期限。
+超时进入 `CONTACT_LOST`，确认停稳后沿用 `LOCAL_REACQUIRE`；未能确认停稳则停止。持续低力仍按原 0.15 s 判定提前进入 `CONTACT_LOST`。
 `LOCAL_REACQUIRE` / `REACQUIRED` 的第 N 次表示整次运行中的局部找回轮次，与拐角数量无关。
 找回路径角度上限为 90°，沿用原圆弧与方向；半径 2 mm、找回速度 0.5 mm/s、总时间 8 s、
 实际路程和位移上限 4 mm、停止余量 0.5 mm 均保持不变。理论弧长 3.142 mm、理想时间 6.283 s

@@ -154,8 +154,16 @@ class PX6DForceMonitor:
             magnitude = np.linalg.norm(value)
             real = self.config.get('continuous_real_execution', False)
             if magnitude > float(limit) or (real and label.startswith('absolute raw') and magnitude >= float(limit)):
-                if real and label.startswith('return ') and not self.raw_only:
-                    self.diagnostics[label] = f'WARNING: processed {label} {magnitude:g} exceeds {limit:g}'
+                if real and label.startswith('return '):
+                    # Continuous execution already treats these return levels
+                    # as diagnostics. Before raised-position zero, raw loads
+                    # include unknown bias/gravity/contact: they must not become
+                    # compensated-force stops. Keep absolute RAW guards below
+                    # active, and never infer a zero from the inserted P0 load.
+                    source = 'uncompensated raw' if self.raw_only else 'processed'
+                    self.diagnostics[label] = (
+                        f'WARNING: {source} {label} {magnitude:g} exceeds {limit:g}'
+                        + ('; contact load unknown until raised-position zero' if self.raw_only else ''))
                     continue
                 raise ReturnAborted(f'{label} limit exceeded')
         return state
