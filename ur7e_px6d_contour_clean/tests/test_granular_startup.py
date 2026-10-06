@@ -196,6 +196,10 @@ def test_runtime_captures_independent_background_and_delivers_only_target_force_
     np.testing.assert_allclose(saved['zero_bias_sensor'], air)
     np.testing.assert_allclose(saved['granular_baseline_output'], medium, atol=1e-12)
     assert saved['source'] == 'target_free_stationary_P0_after_insertion' and saved['frame'] == 'Base'
+    assert saved['diagnostics']['sample_count'] == 3
+    np.testing.assert_allclose(saved['diagnostics']['std_force_base_N'], 0., atol=1e-12)
+    np.testing.assert_allclose(saved['diagnostics']['trend_force_base_N'], 0., atol=1e-12)
+    assert not saved['diagnostics']['drift_warning']
     snapshot = yaml.safe_load((path/'config_snapshot.yaml').read_text())
     np.testing.assert_allclose(snapshot['preprocessing']['granular_baseline_output'], medium, atol=1e-12)
     assert snapshot['continuous_speed_selection']['tracking_speed_multiplier'] == 3.
@@ -255,3 +259,40 @@ def test_invalid_background_settings_fail_before_device_connection(config, monke
     devices, sensor = Devices(config, target), Sensor()
     assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=lambda *a: sensor) == 1
     assert devices.receive_count == devices.control_count == sensor.count == 0
+
+
+@pytest.mark.parametrize('drift', [0., .6])
+def test_100_frame_background_statistics_and_drift_warning_do_not_block_capture(config, clock, capsys, drift):
+    rotation = np.array([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])
+    processor = WrenchPreprocessor(0., rotation, np.zeros(3), np.zeros(6), np.zeros(6))
+    air = Wrench(.2, -.3, 9.4, .02, .01, -.03)
+    processor.set_zero_bias([air])
+    index = np.arange(100)
+    # Deterministic alternating noise cancels over the first/last 20 frames;
+    # linear drift remains visible. All total loads stay below return limits.
+    rows = np.zeros((100, 6))
+    rows[:, 0] = 1.4 + drift*index/99 + .03*(-1.)**index
+    rows[:, 1] = .2
+    rows[:, 4] = .01 + .001*(-1.)**index
+    sensor_rows = [Wrench.from_sequence(air.array()+np.r_[rotation.T @ row[:3], rotation.T @ row[3:]])
+                   for row in rows]
+    sensor_rows = iter(sensor_rows)
+    owner = SimpleNamespace(config={}, diagnostics={}, watchdog_active=False,
+        read_diagnostic_state=lambda: RobotState(clock.now, np.zeros(6), np.zeros(6)))
+    statistics = startup.capture_stationary_granular_baseline(config,
+        SimpleNamespace(read_wrench=lambda: next(sensor_rows)), processor, owner, 100)
+    assert statistics['sample_count'] == 100 and statistics['trend_window_samples'] == 20
+    np.testing.assert_allclose(statistics['std_force_base_N'], np.std(rows[:, :3], axis=0), atol=1e-12)
+    np.testing.assert_allclose(statistics['std_torque_base_Nm'], np.std(rows[:, 3:], axis=0), atol=1e-12)
+    trend = np.mean(rows[-20:], axis=0)-np.mean(rows[:20], axis=0)
+    np.testing.assert_allclose(statistics['trend_force_base_N'], trend[:3], atol=1e-12)
+    np.testing.assert_allclose(statistics['trend_torque_base_Nm'], trend[3:], atol=1e-12)
+    assert statistics['force_drift_norm_N'] == pytest.approx(np.linalg.norm(trend[:3]), abs=1e-12)
+    assert statistics['drift_warning'] == bool(drift)
+    warning = capsys.readouterr().out
+    assert ('WARNING' in warning) == bool(drift)
+    assert ('granular_baseline_drift' in owner.diagnostics) == bool(drift)
+    # A drift diagnostic cannot reject or change the captured background,
+    # overwrite air zero, or alter the production YAML.
+    np.testing.assert_array_equal(processor.zero_bias_sensor, air.array())
+    np.testing.assert_allclose(processor.granular_baseline_output, np.mean(rows, axis=0), atol=1e-12)

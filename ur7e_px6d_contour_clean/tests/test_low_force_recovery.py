@@ -8,9 +8,10 @@ from core.models import RobotState, Wrench
 from policy.continuous_tracking import ContinuousTrackingPolicy, State
 
 
-def sample(policy, now, magnitude, *, settled=True):
+def sample(policy, now, magnitude, *, settled=True, direction_deg=0.):
     # Formal environment-on-probe sign: reaction -X, pressing/search +X.
-    wrench = Wrench(-magnitude, 0., 0., 0., 0., 0.)
+    angle = np.deg2rad(direction_deg)
+    wrench = Wrench(-magnitude*np.cos(angle), -magnitude*np.sin(angle), 0., 0., 0., 0.)
     speed = np.zeros(6) if settled else np.array([.003, 0., 0., 0., 0., 0.])
     return policy.update(now, wrench, wrench, RobotState(now, np.zeros(6), speed),
                          execution_settled=settled)
@@ -120,3 +121,77 @@ def test_first_contact_cannot_wait_forever_for_physical_stop(config):
             break
     assert policy.state == State.STOP
     assert policy.reason == 'contact/standstill confirmation timeout'
+
+
+@pytest.mark.parametrize('magnitude', [.5, .75, .99])
+@pytest.mark.parametrize('angles', [(60., -60.), (0., 180., 90., -90.)])
+def test_partial_recovery_direction_jumps_cannot_interrupt_or_extend_low_force_wait(config, magnitude, angles):
+    policy = tracking(config)
+    memory = deepcopy(policy.last_reliable_contact)
+    sample(policy, 1.01, .4, settled=False)
+    started = policy._confirm_started
+    deadline = started+policy.c['confirmation_timeout_sec']
+    old_measurement = policy._last_valid_measurement.copy()
+    old_measurement_time = policy._last_valid_measurement_time
+    for i in range(1, 100):
+        command = sample(policy, started+i*.01, magnitude, direction_deg=angles[i % len(angles)])
+        assert not command.move and policy.state == State.CONTINUOUS_TRACKING
+        assert policy._low_force_pending and not policy.direction_valid
+        assert policy._confirm_started == started
+        np.testing.assert_array_equal(policy._last_valid_measurement, old_measurement)
+        assert policy._last_valid_measurement_time == old_measurement_time
+        assert policy.last_reliable_contact['timestamp'] == memory['timestamp']
+    command = sample(policy, deadline, magnitude, direction_deg=angles[0])
+    assert not command.move and policy.state == State.CONTACT_LOST
+    assert policy._confirm_started == started
+    command = sample(policy, deadline+.01, magnitude, direction_deg=angles[-1])
+    assert not command.move and policy.state == State.LOCAL_REACQUIRE
+    np.testing.assert_array_equal(policy._memory_normal, memory['normal'])
+    np.testing.assert_array_equal(policy._memory_tangent, memory['tangent'])
+    assert policy.direction_reconfirm_count == 0 and policy.stop_reason is None
+    assert not any(e.event_type == 'DIRECTION_STOP_REQUEST' for e in policy.events)
+
+
+def test_unstable_above_threshold_recovery_uses_original_deadline(config):
+    policy = tracking(config)
+    sample(policy, 1.01, .4, settled=False)
+    started = policy._confirm_started
+    deadline = started+policy.c['confirmation_timeout_sec']
+    # Each jump is below the unchanged 150-degree reversal stop. The stable
+    # contact window lacks coherence, so it cannot confirm a new direction.
+    for i in range(1, 100):
+        command = sample(policy, started+i*.01, 1.1, direction_deg=60.*(-1)**i)
+        assert not command.move and policy.state == State.CONTINUOUS_TRACKING
+        assert policy._low_force_pending and policy._confirm_started == started
+    assert sample(policy, deadline, 1.1, direction_deg=60.).state == 'CONTACT_LOST'
+    assert sample(policy, deadline+.01, 1.1, direction_deg=-60.).state == 'LOCAL_REACQUIRE'
+    assert policy.direction_reconfirm_count == 0 and policy.stop_reason is None
+
+
+def test_recovery_direction_confirms_only_after_contact_threshold_is_reached(config):
+    policy = tracking(config)
+    sample(policy, 1.01, .4, settled=False)
+    started = policy._confirm_started
+    for i in range(102, 115):
+        assert not sample(policy, i*.01, .75, direction_deg=90.*(-1)**i).move
+        assert policy._low_force_pending and policy._confirm_started == started
+    # At exactly the existing threshold, a sustained coherent 60-degree
+    # direction can be confirmed while stopped, within the original deadline.
+    for i in range(115, 135):
+        command = sample(policy, i*.01, 1., direction_deg=60.)
+        assert not command.move and policy.state == State.CONTINUOUS_TRACKING
+        if not policy._low_force_pending:
+            break
+        assert policy._confirm_started == started
+    assert not policy._low_force_pending and policy._confirm_started is None
+    assert policy.events[-1].event_type == 'LOW_FORCE_RECONFIRMED'
+    np.testing.assert_allclose(policy.contact_direction, [.5, np.sqrt(.75)])
+    assert policy.direction_reconfirm_count == 0
+
+
+def test_reliable_force_reversal_still_stops_during_low_force_recovery(config):
+    policy = tracking(config)
+    sample(policy, 1.01, .4, settled=False)
+    command = sample(policy, 1.02, 1.1, direction_deg=180.)
+    assert not command.move and policy.state == State.STOP
+    assert policy.stop_reason.value == 'STOP_DIRECTION_REVERSAL'

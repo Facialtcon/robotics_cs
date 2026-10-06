@@ -78,10 +78,33 @@ def capture_stationary_bias(config, reader, preprocessor, controller, count, *, 
 
 
 def capture_stationary_granular_baseline(config, reader, preprocessor, controller, count, *, poll=lambda: None, logger=None):
-    """Target-free stationary Base background; never call sensor set_zero_bias."""
+    """Independent Base background and diagnostic-only population std/trend.
+
+    Trend = last-fifth mean minus first-fifth mean, before medium/Kalman.
+    No warning changes calibration, acquisition guards or scan thresholds.
+    """
     samples = _stationary_samples(config, reader, preprocessor, controller, count,
                                  poll=poll, logger=logger, granular=True)
-    preprocessor.set_granular_baseline(Wrench.from_sequence(np.mean([s.array() for s in samples], axis=0)))
+    rows = np.array([s.array() for s in samples])
+    window = max(1, len(rows)//5)  # First/last 20 frames for the default 100.
+    deviation = np.std(rows, axis=0)
+    trend = np.mean(rows[-window:], axis=0)-np.mean(rows[:window], axis=0)
+    drift = float(np.linalg.norm(trend[:3]))
+    # Diagnostic sensitivity only: 25% of the unchanged contact threshold.
+    # This is not a new force protection limit or a calibrated PX6D noise model.
+    warning_threshold = .25*float(config['policy']['contact_threshold'])
+    statistics = dict(sample_count=len(rows), trend_window_samples=window,
+        std_force_base_N=deviation[:3].tolist(), std_torque_base_Nm=deviation[3:].tolist(),
+        trend_force_base_N=trend[:3].tolist(), trend_torque_base_Nm=trend[3:].tolist(),
+        force_drift_norm_N=drift, force_drift_warning_threshold_N=warning_threshold,
+        drift_warning=drift > warning_threshold)
+    if statistics['drift_warning']:
+        warning = (f'WARNING: 颗粒背景力仍有首尾漂移 {drift:.4f} N > {warning_threshold:.4f} N；'
+                   '记录诊断并继续运行，原力保护保持生效。')
+        controller.diagnostics['granular_baseline_drift'] = warning
+        print(warning, flush=True)
+    preprocessor.set_granular_baseline(Wrench.from_sequence(np.mean(rows, axis=0)))
+    return statistics
 
 
 def hold_startup_confirmation(config, start, controller):

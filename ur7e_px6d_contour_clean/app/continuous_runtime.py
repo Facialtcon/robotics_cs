@@ -279,12 +279,13 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 termination.observe(force_transform_status=actual_transform)
                 logger.write_json('force_transform_at_start.json', actual_transform)
                 keyboard.on_wait = lambda: hold_startup_confirmation(config, start, controller)
+                background_diagnostics = None
                 if granular.get('capture_on_start', True):
                     termination.observe(phase='GRANULAR_BASELINE_AT_P0')
                     if not confirm_enter('P0 扫描深度：确认只有颗粒背景、未接触目标且静止；即将采集颗粒 baseline（不重采传感器 zero bias）。',
                                          read_line=keyboard.read_line):
                         raise KeyboardInterrupt('granular baseline not confirmed')
-                    capture_stationary_granular_baseline(config, reader, preprocessor, controller,
+                    background_diagnostics = capture_stationary_granular_baseline(config, reader, preprocessor, controller,
                         granular.get('sample_count', baseline['sample_count']), poll=keyboard.poll, logger=logger)
                     background_source = 'target_free_stationary_P0_after_insertion'
                 else:
@@ -297,6 +298,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     source=background_source, frame='Base', tcp_pose=controller.read_state().pose.tolist(),
                     granular_baseline_output=preprocessor.granular_baseline_output.tolist(),
                     zero_bias_sensor=preprocessor.zero_bias_sensor.tolist(),
+                    diagnostics=background_diagnostics,
                     sample_count=granular.get('sample_count', baseline['sample_count']) if granular.get('capture_on_start', True) else 0,
                     condition='target-free background; no target force may be calibrated away'))
                 logger.write_config_snapshot(config)

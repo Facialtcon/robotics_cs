@@ -813,7 +813,11 @@ class ContinuousTrackingPolicy:
             return self._command(pose)
         vector = np.array([processed.fx, processed.fy])
         searching = self.state in (State.READY, State.TARGET_SEARCH)
-        if not (self.real_execution and searching):
+        # During a stopped low-force recovery, sub-contact vectors are not
+        # reliable direction evidence (including for the reversal check).
+        # Keep the prior reliable measurement/history until contact returns.
+        waiting_for_contact = self._low_force_pending and self.fxy < float(self.p['contact_threshold'])
+        if not (self.real_execution and searching) and not waiting_for_contact:
             self._measure_direction(now, vector)
         if self.state == State.STOP:
             return self._command(pose)
@@ -931,11 +935,10 @@ class ContinuousTrackingPolicy:
             if self._low_force_pending:
                 self.tangent_limit_reason = 'LOW_FORCE_CONTACT_CONFIRMATION'
                 self.stop_requested = True
-                if not self._direction(now, pose, vector):
-                    self._force_since = None
-                    self._confirmation_vectors.clear()
-                    self.contact_hold_elapsed = 0.
-                    return self._command(pose)
+                self.direction_valid = False
+                # _confirm observes standstill and only collects direction
+                # evidence at/above contact_threshold. Do not run the tracking
+                # estimator here: DIRECTION_RECONFIRM resets this pause's timer.
                 if self._confirm(now, robot, vector):
                     self._low_force_pending = False
                     self._confirm_started = None
