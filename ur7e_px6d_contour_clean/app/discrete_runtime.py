@@ -9,6 +9,7 @@ from app.operator_input import OperatorKeyboard, confirm_enter
 from app.scan_startup import startup_scan, capture_stationary_bias, hold_startup_confirmation
 from config.loader import load_config, runtime_robot_config
 from experiment_logging.data_logger import ExperimentLogger
+from experiment_logging.contact_capture import drain_commands
 from experiment_logging.paths import PROJECT_ROOT
 from experiment_logging.probe_log import write_probe_logs
 from experiment_logging.termination import TerminationRecorder, TerminationReason
@@ -133,6 +134,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                         controller.command_planar_velocity(command.direction_xy, command.speed, period)
                 elif not execute or not controller.standstill_confirmed:
                     controller.stop()
+                drain_commands(controller, logger)
                 logger.log_sample(cycle_start, raw, processed, robot, command,
                                   policy.current_target_direction, policy.current_tangent,
                                   extra={**preprocessing.force_log_fields, 'processed_force_frame': frame})
@@ -194,6 +196,8 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     termination.set_stop_reason(detail=str(exc), exception=exc, source='discrete.close', terminal=False)
         if logger is not None:
             try:
+                if controller is not None:
+                    drain_commands(controller, logger)
                 if policy is not None:
                     write_probe_logs(logger.run_dir, policy.probe_episodes)
                 if robot is not None:

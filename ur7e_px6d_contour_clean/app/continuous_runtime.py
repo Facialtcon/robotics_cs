@@ -9,12 +9,13 @@ from pathlib import Path
 import time
 
 import numpy as np
-from core.models import Wrench
+from core.models import Wrench, PolicyCommand
 
 from app.operator_input import OperatorKeyboard, confirm_enter
 from config.loader import load_config
 from experiment_logging.data_logger import ExperimentLogger
 from experiment_logging.continuous_writer import ContinuousLogWriter
+from experiment_logging.contact_capture import drain_commands, stationary_preroll, simulation_preroll
 from experiment_logging.termination import TerminationReason, TerminationRecorder
 from policy.continuous_tracking import ContinuousTrackingPolicy, EXTRA_SAMPLE_FIELDS, State
 from robot.rtde_controller import URRTDEController, RobotError, SearchLimitReached, SPEED_GUARD_FIELDS, check_continuous_xy
@@ -139,6 +140,19 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
     try:
         termination.observe(phase='CONFIG_PREFLIGHT')
         config = deepcopy(load_config(args.config))
+        if getattr(args, 'basic_contact', False):
+            config['preprocessing']['granular_baseline'] = dict(capture_on_start=False, sample_count=100)
+            config['preprocessing']['granular_baseline_output'] = [0.] * 6
+            config['basic_contact_experiment'] = True
+        metadata_path = getattr(args, 'experiment_metadata', None)
+        if metadata_path:
+            with Path(metadata_path).open(encoding='utf-8') as stream:
+                metadata = json.load(stream)
+            if not isinstance(metadata, dict):
+                raise ValueError('experiment metadata must be a JSON object')
+            config['experiment'] = metadata
+            from visualization.run_plots import target_outline
+            target_outline(metadata.get('target'))  # Validate display metadata before connecting devices.
         config['continuous_provenance'] = git_provenance()
         # Load the saved project calibrations before optional duration shortening;
         # validate any explicit extra record; local recovery is enabled by config.
@@ -196,10 +210,15 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         else:
             from simulation.simulator import load_simulation_config
             from simulation.continuous_session import SimulationSession
-            session = SimulationSession(config, load_simulation_config(args.scene))
+            scene = load_simulation_config(args.scene)
+            if getattr(args, 'basic_contact', False):
+                scene['force_model']['granular_drag_force'] = 0.
+                scene['preprocessing']['granular_baseline_output'] = [0.] * 6
+            session = SimulationSession(config, scene)
             config = session.config
             policy, controller, reader = session.policy, session.robot, session.sensor
             preprocessor = session.preprocessor
+            controller.record_commands = True
         output = args.output
         # Latch the freshly loaded base before any run-only choice. Offline
         # simulation retains its noninteractive default; execution asks below.
@@ -214,9 +233,9 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         logger.termination = termination.bind(logger.run_dir)
         if args.execute:
             # Disk work stays off the device thread. Backlog/write diagnostics
-            # cannot end motion; the bounded queue records any dropped samples.
+            # cannot end motion; backlog is retained in memory without dropping raw records.
             logger = ContinuousLogWriter(logger, max_pending_sec=float(
-                config['continuous_tracking']['confirmation_timeout_sec']), diagnostic_only=True)
+                config['continuous_tracking']['confirmation_timeout_sec']), diagnostic_only=True, lossless=True)
         termination.observe(policy=policy, processed_force_frame=config.get('force_display', {}).get('frame', 'Base'))
         print(f"Continuous run: {logger.run_dir}", flush=True)
         if args.execute:
@@ -263,7 +282,10 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     timing.update(selection)
                     logger.write_config_snapshot(config)
                     logger.write_json('tracking_speed_selection.json', selection)
-                    if not confirm_enter('即将垂直向下插入至 P0 扫描深度，停稳并处理颗粒背景力后，从 P0 沿保存方向开始扫描。',
+                    scan_prompt = ('基础接触实验：即将垂直下降至 P0 扫描高度；目标须固定、P0 须无接触，不采集颗粒基线。'
+                                   if getattr(args, 'basic_contact', False) else
+                                   '即将垂直向下插入至 P0 扫描深度，停稳并处理颗粒背景力后，从 P0 沿保存方向开始扫描。')
+                    if not confirm_enter(scan_prompt,
                                          read_line=keyboard.read_line):
                         raise KeyboardInterrupt('scan not confirmed')
                     hold_startup_confirmation(config, above, controller)
@@ -302,8 +324,13 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     sample_count=granular.get('sample_count', baseline['sample_count']) if granular.get('capture_on_start', True) else 0,
                     condition='target-free background; no target force may be calibrated away'))
                 logger.write_config_snapshot(config)
+                if getattr(args, 'basic_contact', False):
+                    print('基础接触实验：无颗粒基线；开始扫描前记录至少 1 秒静止 TCP / 力数据。', flush=True)
+                    stationary_preroll(config, controller, reader, preprocessor, logger, keyboard.poll)
             if not args.execute:
                 session.capture_bias(keyboard.poll, termination.observe)
+                if getattr(args, 'basic_contact', False):
+                    simulation_preroll(session, logger)
         if args.execute and not startup_return_done and controller.config.get('continuous_require_watchdog'):
             controller.enable_watchdog(float(policy.c['watchdog_frequency_hz']))
         with OperatorKeyboard() as keyboard:
@@ -432,6 +459,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     timing['command_send_time'] = now
                     timing['command_return_time'] = controller.time
                 # Real runs enqueue snapshots; the disk worker never calls devices.
+                drain_commands(controller, logger)
                 logger.log_sample(now, raw, processed, robot, command, policy.contact_direction,
                                   policy.tangent, extra={**preprocessor.force_log_fields, **policy.telemetry(command), **timing,
                                       **(speed_diagnostics if args.execute else {}),
@@ -535,6 +563,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                             try:
                                 started = time.monotonic()
                                 sample = reader.read_wrench()
+                                serial_end = time.monotonic()
                                 state = controller.read_state()
                                 preprocessor.set_tool_orientation(state.pose[3:])
                                 wrench = preprocessor.process(sample)
@@ -543,6 +572,14 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                                 force_error = continuous_force_reason(sample, wrench, config['policy'], diagnostics)
                                 if force_error:
                                     raise RobotError(force_error)
+                                drain_commands(controller, logger)
+                                logger.log_sample(state.timestamp, sample, wrench, state,
+                                    PolicyCommand('STOP', False, np.zeros(2), 0., state.pose.copy(), False, False,
+                                                  reason='terminal braking observation'), None, None,
+                                    extra={**preprocessor.force_log_fields,
+                                           **{k:v for k,v in controller.observation_timing.items() if k in TIMING_FIELDS},
+                                           'serial_read_start': started, 'serial_read_end': serial_end,
+                                           'processed_force_frame': 'Base'})
                                 logger.check_health()
                                 validate_cycle_timing(config['continuous_tracking'], started, time.monotonic(), started,
                                                       diagnostics=diagnostics)
@@ -604,6 +641,11 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 except Exception as exc:
                     result = 1
                     termination.set_stop_reason(detail=str(exc), exception=exc, source="continuous.cleanup")
+        if controller is not None and logger is not None:
+            try:
+                drain_commands(controller, logger)
+            except Exception as exc:
+                termination.set_stop_reason(detail=str(exc), exception=exc, source='continuous.command_logging', terminal=False)
         if logger is not None:
             try:
                 if policy is not None:
@@ -647,11 +689,13 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 print('WARNING / diagnostics: '+json.dumps(warnings, ensure_ascii=False), flush=True)
         termination.flush(emit=True)
         # Devices and log files are closed. Plotting never runs in a control tick.
-        if logger is not None and policy is not None and policy.initial_contact is not None:
+        if logger is not None:
             try:
-                from tools.visualize_continuous_run import render_contact_trajectory
-                for path in render_contact_trajectory(logger.run_dir):
-                    print(f'TCP 轨迹图：{path}', flush=True)
+                if isinstance(logger, ContinuousLogWriter) and not logger.closed:
+                    raise OSError('后台日志尚未关闭；暂不生成可能不完整的回放，请在写盘结束后离线生成')
+                from visualization.run_plots import generate_run_visualization
+                for path in generate_run_visualization(logger.run_dir):
+                    print(f'实验可视化：{path}', flush=True)
             except Exception as exc:
                 print(f'轨迹图生成失败，可离线回放重试：{type(exc).__name__}: {exc}', flush=True)
     return result
@@ -667,6 +711,8 @@ def main():
     parser.add_argument("--scene", type=Path, default=ROOT / "simulation/scene_continuous.yaml")
     parser.add_argument("--duration", type=float, help="simulation/preview duration; ignored during real execution")
     parser.add_argument("--output", type=Path)
+    parser.add_argument('--basic-contact', action='store_true', help='no granular baseline; record >=1 s before search')
+    parser.add_argument('--experiment-metadata', type=Path, help='JSON experiment label, contact direction and known Base cube geometry')
     parser.add_argument('--enable-reacquire', action='store_true', help='offline experimental arc recovery only')
     parser.add_argument('--site-digest', action='store_true', help='print current config binding hash; no devices')
     parser.add_argument('--check-calibration', action='store_true', help='read and validate saved P0/P1 and sandbox corners; no devices')

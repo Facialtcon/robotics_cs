@@ -19,6 +19,7 @@ class SimulatedRobot:
             raise ValueError("acceleration_limit must be positive m/s^2")
         if not isinstance(delay_steps, int) or delay_steps < 0:
             raise ValueError("delay_steps must be a nonnegative integer")
+        self.record_commands = False
         self.acceleration_limit = acceleration_limit
         self.delay_steps = delay_steps
         self.reset()
@@ -27,6 +28,8 @@ class SimulatedRobot:
         self.pose = np.asarray((self.start_point[0], self.start_point[1], 0.0, 0.0, 0.0, 0.0))
         self.tcp_speed = np.zeros(6)
         self.time = 0.0
+        self.command_records = deque()
+        self.command_sequence = 0
         self._pending = deque(np.zeros(2) for _ in range(self.delay_steps))
 
     def read_state(self) -> RobotState:
@@ -40,6 +43,11 @@ class SimulatedRobot:
             if norm <= 0.0 or speed <= 0.0:
                 raise ValueError("moving command requires nonzero direction and speed")
             desired = direction / norm * float(speed)
+        self.command_sequence += 1
+        if self.record_commands:
+            self.command_records.append(dict(sequence=self.command_sequence, kind='simulation',
+                velocity=[*desired, 0., 0., 0., 0.], host_monotonic=self.time,
+                return_monotonic=self.time, accepted=True, source='simulation.apply_command'))
         self._pending.append(desired)
         desired = self._pending.popleft()
         delta = desired - self.tcp_speed[:2]

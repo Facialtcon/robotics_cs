@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 
 import numpy as np
 
@@ -264,6 +265,7 @@ class URRTDEController:
         self.speed_guard_diagnostics = {}
         self.speedl_count = 0
         self.last_speedl = {}
+        self.command_records = deque()  # Passive trace; drained by the existing logger.
 
     def set_continuous_phase(self, phase, *, stop_confirmed=False):
         """Select execution limits; braking retains the preceding envelope.
@@ -558,12 +560,14 @@ class URRTDEController:
             self.speedl_count += 1
             self.last_speedl = dict(sequence=self.speedl_count, kind='motion',
                 velocity=list(velocity), host_monotonic=time.monotonic(), accepted=None)
+            self.command_records.append(self.last_speedl)
             accepted = self.control.speedL(
                 velocity,
                 float(self.config["speed_acceleration"]),
                 float(duration),
             )
             self.last_speedl['accepted'] = accepted
+            self.last_speedl['return_monotonic'] = time.monotonic()
             if accepted is False:
                 raise RobotError("UR controller rejected speedL")
         except Exception as exc:
@@ -756,9 +760,11 @@ class URRTDEController:
                 self.speedl_count += 1
                 self.last_speedl = dict(sequence=self.speedl_count, kind='braking',
                     velocity=[0.] * 6, host_monotonic=time.monotonic(), accepted=None)
+                self.command_records.append(self.last_speedl)
                 value = self.control.speedL([0.] * 6, float(self.config['stop_deceleration']),
                                             float(self.config.get('observation_period_sec', .01)))
                 self.last_speedl['accepted'] = value
+                self.last_speedl['return_monotonic'] = time.monotonic()
                 report['braking_return_value'] = value
                 report['api_anomaly'] = value is not True
             except Exception as exc:

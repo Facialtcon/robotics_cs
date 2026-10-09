@@ -1,4 +1,4 @@
-"""Bounded disk writer for real continuous runs; never calls robot or sensor APIs.
+"""Background disk writer; never calls robot or sensor APIs.
 
 The control thread owns termination observations. Only immutable snapshots cross
 to the disk thread, which reuses ExperimentLogger's existing file formats.
@@ -18,7 +18,7 @@ class ContinuousLogError(OSError):
 
 
 class ContinuousLogWriter:
-    def __init__(self, logger, *, capacity=64, max_pending_sec=1.0, diagnostic_only=False):
+    def __init__(self, logger, *, capacity=64, max_pending_sec=1.0, diagnostic_only=False, lossless=False):
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
             raise ValueError("log capacity must be a positive integer")
         if not math.isfinite(max_pending_sec) or max_pending_sec <= 0:
@@ -32,6 +32,7 @@ class ContinuousLogWriter:
         self._condition = Condition()
         self._error = None
         self._diagnostic_only = diagnostic_only
+        self._lossless = lossless
         self._diagnostics = {}
         self._dropped_records = 0
         self._closing = False
@@ -68,6 +69,11 @@ class ContinuousLogWriter:
         with self._condition:
             return {**self._diagnostics, 'dropped_records': self._dropped_records}
 
+    @property
+    def closed(self):
+        with self._condition:
+            return self._closed
+
     def check_health(self):
         """Observe writer health; real continuous runs keep it diagnostic only."""
         with self._condition:
@@ -79,7 +85,9 @@ class ContinuousLogWriter:
             if self._closing:
                 raise ContinuousLogError("continuous log writer is closed")
             # Includes the in-flight item: at most capacity snapshots are owned.
-            if len(self._pending) >= self._capacity:
+            if len(self._pending) >= self._capacity and self._lossless:
+                self._diagnostics['backlog'] = 'WARNING: disk backlog; retaining all records in memory'
+            elif len(self._pending) >= self._capacity:
                 if self._diagnostic_only:
                     self._dropped_records += 1
                     self._diagnostics['backlog'] = f'WARNING: log queue full; {self._dropped_records} records dropped'
@@ -102,6 +110,10 @@ class ContinuousLogWriter:
 
     def log_waypoint(self, waypoint):
         self._enqueue("log_waypoint", (waypoint,), {})
+
+    def log_commands(self, records):
+        if records:
+            self._enqueue('log_commands', (records,), {})
 
     def write_json(self, name, payload):
         """Queue a run-directory JSON file in the same order as sample records."""
@@ -140,6 +152,10 @@ class ContinuousLogWriter:
             self._logger.termination = self.termination
             try:
                 self._logger.close()
+                if self._lossless:
+                    with (self.run_dir/'logging_status.json').open('w', encoding='utf-8') as stream:
+                        json.dump(dict(**self.diagnostics, samples_written=self._logger._sample_count,
+                                       complete=self._error is None), stream, ensure_ascii=False, indent=2)
             except Exception as exc:
                 with self._condition:
                     self._remember_error(f"continuous log close failed: {exc}", exc)
@@ -147,7 +163,7 @@ class ContinuousLogWriter:
                 # otherwise prevents every later handle from being closed.
                 # Retry each remaining resource here, on the same disk thread.
                 for name in ("_samples", "_full_log", "_boundaries",
-                             "_waypoints", "_recovery_rays", "_workspace_logger"):
+                             "_waypoints", "_recovery_rays", "_commands", "_workspace_logger"):
                     resource = getattr(self._logger, name, None)
                     if resource is None or getattr(resource, "closed", False):
                         continue
@@ -168,9 +184,10 @@ class ContinuousLogWriter:
         with self._condition:
             if self._closing:
                 raise ContinuousLogError("continuous log writer is closed")
-            deadline = time.monotonic() + self._max_pending_sec
+            deadline = time.monotonic() + (30. if self._lossless else self._max_pending_sec)
             while self._pending:
-                remaining = min(deadline, self._pending[0][0] + self._max_pending_sec) - time.monotonic()
+                limit = deadline if self._lossless else min(deadline, self._pending[0][0] + self._max_pending_sec)
+                remaining = limit - time.monotonic()
                 if remaining <= 0:
                     error = self._remember_error("continuous log records still pending at drain deadline")
                     if self._diagnostic_only:
@@ -218,7 +235,7 @@ class ContinuousLogWriter:
                 return
             self._closing = True
             self._condition.notify_all()
-        self._thread.join(self._max_pending_sec)
+        self._thread.join(30. if self._lossless else self._max_pending_sec)
         with self._condition:
             if self._thread.is_alive():
                 error = self._remember_error("continuous log records still pending; cleanup deferred to disk writer")

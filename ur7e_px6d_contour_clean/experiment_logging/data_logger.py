@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 import json
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -31,7 +33,16 @@ SAMPLE_FIELDS = [
     "candidate_status", "rejection_reason",
     "target_x", "target_y", "target_z", "target_rx", "target_ry", "target_rz",
     "commanded_direction_x", "commanded_direction_y", "commanded_speed_mps", "reason",
+    "actual_tcp_timestamp", "actual_velocity_source", "velocity_frame", "velocity_units",
+    "commanded_tcp_timestamp", "commanded_tcp_sequence", "commanded_tcp_kind", "commanded_tcp_accepted",
+    "commanded_tcp_vx", "commanded_tcp_vy", "commanded_tcp_vz",
+    "commanded_tcp_wx", "commanded_tcp_wy", "commanded_tcp_wz",
+    "raw_base_fx", "raw_base_fy", "raw_base_fz", "raw_base_tx", "raw_base_ty", "raw_base_tz",
+    "force_base_tx", "force_base_ty", "force_base_tz",
+    "filtered_force_base_tx", "filtered_force_base_ty", "filtered_force_base_tz",
 ]
+COMMAND_FIELDS = ['timestamp', 'return_timestamp', 'sequence', 'kind', 'accepted',
+                  'vx', 'vy', 'vz', 'wx', 'wy', 'wz', 'frame', 'units', 'source']
 
 BOUNDARY_FIELDS = [
     "point_id", "monotonic_sec",
@@ -82,6 +93,7 @@ class ExperimentLogger:
             raise ValueError("sample field names must be unique")
         self.run_dir = create_run(mode, strategy, config_source or config.get('_config_source'), data_root=root)
         self.metadata = read_metadata(self.run_dir)
+        self._wall_epoch = time.time()-time.monotonic()
         self._reacquire_round = 0
         self._reacquire_event_active = False
         self.processed_force_frame = config.get('force_display', {}).get('frame', 'configured_output_frame')
@@ -92,6 +104,8 @@ class ExperimentLogger:
         self._boundaries = LazyCSV(self.run_dir / 'boundary_points.csv', BOUNDARY_FIELDS)
         self._waypoints = LazyCSV(self.run_dir / 'policy_waypoints.csv', WAYPOINT_FIELDS)
         self._recovery_rays = LazyCSV(self.run_dir / 'boundary_recovery_rays.csv', RECOVERY_RAY_FIELDS)
+        self._commands = LazyCSV(self.run_dir / 'tcp_commands.csv', COMMAND_FIELDS)
+        self._last_command = {}
         self._sample_count = 0
         self._workspace_logger = None
         try:
@@ -142,8 +156,17 @@ class ExperimentLogger:
             else features.interaction_direction
         )
         row = {
-            **wall_time_fields(),
+            **wall_time_fields(datetime.fromtimestamp(self._wall_epoch+monotonic_sec, timezone.utc)
+                               if self.metadata['mode'] == 'real' else None),
             "monotonic_sec": f"{monotonic_sec:.9f}",
+            "actual_tcp_timestamp": f"{robot.timestamp:.9f}",
+            "actual_velocity_source": ('RTDE.getActualTCPSpeed' if self.metadata['mode'] == 'real' else 'simulation'),
+            "velocity_frame": "Base", "velocity_units": "linear_m/s angular_rad/s",
+            "commanded_tcp_timestamp": self._last_command.get('timestamp', ''),
+            "commanded_tcp_sequence": self._last_command.get('sequence', ''),
+            "commanded_tcp_kind": self._last_command.get('kind', ''),
+            "commanded_tcp_accepted": self._last_command.get('accepted', ''),
+            **{f'commanded_tcp_{key}': self._last_command.get(key, '') for key in ('vx', 'vy', 'vz', 'wx', 'wy', 'wz')},
             **dict(zip(("raw_fx", "raw_fy", "raw_fz", "raw_tx", "raw_ty", "raw_tz"), raw_values)),
             **dict(zip(("dfx", "dfy", "dfz", "dtx", "dty", "dtz"), processed_values)),
             # Explicit Base aliases accompany historical dfx/dfy/dfz. Raw
@@ -151,6 +174,11 @@ class ExperimentLogger:
             **dict(zip(('filtered_force_base_fx', 'filtered_force_base_fy', 'filtered_force_base_fz'),
                        processed_values[:3] if (extra or {}).get('processed_force_frame', self.processed_force_frame) == 'Base'
                        else ('', '', ''))),
+            **dict(zip(('filtered_force_base_tx', 'filtered_force_base_ty', 'filtered_force_base_tz'),
+                       processed_values[3:] if (extra or {}).get('processed_force_frame', self.processed_force_frame) == 'Base'
+                       else ('', '', ''))),
+            # Instantaneous policy-input XY norm, including LOCAL_REACQUIRE.
+            # policy.filtered_fxy is a direction estimate and may be frozen.
             "fxy": features.fxy,
             "force_angle_rad": features.force_angle,
             "processed_force_frame": self.processed_force_frame,
@@ -186,7 +214,10 @@ class ExperimentLogger:
             # Frame and pre-filter force come from preprocessing. Published
             # raw/filtered measurements, poses and timestamps stay protected.
             if set(extra) & (set(SAMPLE_FIELDS) - {'processed_force_frame',
-                                                   'force_base_fx', 'force_base_fy', 'force_base_fz'}):
+                                                   'force_base_fx', 'force_base_fy', 'force_base_fz',
+                                                   'force_base_tx', 'force_base_ty', 'force_base_tz',
+                                                   'raw_base_fx', 'raw_base_fy', 'raw_base_fz',
+                                                   'raw_base_tx', 'raw_base_ty', 'raw_base_tz'}):
                 raise ValueError("extra sample data cannot overwrite standard fields")
             row.update(extra)
         self._samples.writerow(row)
@@ -197,6 +228,17 @@ class ExperimentLogger:
         if self._sample_count % 20 == 0:
             self._samples.flush()
             self._full_log.flush()
+
+    def log_commands(self, records):
+        """Exact SDK inputs with their own send times; never reconstruct policy output."""
+        for record in records:
+            row = dict(timestamp=record['host_monotonic'],
+                       return_timestamp=record.get('return_monotonic', ''),
+                       sequence=record['sequence'], kind=record['kind'], accepted=record.get('accepted'),
+                       **dict(zip(('vx', 'vy', 'vz', 'wx', 'wy', 'wz'), record['velocity'])),
+                       frame='Base', units='linear_m/s angular_rad/s', source=record.get('source', 'RTDE.speedL'))
+            self._commands.writerow(row)
+            self._last_command = row
 
     def log_boundary(self, point: BoundaryPoint) -> None:
         values = point.wrench.array()
@@ -263,6 +305,7 @@ class ExperimentLogger:
             "result": ray.result,
         })
         self._recovery_rays.flush()
+        self._commands.flush()
 
     def log_corner_ray(self, ray: CornerSearchRay) -> None:
         """Compatibility method for callers written before recovery renaming."""
@@ -330,7 +373,7 @@ class ExperimentLogger:
     def close(self) -> None:
         errors = []
         for resource in (self._samples, self._full_log, self._boundaries, self._waypoints,
-                         self._recovery_rays, self._workspace_logger):
+                         self._recovery_rays, self._commands, self._workspace_logger):
             if resource is not None:
                 try:
                     resource.close()

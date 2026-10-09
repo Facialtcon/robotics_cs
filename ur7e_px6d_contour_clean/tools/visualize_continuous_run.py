@@ -13,8 +13,10 @@ import numpy as np
 import yaml
 
 
-def read_run(run_dir):
+def read_run(run_dir, *, require_continuous=True):
     run_dir = Path(run_dir)
+    if not (run_dir / 'samples.csv').exists():
+        raise ValueError('run contains no control samples')
     with (run_dir / "samples.csv").open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     if not rows:
@@ -23,7 +25,7 @@ def read_run(run_dir):
                 "tangent_x", "tangent_y", "contact_direction_x", "contact_direction_y")
     # Startup RETURN rows share the CSV but have no tracking reference or n/t.
     # Keep these values unavailable, rather than inventing a tracking command.
-    data = {key: np.asarray([float(row[key] or 'nan') for row in rows]) for key in required}
+    data = {key: np.asarray([float(row.get(key) or 'nan') for row in rows]) for key in required}
     if not np.all(np.isfinite(data["monotonic_sec"])) or np.any(np.diff(data["monotonic_sec"]) < 0):
         raise ValueError("sample timestamps must be finite and ordered")
     for key in ('direction_valid', 'command_vx', 'command_vy', 'reacquire_origin_x', 'reacquire_origin_y',
@@ -31,6 +33,7 @@ def read_run(run_dir):
                 'reacquire_tangent_x', 'reacquire_tangent_y', 'reacquire_heading_deg', 'reacquire_round'):
         data[key] = np.array([float(row.get(key) or ('0' if key=='direction_valid' else 'nan')) for row in rows])
     for key in ('tcp_vx','tcp_vy','tcp_vz','v_t','v_n','stop_requested','raw_fx','raw_fy',
+                'filtered_force_base_fx','filtered_force_base_fy',
                 'sim_components_available','sim_object_fx','sim_object_fy','sim_friction_fx','sim_friction_fy',
                 'sim_background_fx','sim_background_fy','sim_noise_fx','sim_noise_fy',
                 'measurement_jump_deg','estimate_residual_deg','physical_force_available',
@@ -38,6 +41,12 @@ def read_run(run_dir):
                 'sim_boundary_physical_fx','sim_boundary_physical_fy','sim_robot_estimate_fx','sim_robot_estimate_fy'):
         data[key] = np.array([float(row.get(key) or 'nan') for row in rows])
     data['reason'] = [row.get('reason','') for row in rows]
+    for key in ('actual_tcp_timestamp', 'tcp_vrx', 'tcp_vry', 'tcp_vrz',
+                'force_base_fx', 'force_base_fy', 'force_base_fz',
+                'speedl_host_monotonic', 'speedl_vx', 'speedl_vy',
+                'commanded_tcp_timestamp', 'commanded_tcp_vx', 'commanded_tcp_vy',
+                'commanded_tcp_vz', 'commanded_tcp_wx', 'commanded_tcp_wy', 'commanded_tcp_wz'):
+        data[key] = np.asarray([float(row.get(key) or 'nan') for row in rows])
     data['tangent_limit_reason'] = [row.get('tangent_limit_reason','unavailable (legacy log)') for row in rows]
     data['direction_phase'] = [row.get('direction_phase','unavailable') for row in rows]
     data["time"] = data["monotonic_sec"] - data["monotonic_sec"][0]
@@ -47,7 +56,7 @@ def read_run(run_dir):
     fallback_frame = config.get('force_display', {}).get('frame') or 'unknown frame'
     data['processed_force_frame'] = [row.get('processed_force_frame') or fallback_frame for row in rows]
     from experiment_logging.paths import read_metadata
-    if read_metadata(run_dir)['strategy'] != 'continuous':
+    if require_continuous and read_metadata(run_dir)['strategy'] != 'continuous':
         raise ValueError('selected run is not a continuous experiment')
     events = []
     if (run_dir / 'policy_waypoints.csv').exists():

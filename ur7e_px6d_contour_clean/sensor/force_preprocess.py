@@ -268,7 +268,18 @@ class WrenchPreprocessor:
         """Pre-filter Base force; raw_* and d* columns retain their old names."""
         if self.force_base is None:
             return {}
-        return dict(zip(('force_base_fx', 'force_base_fy', 'force_base_fz'), self.force_base))
+        rotation = self.rotation_sensor_to_output
+        raw_force = rotation @ self.raw_sensor_wrench[:3]
+        raw_torque = rotation @ self.raw_sensor_wrench[3:]
+        if self._torque_reference_point_known:
+            raw_torque += np.cross(self.sensor_origin_in_output_m, raw_force)
+        torque = self._air_compensated_base(self.raw_sensor_wrench)[3:]-self.granular_baseline_output[3:]
+        return {
+            **dict(zip(('force_base_fx', 'force_base_fy', 'force_base_fz'), self.force_base)),
+            **dict(zip(('force_base_tx', 'force_base_ty', 'force_base_tz'), torque)),
+            **dict(zip(('raw_base_fx', 'raw_base_fy', 'raw_base_fz', 'raw_base_tx', 'raw_base_ty', 'raw_base_tz'),
+                       np.r_[raw_force, raw_torque])),
+        }
 
     def air_compensated_wrench_base(self, raw: Wrench) -> Wrench:
         """Base wrench after air bias/gravity, before granular baseline/Kalman.

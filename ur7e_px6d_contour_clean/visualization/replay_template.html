@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>实验回放 · __RUN_TITLE__</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eef2f6;color:#223047;font:14px system-ui,"Microsoft YaHei",sans-serif}
+header,.controls,.panel,.summary{background:white;border:1px solid #dce3eb;border-radius:12px;padding:14px}
+main{max-width:1680px;margin:16px auto;padding:0 16px}header{margin-bottom:12px}h1{font-size:20px;margin:0 0 5px}h2{font-size:16px;margin:0 0 8px}
+.muted{color:#637287}.controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+button,select{background:white;border:1px solid #c7d3e1;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit}button.primary{color:white;background:#2563b1;border-color:#2563b1}
+input[type=range]{flex:1;min-width:180px;accent-color:#2563b1}output{min-width:155px;font-variant-numeric:tabular-nums}.grid{display:grid;grid-template-columns:1fr 1.15fr;gap:12px}
+.right{display:grid;gap:12px}.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin:5px 0 8px}.legend span:before{content:"";display:inline-block;width:14px;height:3px;background:var(--c);vertical-align:middle;margin-right:5px}
+canvas{display:block;width:100%;height:230px}.trajectory canvas{height:450px}.direction{display:flex;gap:12px;align-items:center;border-top:1px solid #e4eaf1;padding-top:8px}.direction canvas{width:165px;height:155px;flex-shrink:0}
+pre{font:13px/1.65 ui-monospace,monospace;white-space:pre-wrap;margin:0;font-variant-numeric:tabular-nums}.summary{margin-top:12px}.error{padding:20px;color:#b91c1c;background:#fff1f2;white-space:pre-wrap}
+@media(max-width:1000px){.grid{grid-template-columns:1fr}.trajectory canvas{height:360px}}
+</style>
+<main>
+<header><h1>接触实验 · 离线回放</h1><div id="name" class="muted"></div><div class="muted">Base 坐标系 · XY 位置 mm · 力 N · 速度 mm/s · 点击曲线或拖动时间轴同步查看</div></header>
+<div class="controls"><button id="play" class="primary">播放</button><button id="restart">回到起点</button>
+<select id="rate" aria-label="播放速度"><option value="0.5">0.5 倍速</option><option value="1" selected>1 倍速</option><option value="2">2 倍速</option><option value="4">4 倍速</option></select>
+<input id="time" type="range" min="0" step="0.001" value="0" aria-label="实验时间"><output id="clock"></output>
+<button id="contact">首次接触放大</button><button id="lost">丢边放大</button><button id="full">完整时间</button></div>
+<div class="grid"><section class="panel trajectory"><h2>TCP 实际轨迹 · Base XY 等比例</h2>
+<div class="legend"><span style="--c:#3975ae">搜索／接触</span><span style="--c:#16836b">跟踪</span><span style="--c:#e68621">丢边恢复</span><span style="--c:#9b287b">力方向</span><span style="--c:#2563b1">实际速度方向</span></div>
+<canvas id="xy" aria-label="TCP 实际 XY 轨迹"></canvas><div class="direction"><canvas id="direction" aria-label="力和实际速度方向"></canvas><pre id="values"></pre></div>
+<div id="scales" class="muted"></div></section>
+<div class="right"><section class="panel"><h2>力信号 · N</h2><div class="legend"><span style="--c:#3975ae">Fx</span><span style="--c:#c65050">Fy</span><span style="--c:#16836b">Fxy</span><span style="--c:#94a3b8">滤波前 Fxy</span></div><canvas id="force" aria-label="力曲线"></canvas><div id="thresholds" class="muted"></div></section>
+<section class="panel"><h2>TCP 速度 · mm/s</h2><div class="controls" style="padding:0;border:0;margin:0"><select id="component" aria-label="速度分量"><option value="all">vx、vy、XY 合速度</option><option value="0">仅 vx</option><option value="1">仅 vy</option><option value="2">仅 XY 合速度</option></select><span class="muted">实际速度：实线　指令速度：虚线</span></div><div class="legend"><span style="--c:#3975ae">vx</span><span style="--c:#c65050">vy</span><span style="--c:#16836b">XY</span></div><canvas id="velocity" aria-label="实际和指令速度曲线"></canvas></section></div></div>
+<section class="summary"><h2>首次接触附近的记录</h2><pre id="collision"></pre><p id="note" class="muted"></p></section>
+<div id="error" hidden class="error"></div>
+</main>
+<script type="application/json" id="replay-data">__REPLAY_DATA__</script>
+<script>
+'use strict';
+window.addEventListener('error', e=>{const box=document.getElementById('error');box.hidden=false;box.textContent='回放错误：'+e.message;});
+const D=JSON.parse(document.getElementById('replay-data').textContent), $=id=>document.getElementById(id);
+const S=D.samples,A=D.actual,C=D.commands,colors=['#3975ae','#c65050','#16836b'],phases=['#3975ae','#16836b','#e68621'];
+const names={FIRST_THRESHOLD_STOP_REQUEST:'首次接触阈值',FIRST_CONTACT:'接触确认',TRACKING_ENTERED:'进入跟踪',CONTACT_LOST:'丢失接触',REACQUIRED:'恢复接触',EXECUTION_STOP_CONFIRMED:'停止确认',USER_STOP:'停止请求',BUDGET_STOP:'停止请求'};
+const eventColor=k=>k==='CONTACT_LOST'?'#e68621':k==='REACQUIRED'?'#1964b1':'#9b287b';
+const finite=v=>typeof v==='number'&&Number.isFinite(v),fmt=(v,n=2)=>finite(v)?v.toFixed(n):'未记录';
+const lastAt=(rows,t)=>{let lo=0,hi=rows.length;while(lo<hi){const m=(lo+hi)>>1;if(rows[m][0]<=t)lo=m+1;else hi=m;}return lo-1;};
+const selectedEvents=D.events.filter(e=>names[e.kind]);
+let elapsed=0,playing=false,rate=1,lastWall=0,range=[0,Math.max(D.duration,0.001)],lostIndex=0,dirty=true;
+const xyPoints=S.filter(r=>finite(r[1])&&finite(r[2])).map(r=>[r[1],r[2]]).concat(D.target||[]);
+if(D.stop)xyPoints.push(D.stop);
+const extent=(values,minimum=1)=>{let lo=Infinity,hi=-Infinity;for(const v of values)if(finite(v)){lo=Math.min(lo,v);hi=Math.max(hi,v);}if(lo===Infinity)return[-1,1];const pad=Math.max((hi-lo)*.12,minimum);return[lo-pad,hi+pad];};
+const xBounds=extent(xyPoints.map(p=>p[0]),2),yBounds=extent(xyPoints.map(p=>p[1]),2),span=Math.max(xBounds[1]-xBounds[0],yBounds[1]-yBounds[0]);
+const maxForce=Math.max(1,...extent(S.flatMap(r=>r.slice(3,6)),0).map(Math.abs));
+const maxSpeed=Math.max(1,...extent(A.flatMap(r=>r.slice(1)),0).map(Math.abs));
+const forceScale=span*.12/maxForce,velocityScale=span*.12/maxSpeed;
+function surface(id){const canvas=$(id),w=canvas.clientWidth,h=canvas.clientHeight,dpr=window.devicePixelRatio||1;
+if(canvas.width!==Math.round(w*dpr)||canvas.height!==Math.round(h*dpr)){canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);}
+const c=canvas.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.clearRect(0,0,w,h);c.font='12px system-ui';return{c,w,h};}
+function line(c,points,color,width=1.3,dash=[]){c.beginPath();let active=false;for(const p of points){if(!p||!p.every(finite)){active=false;continue;}if(active)c.lineTo(...p);else{c.moveTo(...p);active=true;}}c.strokeStyle=color;c.lineWidth=width;c.setLineDash(dash);c.stroke();c.setLineDash([]);}
+function arrow(c,x,y,dx,dy,color){if(![x,y,dx,dy].every(finite))return;line(c,[[x,y],[x+dx,y+dy]],color,2.3);const angle=Math.atan2(dy,dx),n=Math.hypot(dx,dy);if(n<1)return;const len=Math.min(9,n*.5);c.beginPath();c.moveTo(x+dx,y+dy);c.lineTo(x+dx-len*Math.cos(angle-.45),y+dy-len*Math.sin(angle-.45));c.lineTo(x+dx-len*Math.cos(angle+.45),y+dy-len*Math.sin(angle+.45));c.closePath();c.fillStyle=color;c.fill();}
+function dot(c,p,color,label,offset=0){if(!p||!p.every(finite))return;c.beginPath();c.arc(...p,4,0,Math.PI*2);c.fillStyle=color;c.fill();if(label){c.fillStyle=color;c.fillText(label,p[0]+7,p[1]-8-offset);}}
+function drawXY(row,actual){const{c,w,h}=surface('xy'),left=55,right=20,top=22,bottom=42;
+const scale=Math.min((w-left-right)/(xBounds[1]-xBounds[0]),(h-top-bottom)/(yBounds[1]-yBounds[0]));
+const midX=(xBounds[0]+xBounds[1])/2,midY=(yBounds[0]+yBounds[1])/2;
+const project=p=>[left+(w-left-right)/2+(p[0]-midX)*scale,top+(h-top-bottom)/2-(p[1]-midY)*scale];
+for(let k=0;k<=4;k++){const x=xBounds[0]+k*(xBounds[1]-xBounds[0])/4,y=yBounds[0]+k*(yBounds[1]-yBounds[0])/4;
+line(c,[project([x,yBounds[0]]),project([x,yBounds[1]])],'#e3e9f0');line(c,[project([xBounds[0],y]),project([xBounds[1],y])],'#e3e9f0');
+c.fillStyle='#64748b';c.textAlign='center';c.fillText(fmt(x,1),project([x,yBounds[0]])[0],h-20);c.textAlign='right';c.fillText(fmt(y,1),left-7,project([xBounds[0],y])[1]+4);}
+c.textAlign='center';c.fillText('Base X [mm]',w/2,h-3);c.save();c.translate(13,h/2);c.rotate(-Math.PI/2);c.fillText('Base Y [mm]',0,0);c.restore();c.textAlign='left';
+if(D.target)line(c,D.target.map(project),'#344256',1.5,[6,4]);line(c,S.map(r=>project(r.slice(1,3))),'#d0d9e3',1);
+for(let phase=0;phase<3;phase++){const points=[];for(let i=0;i<S.length&&S[i][0]<=elapsed;i++)points.push(S[i][6]===phase?project(S[i].slice(1,3)):null);line(c,points,phases[phase],2.2);}
+dot(c,project(S[0].slice(1,3)),'#26384d','起点');dot(c,project(S[S.length-1].slice(1,3)),'#26384d',D.stop?'最后记录':'最终记录');
+if(D.stop)dot(c,project(D.stop),'#b72a33','停止确认',14);
+let first=true;for(const e of selectedEvents){if(e.time>elapsed||!e.xy_mm.every(finite))continue;if(e.kind==='FIRST_THRESHOLD_STOP_REQUEST'||e.kind==='FIRST_CONTACT'){if(!first)continue;first=false;}dot(c,project(e.xy_mm),eventColor(e.kind),['CONTACT_LOST','REACQUIRED'].includes(e.kind)?'':names[e.kind]);}
+const p=project(row.slice(1,3));dot(c,p,'#111827');arrow(c,...p,row[3]*forceScale*scale,-row[4]*forceScale*scale,'#9b287b');if(actual)arrow(c,...p,actual[1]*velocityScale*scale,-actual[2]*velocityScale*scale,'#2563b1');}
+function drawDirection(row,actual){const{c,w,h}=surface('direction'),p=[w/2,h/2];line(c,[[8,p[1]],[w-8,p[1]]],'#cbd5e1');line(c,[[p[0],h-8],[p[0],8]],'#cbd5e1');c.fillStyle='#64748b';c.fillText('+X',w-22,p[1]-5);c.fillText('+Y',p[0]+4,13);dot(c,p,'#111827');arrow(c,...p,row[3]*55/maxForce,-row[4]*55/maxForce,'#9b287b');if(actual)arrow(c,...p,actual[1]*55/maxSpeed,-actual[2]*55/maxSpeed,'#2563b1');}
+const graphCache={};
+function graph(id,series,thresholds=[]){const{c,w,h}=surface(id),m={l:56,r:14,t:26,b:34},[begin,end]=range;
+const key=JSON.stringify([w,h,window.devicePixelRatio,range,series.map(s=>[s.column,s.step]),thresholds]);
+const cursor=()=>{if(elapsed<begin||elapsed>end)return;const px=m.l+(elapsed-begin)/(end-begin)*(w-m.l-m.r);line(c,[[px,m.t],[px,h-m.b]],'#111827',1.5);};
+if(graphCache[id]&&graphCache[id].key===key){c.drawImage(graphCache[id].canvas,0,0,w,h);cursor();return;}
+const values=[0,...thresholds.map(v=>v.value)];for(const s of series)for(const p of s.rows)if(p[0]>=begin&&p[0]<=end&&finite(p[s.column]))values.push(p[s.column]);
+const [ymin,ymax]=extent(values,.2),x=t=>m.l+(t-begin)/(end-begin)*(w-m.l-m.r),y=v=>m.t+(ymax-v)/(ymax-ymin)*(h-m.t-m.b);
+for(let k=0;k<=4;k++){const t=begin+k*(end-begin)/4,v=ymin+k*(ymax-ymin)/4;line(c,[[x(t),m.t],[x(t),h-m.b]],'#e3e9f0');line(c,[[m.l,y(v)],[w-m.r,y(v)]],'#e3e9f0');c.fillStyle='#64748b';c.textAlign='center';c.fillText(fmt(t,2),x(t),h-17);c.textAlign='right';c.fillText(fmt(v,1),m.l-7,y(v)+4);}
+c.textAlign='left';c.save();c.beginPath();c.rect(m.l,m.t,w-m.l-m.r,h-m.t-m.b);c.clip();
+for(const threshold of thresholds)line(c,[[m.l,y(threshold.value)],[w-m.r,y(threshold.value)]],threshold.color,1.2,[5,4]);
+for(const s of series){const points=[];let previous=null;let start=Math.max(0,lastAt(s.rows,begin));
+for(let j=start;j<s.rows.length;j++){const p=s.rows[j];if(p[0]>end&&previous){if(s.step)points.push([x(p[0]),previous[1]]);else points.push([x(p[0]),y(p[s.column])]);break;}
+if(!finite(p[s.column])){points.push(null);previous=null;continue;}const next=[x(p[0]),y(p[s.column])];if(s.step&&previous)points.push([next[0],previous[1]]);points.push(next);previous=next;}
+line(c,points,s.color,1.3,s.step?[6,4]:[]);}
+for(const e of selectedEvents)if(e.time>=begin&&e.time<=end)line(c,[[x(e.time),m.t],[x(e.time),h-m.b]],eventColor(e.kind),.8,[2,4]);
+c.restore();
+let labelRight=-1;for(const e of selectedEvents)if(e.time>=begin&&e.time<=end){const px=x(e.time);if(px<labelRight+10)continue;const label=names[e.kind];c.fillStyle=eventColor(e.kind);c.fillText(label,Math.min(px,w-m.r-c.measureText(label).width),16);labelRight=px+c.measureText(label).width;}
+c.textAlign='center';c.fillStyle='#64748b';c.fillText('同一实验时间 [s]',w/2,h-2);
+const snapshot=document.createElement('canvas');snapshot.width=$(id).width;snapshot.height=$(id).height;snapshot.getContext('2d').drawImage($(id),0,0);graphCache[id]={key,canvas:snapshot};cursor();}
+function render(){const row=S[Math.max(0,lastAt(S,elapsed))],actual=A[lastAt(A,elapsed)],command=C[lastAt(C,elapsed)];
+$('time').value=elapsed;$('clock').textContent=fmt(elapsed,3)+' / '+fmt(D.duration,3)+' s';$('play').textContent=playing?'暂停':'播放';
+drawXY(row,actual);drawDirection(row,actual);
+const ts=[];if(finite(D.threshold))ts.push({value:D.threshold,color:'#9b287b'});if(finite(D.lost_threshold))ts.push({value:D.lost_threshold,color:'#e68621'});
+graph('force',[...colors.map((color,i)=>({rows:S,column:i+3,color})),{rows:S,column:8,color:'#94a3b8'}],ts);
+const components=$('component').value==='all'?[0,1,2]:[Number($('component').value)];
+graph('velocity',components.flatMap(i=>[{rows:A,column:i+1,color:colors[i]},{rows:C,column:i+1,color:colors[i],step:true}]));
+const triple=r=>r? r.slice(1,4).map(v=>fmt(v)).join(' / '):'未记录';
+$('values').textContent=`TCP  X / Y: ${fmt(row[1])} / ${fmt(row[2])} mm\n力  Fx / Fy / Fxy: ${row.slice(3,6).map(v=>fmt(v)).join(' / ')} N\n实际 vx / vy / XY: ${triple(actual)} mm/s\n指令 vx / vy / XY: ${triple(command)} mm/s\n状态: ${D.states[row[7]]}\n位置／力样本: ${fmt(row[0],4)} s\n实际速度样本: ${actual?fmt(actual[0],4):'未记录'} s\n指令发送时间: ${command?fmt(command[0],4):'未记录'} s`;dirty=false;}
+function seek(t){playing=false;elapsed=Math.max(0,Math.min(D.duration,t));dirty=true;}
+function zoom(t){const width=Math.min(D.duration,2);range=[Math.max(0,Math.min(D.duration-width,t-1)),Math.min(D.duration,Math.max(width,t+1))];if(range[1]<=range[0])range=[0,.001];seek(t);}
+$('play').onclick=()=>{if(elapsed>=D.duration)elapsed=0;playing=!playing;dirty=true;};$('restart').onclick=()=>seek(0);
+$('time').oninput=e=>seek(Number(e.target.value));$('rate').onchange=e=>rate=Number(e.target.value);$('component').onchange=()=>dirty=true;
+$('full').onclick=()=>{range=[0,Math.max(D.duration,.001)];dirty=true;};
+$('contact').disabled=!finite(D.first_contact.time_sec);$('contact').onclick=()=>zoom(D.first_contact.time_sec);
+const lost=D.events.filter(e=>e.kind==='CONTACT_LOST');$('lost').disabled=!lost.length;$('lost').onclick=()=>zoom(lost[lostIndex++%lost.length].time);
+for(const id of ['force','velocity'])$(id).onclick=e=>{const canvas=$(id),r=canvas.getBoundingClientRect(),fraction=Math.max(0,Math.min(1,(e.clientX-r.left-56)/(r.width-70)));seek(range[0]+fraction*(range[1]-range[0]));};
+$('time').max=D.duration;$('name').textContent=(D.synthetic?'模拟数据 · ':'')+D.name;
+$('scales').textContent=`轨迹箭头固定独立缩放：力 ${fmt(forceScale)} mm/N，实际速度 ${fmt(velocityScale)} mm/(mm/s)。`;
+$('thresholds').textContent=`接触阈值：${fmt(D.threshold)} N（紫色虚线）；丢接触阈值：${fmt(D.lost_threshold)} N（橙色虚线）。`;
+const first=D.first_contact,array=v=>v?v.map(x=>fmt(x)).join(' / '):'未记录';
+if(finite(first.time_sec)){$('collision').textContent=`首次记录接触：${fmt(first.time_sec,4)} s\n接触前指令 vx / vy / XY：${array(first.command_before_xy_mm_s)} mm/s（${fmt(first.command_before_time_sec,4)} s）\n接触前实际 vx / vy / XY：${array(first.actual_before_xy_mm_s)} mm/s（${fmt(first.actual_before_time_sec,4)} s）\n接触时 Fx / Fy / Fxy：${array(first.contact_force_xy_N)} N\n`+(first.after_contact||[]).map(p=>`接触后 ${fmt(p.sample_time_sec-first.time_sec,3)} s 实际 vx / vy / XY：${array(p.actual_xy_mm_s)} mm/s`).join('\n')+(!first.precontact_one_second_available?'\n本次未记录足够的接触前 1 秒实际速度。':'');}
+else $('collision').textContent='没有记录首次接触事件，未推测碰撞时刻。';
+$('note').textContent=`原始记录 ${D.sample_count} 帧；此页面仅对显示采样，原始 CSV 保留完整。时间采用已记录的主机时间戳。`+(first.source&&first.source.startsWith('legacy')?' 本次仅有接触确认事件，无法确定物理碰撞起始时刻。':' 首次接触阈值基于滤波信号，物理碰撞可能更早。')+' 未记录的速度、目标轮廓和停止位置不会补造。';
+window.addEventListener('resize',()=>dirty=true);document.addEventListener('visibilitychange',()=>lastWall=0);
+function frame(wall){const delta=lastWall?Math.min(.1,(wall-lastWall)/1000):0;lastWall=wall;if(playing){elapsed=Math.min(D.duration,elapsed+delta*rate);dirty=true;if(elapsed>=D.duration)playing=false;}if(dirty)render();requestAnimationFrame(frame);}
+render();requestAnimationFrame(frame);
+// Expose only replay state for offline verification, with no device connection.
+window.experimentReplay={seek,render,data:D,get time(){return elapsed;}};
+</script>
+</html>

@@ -57,6 +57,30 @@ metadata 保留 UTC `timestamp`，另记 `timestamp_local` 和 `timezone`；逐�
 
 旧运行参考圆弧按旧 `config_snapshot.yaml` 的 60°重建，不读取当前 90°配置；缺少起点或保存方向时不补画参考圆弧。
 
+从 `run_2026-10-06_11-10-51_804801` 起，连续实验结束、设备及日志关闭后，在该 run 内生成
+`trajectory_overview.png`、`trajectory_local_zoom.png` 和可执行的 `play_visualization.sh`。
+overview 从实际 P0 开始，包括搜索、接触确认、贴边、找回和停止；local zoom 从首次接触确认开始。
+两图使用 Base XY 毫米、等比例、宽画布和外部右侧图例，所有找回合并为 `Lost-edge recovery`。
+画的是 TCP 实测路径，不补画未知物体轮廓，也不将转向直接标为物体拐角。
+cutoff 优先读取 metadata 的目录创建时间，兼容新旧目录名；自动流程只处理刚结束的单次 run，不扫描历史目录。
+如果启动取消、尚无扫描样本，两张图会明确说明没有轨迹；不会将启动返回当成扫描数据。
+
+进入 run 文件夹，直接双击 `实验回放.html`，用浏览器打开即可播放、拖动时间轴或点击曲线同步定位，
+不需要网络、Tk 或可执行文件的启动授权。页面内嵌显示数据，原始 CSV 不变。
+也可双击 `打开实验回放.desktop`；若文件管理器首次提示，选择“允许启动”。
+也可运行或以“作为程序运行”打开 `play_visualization.sh`，它使用项目已有虚拟环境调用公共
+`visualization/run_animation.py`；不会复制主程序或提前生成 MP4/GIF。也可在终端运行：
+
+```bash
+bash data/real/continuous/run_2026-10-06_11-10-51_804801/play_visualization.sh
+```
+
+动画默认 1×，提供 Play/Pause、Restart 和 0.5×/1×/2×/4×。固定完整 Base XY 范围，从 P0 播放至停止；
+结束保留最终画面，手动关闭。左右两图使用同一 recorded monotonic 时间索引，只显示截至当前时刻的数据。
+力优先读取 `filtered_force_base_fx/fy`（历史等价列为 `dfx/dfy`），Fxy 由这两个实时 policy 输入计算；
+Sensor/未知 frame 的读数不会冒称 Base 力。`filtered_fxy` 是方向估计器状态，找回期间可能冻结，不能作为实时力曲线。
+默认仅显示层按约 40 Hz 取点、界面约 30 FPS；保留状态切换两侧和事件点，不改原始 CSV、控制或分析数据。
+
 原菜单 **11** 用于手动返回 reset（没有 reset 文件则返回 P0）：按 Enter 打开任务，核对路径后再按 Enter 执行。手动返回不连接 PX6D；自动启动返回有 PX6D 力监控。返回中 Q/Esc/Ctrl+C 中止。
 
 原菜单 **12** 是离散扫描，启动同样逐步按 Enter；Q 按原配置正常停止并可能返回，Esc/Ctrl+C 不自动返回。急迫危险使用现场物理急停。
@@ -298,3 +322,133 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/user-linux/robotics_cs/.venv312/bin/pytho
 
 重放使用保存配置和记录输入，跳过独立执行的启动返回段；报告首次指令/状态变化及原停机帧的
 新旧路径计数。不能把改变指令后的记录输入重放视为真实闭环轨迹，也不能推断日志结束后的接触结果。
+
+## 基础接触实验：完整速度记录与离线回放（2026-10-09）
+
+这次新增功能以 clean 工程的连续入口为主，继续使用现有 RTDE、PX6D、CSV、后台写盘和 Matplotlib。
+没有改写跟踪/恢复策略，没有修改 `config.yaml` 中的速度、阈值、安全停止参数，也不连接 ROS2。
+仓库中先前未提交的轨迹图和回放改动已保留并扩展。
+
+**先离线检查**，以下命令不连接设备：
+
+```bash
+cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
+/home/user-linux/robotics_cs/.venv312/bin/python tools/visualize_contact_experiment.py --demo --output data/analysis/contact_demo
+/home/user-linux/robotics_cs/.venv312/bin/python run_continuous_tracking.py --dry-run --basic-contact --duration 4 --output data/analysis/basic_contact_simulation_check
+```
+
+第一条生成明确标为 SYNTHETIC 的示意记录，包含旋转的传感器数据、已知示意目标、不同的实际/指令速度、碰撞减速、丢接触和恢复。
+示意信号用于检查记录/回放，不证明机器人或目标的物理行为。第二条运行工程原有模拟器，并走完整保存、停止收尾和自动出图流程。
+
+**现场重新开展基础实验时**，沿用原有标定和逐步确认，明确使用以下入口：
+
+```bash
+/home/user-linux/robotics_cs/.venv312/bin/python run_continuous_tracking.py --execute --basic-contact --experiment-metadata experiment.json
+```
+
+`--basic-contact` 仅在本次配置副本中关闭颗粒基线采集、把颗粒背景设为零，保留原空气采零、抬升返回路径、固定姿态、P0/P1、搜索和跟踪运动及全部安全保护。
+完成原启动流程后，先在 P0 记录至少 1 秒静止 TCP/力，再进入原搜索。预记录不发送运动指令；复用原静止/力保护和已有 watchdog。
+预记录使用滤波器副本，不推进实际控制滤波器。随后从第一条搜索指令开始，连续保留全部采集帧，包括碰撞前、接触确认、跟踪、恢复和停车过程。
+模拟模式的静止预记录使用 t=0 之前的合成时间，不推进模拟器的运动/策略时钟。
+
+三个实验阶段通过固定目标、原有 P0/P1 示教和实验标签区分。单点实验的不同接近方向仍由原示教方向设置，按原 Q/Esc/Ctrl+C 流程结束；没有新增自动多方向运动或新的单点控制器。
+直边和旋转正方体实验同样沿用原运动程序。标签和目标轮廓只进入记录/离线绘图，不参与控制。
+
+可选 `experiment.json` 示例（必须用现场测量值替换示例坐标；未知目标请删掉整个 `target`）：
+
+```json
+{
+  "kind": "rotated_cube",
+  "label": "固定正方体，旋转15度，第1次",
+  "approach_direction_base_xy": [0, -1],
+  "target": {
+    "center_base_mm": [640, 300],
+    "side_mm": 50,
+    "rotation_deg": 15
+  }
+}
+```
+
+`kind` 可写 `single_point`、`straight_edge`、`rotated_cube`；它是实验标签，不改变策略。
+`target` 须同时提供 Base XY 中心、毫米边长和相对 Base +X 的逆时针角度。几何缺失时不画目标轮廓。
+这些内容保存于本次 `config_snapshot.yaml` 的 `experiment`，不覆盖源配置、已有标定或历史记录。
+
+### 新数据列及时间语义
+
+- `tcp_x/y/z/rx/ry/rz`：实际 TCP 位姿，m / 旋转向量 rad。
+- `tcp_vx/vy/vz/vrx/vry/vrz`：真机继续由 RTDE `getActualTCPSpeed()` 读取完整六维实际速度，m/s / rad/s；后三列对应 wx/wy/wz，不是姿态差分。
+- `actual_tcp_timestamp`：这次 RTDE 状态读取的主机单调时间；`actual_velocity_source` 区分 RTDE 与 simulation。
+- `commanded_tcp_vx/vy/vz/wx/wy/wz` 和 `commanded_tcp_timestamp/sequence/kind/accepted`：最近一次实际调用的笛卡尔速度输入，包含制动的六维零指令。它可能在这一行 RTDE 读取之后发送，所以**不得把行号当成两者严格同时发生**。
+- `tcp_commands.csv`：每一次实际 `speedL` 输入及其独立的发送/返回时间、序号、SDK 接受结果、Base frame 和单位。回放按此表的发送时间绘制阶梯曲线，查询实际采样时刻之前最后一次发送的指令；不使用策略的 `command_v*` 或 `commanded_speed_mps` 冒充下发值。SDK 返回未知/失败仍按原样保留。
+- `raw_fx/fy/fz/tx/ty/tz`：原始 Sensor 六维数据；`raw_base_*` 是同一数据按现有安装关系/实际 TCP 姿态转换后的六维 Base 数据，未减空气偏置/颗粒基线。
+- `force_base_fx/fy/fz/tx/ty/tz`：补偿后、滤波前的 Base 数据；`filtered_force_base_*` / 原 `df*/dt*`：实际传给策略的 Base 数据。力矩参考点沿用现有变换和配置假设，范围由原 `force_transform_at_start.json` 说明。
+- 原 `monotonic_sec`、UTC/北京时间、串口读起止时间、RTDE 读起止时间和设备时间诊断保留。真机行的 UTC/北京时间由采集时刻映射，不使用后台落盘时刻替代。
+
+PX6D 没有设备采样时间；串口与 RTDE 为顺序读取。日志保留各自获取区间，统一采用主机单调时间作为回放基准，不能声称硬件同步。
+轨迹/力按记录行时间、实际速度按实际 RTDE 读时间、指令速度按真正发送时间绘制；不插值补造数据。
+首次碰撞附近的“接触前实际速度”取触发接触的记录帧**之前**的最后一帧，即使接触帧 RTDE 读时间略早于策略事件，也不会把它误标成碰撞前样本。
+
+原 `policy_waypoints.csv` 中 `FIRST_THRESHOLD_STOP_REQUEST` 是最初触发接触停车的事件，优先用于碰撞观察；`FIRST_CONTACT` 是接触确认完成，`TRACKING_ENTERED` 是进入跟踪。
+丢接触、恢复、停车请求及停车确认继续使用真实记录事件。滤波/串口延迟可能让物理碰撞早于阈值事件。
+历史数据只有 `FIRST_CONTACT` 时明确标为确认时刻；没有事件时不从转弯或 TRACKING 状态推断碰撞时刻。
+历史速度缺失就显示 N/A；历史采集时间不够 1 秒就提示不足，不补造数据。
+
+连续真机仍在现有后台线程保存原始 CSV；显示层减点不改动原始文件。新运行开启 `lossless`：超过原队列容量时保留积压记录于内存并给出诊断，不通过丢原始帧或阻塞控制线程处理积压。
+停止后排空记录再生成报告，结束时保存 `logging_status.json` 的完整性/写盘诊断。持续磁盘故障无法保证完整保存，必须检查 `complete`；尚未关闭的写盘线程不会被当作完整数据自动出图。
+
+### 自动生成文件与交互
+
+每次连续实验结束、设备和日志关闭后，在原 `data/real/continuous/run_*` 或模拟运行目录生成：
+
+| 文件 | 内容 |
+|---|---|
+| `trajectory_overview.png`、`trajectory_local_zoom.png` | 保留原轨迹图；Base XY 毫米、等比例、外置图例；已知目标才画轮廓 |
+| `experiment_overview.png` | PPT 总览：阶段轨迹、关键位置、力/阈值、实际/下发速度，以及接触前后速度与力数值 |
+| `first_contact_zoom.png` | 接触前约 1 秒至接触后约 1 秒的力和速度同步放大 |
+| `contact_lost_NN_zoom.png` | 每次丢接触附近的力/速度放大，恢复事件用同一时间基准标记 |
+| `contact_analysis.json` | 首次接触来源、接触前实际/下发速度及时间、接触后观测、接近方向与力方向的夹角、丢失/恢复附近实测值、速度误差、采样间隔及保存的终止/写盘诊断 |
+| `play_visualization.sh` | 可执行的二维离线回放入口，不连接机器人 |
+| `实验回放.html` | 推荐的双击入口：浏览器离线联动回放，文件内含显示数据，无需网络或 Tk |
+| `打开实验回放.desktop` | 文件管理器双击入口，自动加载所在文件夹的实验 |
+
+直接双击实验文件夹里的 `实验回放.html`，即可在浏览器查看。
+`打开实验回放.desktop` 和不带参数运行的 `play_visualization.sh` 也会优先打开这个文件；
+若启动失败，终端保留错误并等待回车。仍可运行原 Matplotlib 窗口：
+
+```bash
+/home/user-linux/robotics_cs/.venv312/bin/python visualization/run_animation.py --run-dir data/real/continuous/你的run目录
+```
+
+回放需要桌面与 Tk。窗口提供播放/暂停、重启、0.5/1/2/4倍速、拖动 Time 滑块、点击力/速度图定位。
+速度图以实线/虚线分别显示实际/下发速度，All/vx/vy/XY 可选；Contact zoom / Lost zoom / Full time 同步改变力与速度的时间范围，反复点击 Lost zoom 查看各次丢边。
+左侧轨迹显示当前 TCP、阶段、首次阈值点、丢失/恢复点与最终位置；紫色力箭头、蓝色实际速度箭头从 TCP 出发，固定独立缩放，旁边显示 mm/N 与 mm/(mm/s)。
+小方向区域和实时 Fx/Fy/Fxy、实际/指令 vx/vy/XY 数值同步更新。箭头从 Base 实测力和实际速度计算，不加入控制方向符号。
+默认界面 30 FPS、按约40 Hz选择显示点，并保留状态变化、事件和每个显示时间桶的力/速度极值；静态图和分析仍使用完整原始帧。
+
+### 历史实验重放及本次离线检查
+
+显式指定旧数据；`--output` 写入独立分析目录，不改历史 CSV、配置或已有图：
+
+```bash
+/home/user-linux/robotics_cs/.venv312/bin/python tools/visualize_contact_experiment.py \
+  data/real/continuous/run_2026-10-06_11-10-51_804801 \
+  data/real/continuous/run_2026-10-08_14-08-05_791694 \
+  --output data/analysis/basic_contact_history_review
+```
+
+每个 run 有独立报告/放大图/启动脚本，多次记录另有 `experiment_comparison.json`。外置启动脚本指向原始数据目录，不复制或改写原始数据。
+旧记录的精确指令只读取已保存的 `speedl_host_monotonic/speedl_vx/vy` 或新 `tcp_commands.csv`；旧记录没有保存的其余四维仍不可用。
+
+本次已执行示意数据、原模拟器和以上两份历史记录的离线检查。原模拟器在约2.75秒达到原有处理后力保护（约12.067 N）并以 `STOP_FORCE_LIMIT` 停止；停止后的数据、报告和回放入口正常生成，没有放宽保护来延长模拟运动。历史观察：
+
+- 10月6日 11:10 那次共有8次丢接触、7次记录到恢复。第8次丢接触前约1秒 Fxy 为0.619 N，丢失事件时为0.344 N，实际 XY速度约0.043 mm/s，最后一次已下发速度为0。
+  最后恢复样本的路径计数约3.495 mm、最大位移2.655 mm、角度85.55°、Fxy约0.450 N；保存的停止原因是 `local reacquire path budget exhausted`。
+  这次旧策略的路径计数不能当作新版速度积分计数；应结合原快照、原预算和实际速度分析，不直接用它认定真实路径长达3.495 mm。
+- 10月8日 14:08 那次丢接触时 Fxy约0.474 N，实际XY速度约0.075 mm/s，已下发速度为0；恢复末帧Fxy约0.929 N、角度22.22°、路径计数0.816 mm，累计约7.998秒，实际和下发速度均为0。
+  保存的停止原因是 `local reacquire time budget exhausted`。力再次出现不等于达到原接触确认条件，恢复中的等待也会消耗原总时间预算。
+- 两次首次触发接触前实际XY速度分别约18.282和17.848 mm/s，已下发XY速度均为18.000 mm/s；约0.1秒后实际速度分别约1.598和1.857 mm/s。
+
+这些数据支持继续检查低力停车、恢复等待与原预算之间的关系；未知物体轮廓不能由TCP转向补画，也不能仅凭轨迹确认真实接触了几条边。
+本次没有改动恢复角度、速度、阈值或预算，没有用旧输入做反事实轨迹预测。
+
+本次主要改动文件：`robot/rtde_controller.py`、`sensor/force_preprocess.py`、`experiment_logging/data_logger.py`、`continuous_writer.py`、新增 `contact_capture.py`、`app/continuous_runtime.py`、离散入口的指令日志接入、`simulation/simulated_robot.py`、`tools/visualize_continuous_run.py`、新增 `tools/visualize_contact_experiment.py`、扩展 `visualization/run_plots.py` / `run_animation.py`、新增 `visualization/contact_report.py`，以及对应离线测试。
