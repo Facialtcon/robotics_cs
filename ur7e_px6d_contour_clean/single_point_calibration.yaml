@@ -1,0 +1,8 @@
+schema_version: 1
+# Intentionally empty: capture one P_ref and real P0 poses through the menu.
+P_ref: null
+reference_tcp_pose: null
+reference_captured_at: null
+robot_ip: null
+active_tcp_offset: null
+groups: {}

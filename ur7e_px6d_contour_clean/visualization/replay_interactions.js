@@ -109,6 +109,13 @@ const defs = {
     {key:'a'+i,name:'实际 '+['vx','vy','XY'][i],rows:A,col:i+1,color:colors[i],component:i},
     {key:'c'+i,name:'指令 '+['vx','vy','XY'][i],rows:C,col:i+1,color:colors[i],component:i,step:true}])
 };
+if(D.single_point){
+  for(const [i,name,color] of [[1,'Fz [N]','#8b5cf6'],[2,'Tx [Nm]','#b7791f'],
+    [3,'Ty [Nm]','#0891b2'],[4,'Tz [Nm]','#64748b']])
+    defs.force.push({key:'w'+i,name,rows:D.wrench,col:i,color});
+  $('force-title').textContent='Base 六维力／力矩 · N / Nm';
+  $('phase-legend').textContent='单点直线接近／制动 · 紫色：力 · 蓝色虚线：实际速度';
+}
 const visible=new Set(defs.force.concat(defs.velocity).map(s=>s.key));
 function seriesFor(id) {
   const component=$('component').value;
@@ -264,7 +271,7 @@ function graph(id) {
   let g;
   if(cache[id]&&cache[id].key===key){g=cache[id].geometry;c.drawImage(cache[id].canvas,0,0,w,h);}
   else{
-    g=graphGeometry(id,w,h,series);axes(c,g,g.xlim,g.ylim,'实验时间 [s]',id==='force'?'力 [N]':'速度 [mm/s]');
+    g=graphGeometry(id,w,h,series);axes(c,g,g.xlim,g.ylim,'实验时间 [s]',id==='force'?(D.single_point?'力 [N] / 力矩 [Nm]':'力 [N]'):'速度 [mm/s]');
     clip(c,g);
     if(id==='force'){
       deadband(c,g);
@@ -596,6 +603,10 @@ if(finite(firstContact.time_sec)){
     (firstContact.after_contact||[]).map(p=>'接触后 '+fmt(p.sample_time_sec-firstContact.time_sec,3)+' s 实际 vx / vy / XY：'+array(p.actual_xy_mm_s)+' mm/s').join('\n')+
     (!firstContact.precontact_one_second_available?'\n本次未记录足够的接触前 1 秒实际速度。':'');
 }else $('collision').textContent='没有记录首次接触事件，未推测碰撞时刻。';
+if(D.single_point&&finite(firstContact.time_sec))$('collision').textContent+=
+  '\n阈值观测时实际 vx / vy / XY：'+array(firstContact.actual_at_threshold_xy_mm_s)+' mm/s（'+
+  fmt(firstContact.actual_at_threshold_time_sec,6)+' s）\n制动请求：'+fmt(firstContact.braking_request_time_sec,6)+
+  ' s · 实际停稳确认：'+fmt(firstContact.actual_stop_time_sec,6)+' s\n接触过程峰值滤波 Fxy：'+fmt(firstContact.peak_filtered_fxy_N,3)+' N';
 $('note').textContent='内嵌全部 '+D.sample_count+' 帧和原始发送时间戳。全局显示按像素保留峰值、突变与缺失段；局部放大显示原始采样。悬停读数取不晚于所选时刻的真实样本，不插值。'+
   (firstContact.source&&firstContact.source.startsWith('legacy')?' 本次只有接触确认，物理碰撞起始未知。':' 接触阈值使用滤波信号，物理碰撞可能更早。')+
   '主时间轴滚轮缩放、Shift+拖动平移；完整实验时间按钮恢复全局。';

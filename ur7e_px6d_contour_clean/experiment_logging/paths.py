@@ -47,7 +47,8 @@ def run_sort_key(path):
 def run_root(mode, strategy, data_root=None):
     if (mode, strategy) not in {('real', 'continuous'), ('real', 'discrete'),
                                ('real', 'return'), ('simulation', 'continuous'),
-                               ('simulation', 'discrete')}:
+                               ('simulation', 'discrete'), ('real', 'single_point'),
+                               ('simulation', 'single_point')}:
         raise ValueError(f'invalid experiment type: {mode}/{strategy}')
     return Path(data_root or DATA_ROOT).expanduser().resolve() / mode / strategy
 

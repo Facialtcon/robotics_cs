@@ -1,0 +1,37 @@
+# Independent rigid-object experiment. SI units throughout.
+speed_min_mps: 0.0001
+speed_max_mps: 0.002
+speed_default_mps: 0.0005
+speed_presets_mps: [0.0002, 0.0005, 0.001]
+contact_threshold_N: 1.0
+unloaded_max_fxy_N: 0.2
+max_search_distance_m: 0.020
+max_approach_time_sec: 60.0
+precontact_record_sec: 1.0
+post_stop_record_sec: 0.5
+control_rate_hz: 100.0
+max_force_age_sec: 0.06
+max_robot_age_sec: 0.02
+max_cycle_sec: 0.08
+settle_speed_mps: 0.0001
+settle_hold_sec: 0.1
+stop_timeout_sec: 2.0
+start_position_tolerance_m: 0.0002
+fixed_z_tolerance_m: 0.0002
+orientation_tolerance_rad: 0.01745
+probe_tilt_max_deg: 1.0
+probe_diameter_m: 0.003
+path_clearance_m: 0.0005
+braking_margin_m: 0.001
+watchdog_frequency_hz: 10.0
+# Fill with independently checked Base XYZ limits before hardware execution.
+workspace_limits: null
+# Boxes for fixtures/other obstacles; omit the intended contacted object.
+# Each box: {x_min: ..., x_max: ..., y_min: ..., y_max: ..., z_min: ..., z_max: ...}
+forbidden_boxes: []
+# Must name the on-site low-speed, threshold, braking and workspace checks.
+site_validation_note: ''
+# Automatic return is disabled until the full swept path is checked on site.
+# P0-specific exact plans are recorded by menu item 6 before separate Enter activation.
+return_lift_distance_m: null
+return_speed_mps: 0.0005

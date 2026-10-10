@@ -548,6 +548,11 @@ class URRTDEController:
         if self.config.get('continuous_require_watchdog') and not self._packet_advanced:
             raise RobotError('RTDE packet progress not established')
         velocity = [direction[0] * speed, direction[1] * speed, 0.0, 0.0, 0.0, 0.0]
+        # Optional independent-experiment freshness check immediately before SDK send.
+        # Existing callers have no callback and retain their execution behavior.
+        before_send = getattr(self, 'before_velocity_send', None)
+        if before_send is not None:
+            before_send(state)
         try:
             # Set before the call so an ambiguous transport failure still
             # causes stop() to attempt speedStop.

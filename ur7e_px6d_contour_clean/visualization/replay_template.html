@@ -31,14 +31,14 @@ canvas{display:block;width:100%;height:235px;touch-action:none;cursor:crosshair}
 <div class="grid"><div class="column">
 <section class="panel trajectory" id="panel-xy"><div class="heading"><h2>TCP 实际轨迹 · Base XY 等比例</h2><div class="tools"><button id="xy-expand">放大显示</button><button id="xy-reset">恢复视图</button></div></div>
 <div class="tools"><button id="xy-full">完整轨迹</button><button id="xy-contact">接触区域</button><span class="hint">滚轮缩放 · 拖动平移</span></div>
-<div class="legend"><span><i class="swatch" style="--c:#3975ae"></i>搜索／接触</span><span><i class="swatch" style="--c:#16836b"></i>跟踪</span><span><i class="swatch" style="--c:#e68621"></i>丢边恢复</span><span><i class="swatch" style="--c:#9b287b"></i>力</span><span><i class="swatch" style="--c:#2563b1"></i>实际速度</span></div>
+<div class="legend" id="phase-legend"><span><i class="swatch" style="--c:#3975ae"></i>搜索／接触</span><span><i class="swatch" style="--c:#16836b"></i>跟踪</span><span><i class="swatch" style="--c:#e68621"></i>丢边恢复</span><span><i class="swatch" style="--c:#9b287b"></i>力</span><span><i class="swatch" style="--c:#2563b1"></i>实际速度</span></div>
 <canvas id="xy" aria-label="TCP 实际 XY 轨迹"></canvas><div id="xy-view" class="hint"></div><div id="xy-events" class="event-strip" aria-label="轨迹关键事件"></div></section>
 <section class="panel" id="panel-direction"><div class="heading"><h2>TCP 受力与实际速度方向</h2><div class="tools"><button id="direction-expand">放大显示</button><button id="direction-reset">恢复视图</button></div></div>
 <div class="tools arrow-controls"><select id="arrows" aria-label="方向箭头显示"><option value="both">力与实际速度</option><option value="force">仅力</option><option value="velocity">仅实际速度</option></select>
 <label>力比例<input id="force-scale" type="range" min="0.2" max="20" step="0.05" value="1"></label><label>速度比例<input id="velocity-scale" type="range" min="0.2" max="20" step="0.05" value="1"></label><button id="direction-fit">适合当前箭头</button></div>
 <div class="direction-body"><canvas id="direction" aria-label="力和实际速度方向"></canvas><pre id="values" class="readout"></pre></div><div id="scales" class="hint"></div><div class="hint">紫色：力 · 蓝色虚线：实际速度 · 两者独立缩放；滚轮调整视野，拖动平移</div></section>
 </div><div class="column">
-<section class="panel" id="panel-force"><div class="heading"><h2>力信号 · N</h2><div class="tools"><button id="force-expand">放大显示</button><button id="force-reset">恢复视图</button></div></div>
+<section class="panel" id="panel-force"><div class="heading"><h2 id="force-title">力信号 · N</h2><div class="tools"><button id="force-expand">放大显示</button><button id="force-reset">恢复视图</button></div></div>
 <div id="force-legend" class="legend"></div><div class="tools"><button id="force-full">完整时间</button><button id="force-auto">纵轴自动</button><span class="hint">滚轮：时间缩放 · Shift+滚轮：纵轴 · 拖动：平移</span></div>
 <canvas id="force" aria-label="力曲线"></canvas><div id="thresholds" class="hint"></div><div id="deadband" class="hint"></div><div id="force-view" class="hint"></div></section>
 <section class="panel" id="panel-velocity"><div class="heading"><h2>TCP 速度 · mm/s</h2><div class="tools"><button id="velocity-expand">放大显示</button><button id="velocity-reset">恢复视图</button></div></div>

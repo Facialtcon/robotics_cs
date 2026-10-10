@@ -93,16 +93,44 @@ def write_html_replay(trace, output_dir):
         [trace.time[i], *trace.xy_mm[i], *trace.force[i], int(trace.phase[i]), states.index(trace.state[i]),
          trace.unfiltered_force[i, 2]] for i in range(len(trace.time))
     ]
+    single_point = 'single_point_experiment' in trace.config
+    first_contact = collision_details(trace)
+    result_path = trace.run_dir/'single_point_result.json'
+    if single_point and result_path.exists():
+        result = json.loads(result_path.read_text(encoding='utf-8'))
+        origin = float(trace.monotonic[0])
+        # Use the runtime's last threshold-free observation, not a row-number
+        # join or the actual sample that accompanies the threshold force read.
+        for field, prefix in [('actual_before_threshold', 'actual_before'),
+                              ('actual_at_threshold', 'actual_at_threshold')]:
+            observation = result.get(field)
+            first_contact[prefix+'_time_sec'] = (observation['timestamp']-origin if observation else None)
+            first_contact[prefix+'_xy_mm_s'] = (planar_speed(np.array([observation['velocity']]))[0]
+                                                if observation else None)
+        first_contact['braking_request_time_sec'] = (result['braking_request_sec']-origin
+            if result.get('braking_request_sec') is not None else None)
+        first_contact['actual_stop_time_sec'] = (result['actual_standstill_sec']-origin
+            if result.get('actual_standstill_sec') is not None else None)
+        first_contact['peak_filtered_fxy_N'] = result.get('peak_filtered_fxy_N')
+    wrench = []
+    if single_point:
+        with (trace.run_dir/'samples.csv').open(newline='', encoding='utf-8') as handle:
+            for row in csv.DictReader(handle):
+                stamp = float(row['monotonic_sec'])-float(trace.monotonic[0])
+                if stamp >= 0:
+                    wrench.append([stamp, *[float(row.get(key) or 'nan') for key in
+                        ('filtered_force_base_fz', 'force_base_tx', 'force_base_ty', 'force_base_tz')]])
     payload = dict(
         name=trace.run_dir.name, duration=trace.duration, samples=sample_rows, states=states,
         actual=np.column_stack((trace.actual_time, planar_speed(trace.actual_velocity))),
         commands=np.column_stack((trace.command_time, planar_speed(trace.command_velocity))),
         events=trace.events, target=trace.target_mm, stop=trace.stop_position_mm,
-        first_contact=collision_details(trace), sample_count=len(trace.time),
+        first_contact=first_contact, sample_count=len(trace.time),
         threshold=trace.config.get('policy', {}).get('contact_threshold'),
         lost_threshold=trace.config.get('continuous_tracking', {}).get('contact_lost_threshold'),
         deadband=deadband_definition(trace),
         synthetic=trace.config.get('experiment', {}).get('kind') == 'synthetic_demo',
+        single_point=single_point, wrench=wrench,
     )
     encoded = json.dumps(_clean(payload), ensure_ascii=False, separators=(',', ':'), allow_nan=False)
     # The JSON script element must not be closable by a recorded metadata string.
