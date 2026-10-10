@@ -9,7 +9,8 @@ import subprocess
 import numpy as np
 import pytest
 
-from app.single_point_config import load_settings, prepare, check_segment, validate_speed, validate_settings
+from app.single_point_config import (PROJECT_PARAMETERS, load_settings, prepare, check_segment,
+                                     validate_speed, validate_settings)
 from app.single_point_runtime import FreshForceReader, SinglePointTrial
 from calibration.single_point import (approach_direction, load_calibration, save_group, set_reference,
                                       validate_group, write_calibration)
@@ -23,7 +24,65 @@ from simulation.single_point import OfflineController, OfflineForceReader, demo_
 
 @pytest.fixture
 def settings():
-    return load_settings(ROOT/'single_point_experiment.yaml')
+    # Small independent test scenarios; production defaults are checked below.
+    values = load_settings(ROOT/'single_point_experiment.yaml')
+    values.update(inherit_project_parameters=False, speed_max_mps=.002, speed_default_mps=.0005,
+        speed_presets_mps=[.0002, .0005, .001], max_search_distance_m=.02, max_approach_time_sec=60.,
+        max_force_age_sec=.06, max_cycle_sec=.08, settle_hold_sec=.1, stop_timeout_sec=2.,
+        start_position_tolerance_m=.0002, fixed_z_tolerance_m=.0002, watchdog_frequency_hz=10.,
+        require_watchdog=True, workspace_enabled=True, workspace_limits=None, return_lift_distance_m=None,
+        return_speed_mps=.0005, return_vertical_speed_mps=.0005, speed_acceleration_mps2=.002,
+        stop_deceleration_mps2=.002)
+    return values
+
+
+def test_default_parameters_copy_original_configuration(config):
+    original = deepcopy(config)
+    values = load_settings(ROOT/'single_point_experiment.yaml', config)
+    for key, (section, field) in PROJECT_PARAMETERS.items():
+        assert values[key] == config[section][field], key
+    assert values['speed_default_mps'] == .018
+    assert values['speed_max_mps'] == .030
+    assert values['speed_presets_mps'] == [.006, .012, .018]
+    assert values['workspace_enabled'] is False and values['require_watchdog'] is False
+    assert config == original
+    config['continuous_tracking']['watchdog_frequency_hz'] = 1000.
+    # An unused watchdog frequency must not impose a new cycle constraint.
+    assert load_settings(ROOT/'single_point_experiment.yaml', config)['watchdog_frequency_hz'] == 1000.
+
+
+def test_parameter_inheritance_uses_selected_config_and_keeps_speed_range(config):
+    config['continuous_tracking']['search_speed'] = .009
+    config['robot']['max_tcp_speed'] = .020
+    config['safe_return']['return_speed'] = .018
+    config['policy']['search_speed'] = .009
+    config['sensor']['serial_port'] = 'fake-selected-port'
+    values = load_settings(ROOT/'single_point_experiment.yaml', config)
+    assert values['speed_default_mps'] == .009 and values['speed_max_mps'] == .020
+    assert validate_speed(.018, values) == .018
+    with pytest.raises(ValueError): validate_speed(.021, values)
+    effective, rc, _, _ = prepare(config, values, demo_calibration(config), 'A', execute=False)
+    assert effective['sensor']['serial_port'] == 'fake-selected-port'
+    assert effective['tcp'] == config['tcp'] and effective['robot'] == config['robot']
+    assert effective['workspace'] == config['workspace']
+    assert not rc['continuous_require_watchdog']
+
+
+def test_show_config_is_offline_and_uses_original_defaults(capsys):
+    assert main(['--show-config']) == 0
+    output = capsys.readouterr().out
+    assert '"speed_default_mps": 0.018' in output
+    assert '"speed_max_mps": 0.03' in output
+
+
+def test_inherited_return_and_workspace_follow_original_switch(config):
+    values = load_settings(ROOT/'single_point_experiment.yaml', config)
+    pose = [.39, 0, .2, np.pi, 0, 0]
+    effective, segments = plan_return(config, values, pose, [.4, 0, .2, np.pi, 0, 0])
+    assert not effective['workspace']['enabled']
+    assert segments[0][1][2] == pytest.approx(.23)
+    assert segments[0][2] == config['safe_return']['return_vertical_speed']
+    assert segments[2][2] == config['safe_return']['return_speed']
 
 
 def test_multiple_p0_roundtrip_and_fixed_reference(tmp_path, config):

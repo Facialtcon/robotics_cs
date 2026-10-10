@@ -14,22 +14,79 @@
 # 离线查看菜单；默认不连接硬件
 .venv/bin/python run_single_point_contact.py
 # 已有标定的离线模拟，可选择 B、C 等；--speed 单位 m/s
-.venv/bin/python run_single_point_contact.py --simulate --group B --speed 0.0005
+.venv/bin/python run_single_point_contact.py --simulate --group B --speed 0.018
 # 真机交互菜单，仅由现场操作人员主动运行
 .venv/bin/python run_single_point_contact.py --execute
 # 真机选择已有 P0，不自动移到该 P0，仍需多次新的 Enter 确认
-.venv/bin/python run_single_point_contact.py --execute --group A --speed 0.0005
+.venv/bin/python run_single_point_contact.py --execute --group A --speed 0.018
 ```
 
 `--config`、`--settings`、`--calibration`、`--output` 可指定独立文件及输出根目录。
 每次运行新建 `data/real/single_point/run_*` 或 `data/simulation/single_point/run_*`。
 模拟为简单刚性接触力和加速度有限的 TCP 模型，用于软件验证，不能证明真实碰撞安全。
 
+## 沿用原工程的运行参数
+
+`single_point_experiment.yaml` 默认启用 `inherit_project_parameters: true`。
+程序加载 `--config` 指定的原工程配置，直接复制有对应项的运行参数；修改原配置后单点入口自动跟随。
+机器人 IP、PX6D 串口/采集参数、TCP、坐标变换、卡尔曼滤波、加速度、制动减速度、力/力矩限制本来就直接读取原配置。
+现在速度、搜索预算、停稳、时间限制、工作空间开关和返回参数也沿用原值：
+
+| 参数 | 当前原值 |
+|---|---|
+| 默认接近速度 / TCP 上限 | 18 / 30 mm/s |
+| 速度预设 | 6 / 12 / 18 mm/s |
+| 接触阈值 | 1 N |
+| 最大搜索距离 / 接近时间 | 100 mm / 110 s |
+| 控制频率 / 周期预算 | 100 Hz / 0.03 s |
+| 停稳保持 / 确认预算 | 0.08 / 1 s |
+| P0 位置 / Z 容差 | 1 / 1 mm |
+| 返回水平 / 垂直速度 | 27 / 18 mm/s |
+| 返回抬升距离 | 30 mm，仍需每次核验整条路径 |
+| 工作空间 / 自定义看门狗 | 与原配置相同，当前均关闭 |
+
+显示最终解析的参数，不连接设备：
+
+```bash
+.venv/bin/python run_single_point_contact.py --config config.yaml --show-config
+```
+
+单点实验新增且原程序没有对应项的参数仍单独保存，如接触前/停稳后的记录时间、探针直径、障碍盒和现场核验记录。
+无颗粒背景、不调用连续跟踪或恢复策略、力阈值触发停止和 Enter 确认仍按单点实验流程执行。
+复制原值不代表这些值已经针对固定刚性物体验证；真机启动仍检查现场核验记录。
+
+## 实机操作命令
+
+以下命令由操作人员在前台终端执行，不能通过管道提前输入 Enter。
+
+```bash
+cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
+
+# 标定 P_ref、添加/修改 A/B/C、选择实验组和返回 P0 均在同一个实机菜单
+.venv/bin/python run_single_point_contact.py --execute \
+  --config config.yaml --settings single_point_experiment.yaml \
+  --calibration single_point_calibration.yaml --output data
+
+# 直接选择已有 P0-A；未指定 --speed 时继承原默认接近速度
+.venv/bin/python run_single_point_contact.py --execute --group A
+
+# 选择 B 或 C，明确指定与原程序相同的 18 mm/s
+.venv/bin/python run_single_point_contact.py --execute --group B --speed 0.018
+.venv/bin/python run_single_point_contact.py --execute --group C --speed 0.018
+
+# 本次独立实验也可以显式选择较低速度；不会改写原 config.yaml
+.venv/bin/python run_single_point_contact.py --execute --group A --speed 0.0005
+```
+
+首次先在菜单选 **1** 保存 P_ref，再反复选 **2** 添加 A/B/C；选 **5** 启动实验。
+先手动把机器人放到选定 P0，按提示确认空气零偏、速度和开始接近。运行时 Q/Esc/Ctrl+C 停止。
+返回指定 P0：重新进入上述实机菜单，选 **6**，选组、核验展示路径、填写依据，再按 Enter；选择组本身不运动。
+
 ## 多组 P0 标定
 
-1. 在 `single_point_experiment.yaml` 填写现场检查后的独立 Base XYZ `workspace_limits`。
-   填写 `site_validation_note`，记录低速、阈值、制动距离、工作空间和工具扫掠检查。
-   配置中初始值只是待验证的低速起点：默认 0.5 mm/s，范围 0.1–2 mm/s；不使用 18 mm/s。
+1. 在 `single_point_experiment.yaml` 填写 `site_validation_note`，记录本次速度、阈值、制动距离和路径检查。
+   共享参数继承原 `config.yaml`；当前默认速度 18 mm/s，允许输入范围 0.1–30 mm/s。
+   若原配置启用了工作空间，沿用其 Base XYZ 边界；原配置关闭时也保持关闭，但仍检查距离、时间和已配置障碍盒。
 2. 运行真机菜单，选择 **1**。手动将 TCP 移到几何参考位置，探针竖直向下、停稳，
    按 Enter 后仅通过 Receive 和只读 TCP 查询保存 P_ref、完整参考姿态、时间、机器人及 TCP 配置。
    不激活 Control，不自动运动到 P_ref。
@@ -59,10 +116,10 @@
 即使未到 P_ref 也正常触发；经过 P_ref 不会停止或判成功。
 达到距离或时间上限但没有力阈值时报告 `no_contact`，不报告成功接触。
 
-持续检查固定 Z/姿态、路径、实际速度、独立工作空间、原有原始及处理后力/力矩硬限制。
+持续检查固定 Z/姿态、路径、实际速度、启用时的工作空间、原有原始及处理后力/力矩硬限制。
 PX6D 失效、非有限数据、请求超时、过期观测、RTDE 异常、人工 Q/Esc/Ctrl+C 都请求停止。
 共享控制器的发送前回调在额外 RTDE 读取之后再检查力数据有效期和搜索距离。
-机器人看门狗约束主机失联；保留机器人自身保护。停止指令和实际停车分开记录，
+自定义看门狗的开关和频率沿用原配置；启用时约束主机失联，保留机器人自身保护。停止指令和实际停车分开记录，
 制动后保持读取 TCP 和有效力数据，复用控制器的新鲜 RTDE 包及低速保持确认。
 力传感器失效时制动阶段继续记录 TCP，力列记为缺失，绝不重用旧力冒充新样本。
 停稳后继续记录 0.5 秒；停稳被撤销或未确认不会报告成功。
@@ -70,8 +127,8 @@ PX6D 失效、非有限数据、请求超时、过期观测、RTDE 异常、人�
 ## 返回 P0
 
 菜单 **6** 复用 `SafeReturnExecutor` 和 `return_trajectory`。
-默认 `return_lift_distance_m: null`，**拒绝自动返回**；不会假设原有 30 mm 抬升安全。
-现场核验后才能设置所需抬升距离。每次展示实际起点、抬升、姿态对齐、高位转移、下降的完整路径，
+默认抬升距离沿用原 `safe_return.return_lift_distance`，当前为 30 mm；数值不作为路径已经安全的证明。
+每次仍需现场核验，展示实际起点、抬升、姿态对齐、高位转移、下降的完整路径，
 校验工作空间和障碍盒，再要求填写当前路径的现场核验依据及新的 Enter 运动确认。
 依据为空、路径不可用或机器人在确认期间位姿改变都会拒绝返回，应手动移动到安全位置。
 路径依据保存到本次独立运行目录的 `return_plan.json`。没有改变原 Reset 或已有返回配置文件。

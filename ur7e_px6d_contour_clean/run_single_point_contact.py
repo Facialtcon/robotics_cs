@@ -64,7 +64,8 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
     effective, robot_config, pose, direction = prepare(project, settings, calibration, name, execute=execute)
     show_group(calibration, name, settings, speed)
     if execute:
-        URRTDEController.verified_watchdog_contract()  # inspect installed SDK; no connection
+        if settings.get('require_watchdog', True):
+            URRTDEController.verified_watchdog_contract()  # inspect installed SDK; no connection
         if not confirm_enter('确认选择该 P0；开始检查设备。选择不会自动返回 P0，需已手动放置到 P0'):
             return None
     controller = reader = logger = trial = None
@@ -183,9 +184,11 @@ def plan_return(project, settings, current, target):
     if settings['return_lift_distance_m'] is None:
         raise RobotError('自动返回未核验：请配置现场确认的抬升距离，不能假设 30 mm 安全；请手动移到安全位置')
     effective = deepcopy(project)
-    effective['workspace'] = dict(enabled=True, limits=deepcopy(settings['workspace_limits']))
+    effective['workspace'] = dict(enabled=settings.get('workspace_enabled', True),
+                                 limits=deepcopy(settings['workspace_limits'] or project['workspace']['limits']))
     effective['safe_return'].update(return_lift_distance=settings['return_lift_distance_m'],
-        return_speed=settings['return_speed_mps'], return_vertical_speed=settings['return_speed_mps'])
+        return_speed=settings['return_speed_mps'],
+        return_vertical_speed=settings.get('return_vertical_speed_mps', settings['return_speed_mps']))
     segments = return_trajectory(effective, current, target)
     previous = np.asarray(current)[:3]
     for _, point, _ in segments:
@@ -306,9 +309,17 @@ def main(argv=None):
     parser.add_argument('--calibration', type=Path, default=ROOT/'single_point_calibration.yaml')
     parser.add_argument('--group', help='saved P0 name, e.g. A')
     parser.add_argument('--speed', type=float, help='nominal speed in m/s; hardware prompt allows adjustment')
+    parser.add_argument('--show-config', action='store_true', help='print resolved original and experiment parameters offline')
     parser.add_argument('--output', type=Path, default=ROOT/'data')
     args = parser.parse_args(argv)
-    project, settings = load_config(args.config), load_settings(args.settings)
+    project = load_config(args.config)
+    settings = load_settings(args.settings, project)
+    if args.show_config:
+        print(json.dumps(dict(config_source=str(args.config.resolve()),
+            robot=project['robot'], sensor=project['sensor'], tcp=project['tcp'],
+            workspace=project['workspace'], safe_return=project['safe_return'],
+            single_point_experiment=settings), ensure_ascii=False, indent=2))
+        return 0
     print(LIMITATION)
     if args.simulate and not args.group:
         from simulation.single_point import demo_calibration

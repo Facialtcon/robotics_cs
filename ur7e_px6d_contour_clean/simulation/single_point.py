@@ -23,7 +23,8 @@ class OfflineController:
     def __init__(self, pose, settings):
         self.s = settings
         self.model = SimulatedRobot(pose[:2], 1/settings['control_rate_hz'],
-            dict(x_min=-2., x_max=2., y_min=-2., y_max=2.), acceleration_limit=.002)
+            dict(x_min=-2., x_max=2., y_min=-2., y_max=2.),
+            acceleration_limit=settings.get('speed_acceleration_mps2', .002))
         self.model.pose[:] = pose
         self.model.record_commands = True
         self.command_records = self.model.command_records
@@ -38,6 +39,8 @@ class OfflineController:
     def sleep(self, duration):
         # Fixed simulation ticks, with acceleration-limited motion and braking.
         self.model.dt = max(duration, 1/self.s['control_rate_hz'])
+        if self.stop_report is not None:
+            self.model.acceleration_limit = self.s.get('stop_deceleration_mps2', .002)
         direction = self.desired if np.linalg.norm(self.desired) else np.array([1., 0.])
         # Physics integration doesn't invent extra controller-send records.
         self.model.record_commands = False

@@ -8,7 +8,46 @@ import yaml
 
 from calibration.single_point import validate_group, vector
 from config.loader import runtime_robot_config
-from robot.rtde_controller import WorkspaceGuard
+
+# Copy values from the selected original config at load time, so the two entry
+# points cannot silently drift as the operator updates hardware parameters.
+PROJECT_PARAMETERS = {
+    'speed_max_mps': ('robot', 'max_tcp_speed'),
+    'speed_default_mps': ('continuous_tracking', 'search_speed'),
+    'contact_threshold_N': ('policy', 'contact_threshold'),
+    'max_search_distance_m': ('continuous_tracking', 'search_max_distance'),
+    'max_approach_time_sec': ('continuous_tracking', 'search_max_time_sec'),
+    'control_rate_hz': ('policy', 'control_rate_hz'),
+    'max_force_age_sec': ('sensor', 'timeout_sec'),
+    'max_robot_age_sec': ('continuous_tracking', 'max_observation_age_sec'),
+    'max_cycle_sec': ('continuous_tracking', 'cycle_timeout_sec'),
+    'settle_speed_mps': ('continuous_tracking', 'settle_speed_mps'),
+    'settle_hold_sec': ('continuous_tracking', 'settle_hold_sec'),
+    'stop_timeout_sec': ('continuous_tracking', 'confirmation_timeout_sec'),
+    'start_position_tolerance_m': ('continuous_tracking', 'startup_position_tolerance'),
+    'fixed_z_tolerance_m': ('robot', 'fixed_z_tolerance'),
+    'orientation_tolerance_rad': ('robot', 'orientation_tolerance_rad'),
+    'path_clearance_m': ('continuous_tracking', 'boundary_margin'),
+    'watchdog_frequency_hz': ('continuous_tracking', 'watchdog_frequency_hz'),
+    'require_watchdog': ('continuous_tracking', 'continuous_require_watchdog'),
+    'workspace_enabled': ('workspace', 'enabled'),
+    'workspace_limits': ('workspace', 'limits'),
+    'return_lift_distance_m': ('safe_return', 'return_lift_distance'),
+    'return_speed_mps': ('safe_return', 'return_speed'),
+    'return_vertical_speed_mps': ('safe_return', 'return_vertical_speed'),
+    'speed_acceleration_mps2': ('robot', 'speed_acceleration'),
+    'stop_deceleration_mps2': ('robot', 'stop_deceleration'),
+}
+
+
+def inherit_parameters(settings, project):
+    result = deepcopy(settings)
+    if result.get('inherit_project_parameters', False):
+        for key, (section, field) in PROJECT_PARAMETERS.items():
+            result[key] = deepcopy(project[section][field])
+        result['speed_presets_mps'] = sorted(set(float(project['policy'][key])
+            for key in ('probe_speed', 'tangent_speed', 'search_speed')))
+    return result
 
 
 def validate_speed(speed, settings):
@@ -32,36 +71,43 @@ def validate_settings(settings):
             raise ValueError(f'{key} must be finite and positive')
     if settings['precontact_record_sec'] < 1:
         raise ValueError('stationary precontact recording must last at least one second')
-    if settings['speed_min_mps'] > settings['speed_max_mps'] or settings['speed_max_mps'] > .002:
-        raise ValueError('rigid-object approach speed range must stay within (0, 2 mm/s]')
+    if settings['speed_min_mps'] > settings['speed_max_mps']:
+        raise ValueError('minimum speed must not exceed maximum speed')
     validate_speed(settings['speed_default_mps'], settings)
-    validate_speed(settings['return_speed_mps'], settings)
+    for key in ('return_speed_mps', 'return_vertical_speed_mps'):
+        speed = float(settings.get(key, settings['return_speed_mps']))
+        if not np.isfinite(speed) or not 0 < speed <= settings['speed_max_mps']:
+            raise ValueError(f'{key} must be positive and within the TCP speed limit')
     for speed in settings['speed_presets_mps']:
         validate_speed(speed, settings)
     if settings['unloaded_max_fxy_N'] >= settings['contact_threshold_N']:
         raise ValueError('unloaded force must be below contact threshold')
     if not np.isclose(settings['probe_diameter_m'], .003, atol=1e-12, rtol=0):
         raise ValueError('this experiment uses the 3 mm probe')
-    if settings['max_cycle_sec'] >= 1/settings['watchdog_frequency_hz']:
+    if settings.get('require_watchdog', True) and settings['max_cycle_sec'] >= 1/settings['watchdog_frequency_hz']:
         raise ValueError('cycle budget must be shorter than watchdog deadline')
     return settings
 
 
-def load_settings(path):
+def load_settings(path, project=None):
     data = yaml.safe_load(Path(path).read_text(encoding='utf-8'))
     if not isinstance(data, dict):
         raise ValueError('single point settings must be a mapping')
-    return validate_settings(data)
+    if project is None and data.get('inherit_project_parameters', False):
+        from config.loader import load_config
+        project = load_config(Path(path).resolve().parent/'config.yaml')
+    return validate_settings(inherit_parameters(data, project))
 
 
 def check_segment(start, end, settings):
     """Swept TCP proxy with probe-radius clearance; operator must check whole tool."""
     start, end = vector(start, 3, 'path start'), vector(end, 3, 'path end')
     bounds = settings['workspace_limits']
-    if not isinstance(bounds, dict):
-        raise ValueError('independent workspace_limits must be configured before execution')
+    enabled = settings.get('workspace_enabled', True)
+    if enabled and not isinstance(bounds, dict):
+        raise ValueError('workspace_limits must be configured when workspace checking is enabled')
     pad = settings['probe_diameter_m']/2 + settings['path_clearance_m']
-    for i, axis in enumerate('xyz'):
+    for i, axis in enumerate('xyz' if enabled else ''):
         lo, hi = float(bounds[axis+'_min']), float(bounds[axis+'_max'])
         if not np.isfinite([lo, hi]).all() or lo+pad >= hi-pad:
             raise ValueError('invalid independent workspace')
@@ -105,11 +151,12 @@ def prepare(project, settings, calibration, name, *, execute):
     effective['experiment'] = dict(kind='single_point_contact' if execute else 'synthetic_demo',
                                    title='Multi-Directional Single-Point Contact Experiment', p0=name)
     if execute and not settings['site_validation_note'].strip():
-        raise ValueError('on-site validation of low speed, threshold, stopping clearance and workspace is required')
+        raise ValueError('on-site validation of selected speed, threshold, stopping clearance and workspace is required')
     if settings['contact_threshold_N'] >= project['policy']['safety_force_threshold']:
         raise ValueError('contact threshold must be below the existing hard processed-force limit')
-    if settings['workspace_limits'] is not None:
-        effective['workspace'] = dict(enabled=True, limits=deepcopy(settings['workspace_limits']))
+    if settings['workspace_limits'] is not None or not settings.get('workspace_enabled', True):
+        effective['workspace'] = dict(enabled=settings.get('workspace_enabled', True),
+                                     limits=deepcopy(settings['workspace_limits'] or project['workspace']['limits']))
         end = pose[:3].copy()
         end[:2] += direction * (settings['max_search_distance_m']+settings['braking_margin_m'])
         check_segment(pose[:3], end, settings)
@@ -122,6 +169,7 @@ def prepare(project, settings, calibration, name, *, execute):
         confirmation_timeout_sec=settings['stop_timeout_sec'], observation_period_sec=1/settings['control_rate_hz'],
         # These shared execution keys enable strict freshness/watchdog guards only.
         # No continuous policy, phase envelope or recovery strategy is loaded.
-        continuous_require_watchdog=execute, continuous_sample_age_sec=settings['max_robot_age_sec'],
+        continuous_require_watchdog=execute and settings.get('require_watchdog', True),
+        continuous_sample_age_sec=settings['max_robot_age_sec'],
         continuous_settle_speed_mps=settings['settle_speed_mps'])
     return effective, robot_config, pose, direction
