@@ -22,6 +22,32 @@ const eventLabelMap=new Map(events.map(e=>{
     names[e.kind]+(n>1?' '+n:'')];
 }));
 const eventLabel=e=>eventLabelMap.get(e)||names[e.kind];
+const eventGroups={first:['FIRST_THRESHOLD_STOP_REQUEST'],contact:['FIRST_CONTACT'],
+  tracking:['TRACKING_ENTERED'],lost:['CONTACT_LOST'],recovered:['REACQUIRED'],
+  stop:['EXECUTION_STOP_CONFIRMED','USER_STOP','BUDGET_STOP']};
+const eventVisibility={kinds:new Set(['lost','recovered']),text:true,lines:true,markers:true};
+const eventEnabled=e=>Object.entries(eventGroups).some(([key,kinds])=>eventVisibility.kinds.has(key)&&kinds.includes(e.kind));
+const eventKey=()=>JSON.stringify([[...eventVisibility.kinds].sort(),eventVisibility.text,eventVisibility.lines,eventVisibility.markers]);
+const eventInputs={};
+function updateEventVisibility() {
+  for(const [key,input] of Object.entries(eventInputs))input.checked=key in eventGroups?
+    eventVisibility.kinds.has(key):eventVisibility[key];
+  // Graph snapshots include events; invalidate them before redrawing at the same playback time.
+  delete cache.force;delete cache.velocity;dirty=true;render();
+}
+function eventOptions(id,options,isKind) {
+  for(const [key,name] of options){
+    const label=document.createElement('label'),input=document.createElement('input');
+    input.type='checkbox';input.setAttribute('aria-label',name);eventInputs[key]=input;
+    input.checked=isKind?eventVisibility.kinds.has(key):eventVisibility[key];
+    input.onchange=()=>{
+      if(isKind)input.checked?eventVisibility.kinds.add(key):eventVisibility.kinds.delete(key);
+      else eventVisibility[key]=input.checked;
+      updateEventVisibility();
+    };
+    label.append(input,document.createTextNode(name));$(id).append(label);
+  }
+}
 const duration = Math.max(.0001, D.duration);
 let elapsed = 0, playing = false, rate = .25, lastWall = performance.now();
 let dirty = true, lastRender = -Infinity, lostIndex = 0;
@@ -99,6 +125,14 @@ function legend(id) {
   }
 }
 legend('force');legend('velocity');
+eventOptions('event-kinds',[['first','首次接触'],['contact','接触确认'],['tracking','进入跟踪'],
+  ['lost','丢失接触'],['recovered','恢复接触'],['stop','停止事件']],true);
+eventOptions('event-layers',[['text','事件文字'],['lines','事件竖线'],['markers','TCP轨迹上的事件标记']],false);
+for(const [id,mode] of [['events-all','all'],['events-none','none'],['events-default','default']])$(id).onclick=()=>{
+  eventVisibility.kinds=new Set(mode==='all'?Object.keys(eventGroups):mode==='default'?['lost','recovered']:[]);
+  for(const layer of ['text','lines','markers'])eventVisibility[layer]=mode!=='none';
+  updateEventVisibility();
+};
 const bandLegend=document.createElement('span'),bandSwatch=document.createElement('i');
 bandSwatch.className='swatch band';
 bandLegend.append(bandSwatch,document.createTextNode(D.deadband.enabled?
@@ -196,9 +230,11 @@ function graphGeometry(id,w,h,series) {
   geometry[id]=g;return g;
 }
 function eventLabels(c,g) {
+  if(!eventVisibility.text)return [];
   const ends=[g.l-8,g.l-8,g.l-8];
   const positions=[];
   for(const e of events){
+    if(!eventEnabled(e))continue;
     if(e.time<g.xlim[0]||e.time>g.xlim[1])continue;
     const label=eventLabel(e),width=c.measureText(label).width,px=g.x(e.time);
     const left=clamp(px-width/2,g.l,g.w-g.r-width);
@@ -206,7 +242,7 @@ function eventLabels(c,g) {
     if(lane<0)continue; // All events retain their line, tooltip and event-list entry.
     const baseline=13+lane*16;
     c.fillStyle=eventColor(e.kind);c.fillText(label,left,baseline);ends[lane]=left+width;
-    line(c,[[px,baseline+3],[px,g.t]],eventColor(e.kind),.7);
+    if(eventVisibility.lines)line(c,[[px,baseline+3],[px,g.t]],eventColor(e.kind),.7);
     positions.push({left,right:left+width,top:baseline-12,bottom:baseline,event:e});
   }
   return positions;
@@ -224,7 +260,7 @@ function deadband(c,g) {
 }
 function graph(id) {
   const {c,w,h}=surface(id),series=seriesFor(id);
-  const key=JSON.stringify([w,h,window.devicePixelRatio,views[id],series.map(s=>s.key)]);
+  const key=JSON.stringify([w,h,window.devicePixelRatio,views[id],series.map(s=>s.key),eventKey()]);
   let g;
   if(cache[id]&&cache[id].key===key){g=cache[id].geometry;c.drawImage(cache[id].canvas,0,0,w,h);}
   else{
@@ -250,7 +286,7 @@ function graph(id) {
       line(c,path,s.color,s.key==='raw'?.8:1.35,s.step?[6,4]:[]);
     }
     c.globalAlpha=1;
-    for(const e of events)if(e.time>=g.xlim[0]&&e.time<=g.xlim[1]){
+    for(const e of events)if(eventVisibility.lines&&eventEnabled(e)&&e.time>=g.xlim[0]&&e.time<=g.xlim[1]){
       line(c,[[g.x(e.time),g.t],[g.x(e.time),h-g.b]],eventColor(e.kind),.8,[2,4]);
     }
     c.restore();const labels=eventLabels(c,g);
@@ -276,7 +312,8 @@ function markerLabels(c,g,markers) {
   const boxes=[];
   for(const m of markers){
     const [x,y]=m.point;if(x<g.l||x>g.w-g.r||y<g.t||y>g.h-g.b)continue;
-    dot(c,m.point,m.color);
+    if(m.marker!==false)dot(c,m.point,m.color);
+    if(m.text===false)continue;
     const width=c.measureText(m.label).width;
     for(const [dx,dy] of [[8,-8],[8,16],[-width-8,-8],[-width-8,16],[8,-25],[8,32]]){
       const left=clamp(x+dx,g.l+2,g.w-g.r-width-2),bottom=clamp(y+dy,g.t+14,g.h-g.b-2);
@@ -323,14 +360,16 @@ function drawXY(row,actual) {
   clip(c,g);
   const markers=[{point:project(S[0].slice(1,3)),color:'#26384d',label:'起点'},
     {point:project(S[S.length-1].slice(1,3)),color:'#26384d',label:'最终记录'}];
-  if(D.stop)markers.push({point:project(D.stop),color:'#b72a33',label:'停止确认'});
+  if(D.stop&&eventVisibility.kinds.has('stop')&&(eventVisibility.markers||eventVisibility.text))
+    markers.push({point:project(D.stop),color:'#b72a33',label:'停止确认',marker:eventVisibility.markers,text:eventVisibility.text});
   const counts={CONTACT_LOST:0,REACQUIRED:0};
   for(const e of events){
     if(e.kind in counts)counts[e.kind]++;
+    if(!eventEnabled(e)||(!eventVisibility.markers&&!eventVisibility.text))continue;
     if(e.time>elapsed||!e.xy_mm.every(finite))continue;
-    if(e.kind==='FIRST_CONTACT'&&events.some(v=>v.kind==='FIRST_THRESHOLD_STOP_REQUEST'))continue;
     markers.push({point:project(e.xy_mm),color:eventColor(e.kind),
-      label:e.kind in counts?(e.kind==='CONTACT_LOST'?'丢':'恢复')+counts[e.kind]:eventLabel(e)});
+      label:e.kind in counts?(e.kind==='CONTACT_LOST'?'丢':'恢复')+counts[e.kind]:eventLabel(e),
+      marker:eventVisibility.markers,text:eventVisibility.text});
   }
   markerLabels(c,g,markers);
   const p=project(row.slice(1,3));dot(c,p,'#111827',5);
@@ -507,11 +546,11 @@ for(const id of ['xy','force','velocity','direction']){
       if(p[0]<g.l||p[0]>g.w-g.r||p[1]<0||p[1]>g.h-g.b){delete hover[id];$('tooltip').hidden=true;dirty=true;return;}
       const t=g.xlim[0]+clamp((p[0]-g.l)/(g.w-g.l-g.r),0,1)*(g.xlim[1]-g.xlim[0]);
       hover[id]=t;let text=valuesText(t,id);
-      const nearby=events.filter(v=>Math.abs(g.x(v.time)-p[0])<8);
+      const nearby=events.filter(v=>eventEnabled(v)&&(eventVisibility.text||eventVisibility.lines)&&Math.abs(g.x(v.time)-p[0])<8);
       if(nearby.length)text+='\n'+nearby.map(v=>eventLabel(v)+' '+fmt(v.time,6)+' s').join('\n');
       tooltip(e,text);dirty=true;
     }else if(id==='xy'){
-      const nearby=events.filter(v=>v.xy_mm.every(finite)&&Math.hypot(g.x(v.xy_mm[0])-p[0],g.y(v.xy_mm[1])-p[1])<9);
+      const nearby=events.filter(v=>eventEnabled(v)&&(eventVisibility.text||eventVisibility.markers)&&v.time<=elapsed&&v.xy_mm.every(finite)&&Math.hypot(g.x(v.xy_mm[0])-p[0],g.y(v.xy_mm[1])-p[1])<9);
       if(nearby.length)tooltip(e,nearby.map(v=>eventLabel(v)+' '+fmt(v.time,6)+' s').join('\n'));else $('tooltip').hidden=true;
     }
   });
@@ -562,5 +601,5 @@ $('note').textContent='内嵌全部 '+D.sample_count+' 帧和原始发送时间�
   '主时间轴滚轮缩放、Shift+拖动平移；完整实验时间按钮恢复全局。';
 window.addEventListener('resize',()=>dirty=true);
 render();requestAnimationFrame(frame);
-window.experimentReplay={seek,render,frame,setRate,resetView,wheelView,niceTicks,peakPoints,data:D,views,geometry,
+window.experimentReplay={seek,render,frame,setRate,resetView,wheelView,niceTicks,peakPoints,eventEnabled,eventVisibility,cache,data:D,views,geometry,
   get time(){return elapsed;},get rate(){return rate;},get playing(){return playing;}};

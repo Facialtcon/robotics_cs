@@ -23,6 +23,11 @@ canvas{display:block;width:100%;height:235px;touch-action:none;cursor:crosshair}
 <label for="rate">倍速</label><input id="rate" type="range" min="0.05" max="2" step="0.01" value="0.25" aria-label="播放速度"><output id="rate-value">0.25x</output>
 <input id="time" type="range" min="0" step="0.0001" value="0" aria-label="实验时间"><output id="clock"></output>
 <button id="contact">首次接触放大</button><button id="lost">丢边放大</button><button id="full">完整实验时间</button></div>
+<details class="controls"><summary>事件显示选项</summary>
+<div id="event-kinds" class="legend" aria-label="事件类型"></div>
+<div id="event-layers" class="legend" aria-label="事件绘图元素"></div>
+<div class="tools"><button id="events-all">全部显示</button><button id="events-none">全部隐藏</button><button id="events-default">恢复默认显示</button></div>
+<span class="hint">默认只显示丢失／恢复接触；显示开关不影响事件跳转和实验数据。</span></details>
 <div class="grid"><div class="column">
 <section class="panel trajectory" id="panel-xy"><div class="heading"><h2>TCP 实际轨迹 · Base XY 等比例</h2><div class="tools"><button id="xy-expand">放大显示</button><button id="xy-reset">恢复视图</button></div></div>
 <div class="tools"><button id="xy-full">完整轨迹</button><button id="xy-contact">接触区域</button><span class="hint">滚轮缩放 · 拖动平移</span></div>
