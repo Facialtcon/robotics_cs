@@ -1,8 +1,25 @@
 schema_version: 1
-# Intentionally empty: capture one P_ref and real P0 poses through the menu.
-P_ref: null
-reference_tcp_pose: null
-reference_captured_at: null
-robot_ip: null
-active_tcp_offset: null
+P_ref:
+- 0.6803668212501688
+- 0.11344128149546825
+- -0.0049538270688449515
+reference_tcp_pose:
+- 0.6803668212501688
+- 0.11344128149546825
+- -0.0049538270688449515
+- -1.6889593374431242
+- 2.572510860719506
+- -0.07022958950511034
+reference_captured_at:
+  timestamp_utc: '2026-10-10T12:46:17.129437+00:00'
+  timestamp_local: '2026-10-10T20:46:17.129437+08:00'
+  timezone: Asia/Shanghai
+robot_ip: 192.168.1.10
+active_tcp_offset:
+- -0.0032432415690885757
+- -6.266874371089332e-05
+- 0.25230436187631455
+- 0.0
+- 0.0
+- 0.0
 groups: {}

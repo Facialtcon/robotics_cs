@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Multi-Directional Single-Point Contact Experiment: offline by default."""
 import argparse
-from copy import deepcopy
+import csv
 import json
 from pathlib import Path
 import time
@@ -9,18 +9,18 @@ import time
 import numpy as np
 
 from app.operator_input import OperatorKeyboard, confirm_enter
-from app.scan_startup import capture_stationary_bias
-from app.single_point_config import load_settings, prepare, validate_speed, check_segment
+from app.single_point_config import load_settings, prepare, validate_speed
 from app.single_point_runtime import EXTRA_FIELDS, FreshForceReader, SinglePointTrial
+from app.single_point_startup import plan_return, prepare_startup
 from calibration.single_point import (LIMITATION, load_calibration, save_group, set_reference,
-                                      validate_group, write_calibration)
+                                      validate_group, write_calibration, experiment_start_pose)
 from config.loader import load_config, runtime_robot_config
 from experiment_logging.continuous_writer import ContinuousLogWriter
 from experiment_logging.data_logger import ExperimentLogger
 from robot.rtde_controller import URRTDEController, RobotError
 from robot.rtde_controller import _orientation_distance
 from robot.tcp_identity import read_tcp_offset_readonly, tcp_offsets_match
-from safety.safe_return import (SafeReturnExecutor, PX6DForceMonitor, return_trajectory, print_return_plan)
+from safety.safe_return import (SafeReturnExecutor, PX6DForceMonitor, print_return_plan)
 from sensor.force_preprocess import WrenchPreprocessor
 from sensor.px6d_reader import PX6DReader
 
@@ -32,11 +32,13 @@ def make_reader(project):
     return PX6DReader(s['serial_port'], s['baudrate'], s['timeout_sec'], s['poll_rate_hz'], s['startup_delay_sec'])
 
 
-def show_group(data, name, settings, speed):
+def show_group(data, name, settings, speed, project):
     group = data['groups'][name]
     print(LIMITATION)
-    print(json.dumps(dict(P0=name, tcp_pose=group['tcp_pose'], direction_xy=group['direction_xy'],
-        P_ref=data['P_ref'], nominal_speed_mm_s=speed*1000, contact_threshold_N=settings['contact_threshold_N'],
+    target = experiment_start_pose(data, name, project['calibration']['probe_axis_tcp'])
+    print(json.dumps(dict(P0=name, recorded_tcp_pose=group['tcp_pose'], experiment_start_pose=target.tolist(),
+        direction_xy=group['direction_xy'], P_ref=data['reference_tcp_pose'],
+        nominal_speed_mm_s=speed*1000, contact_threshold_N=settings['contact_threshold_N'],
         max_search_distance_mm=settings['max_search_distance_m']*1000,
         stop_condition='Fxy first >= threshold; P_ref is not a motion endpoint'), ensure_ascii=False, indent=2))
 
@@ -62,18 +64,18 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
     execute = args.execute
     speed = validate_speed(settings['speed_default_mps'] if speed is None else speed, settings)
     effective, robot_config, pose, direction = prepare(project, settings, calibration, name, execute=execute)
-    show_group(calibration, name, settings, speed)
+    show_group(calibration, name, settings, speed, project)
     if execute:
         if settings.get('require_watchdog', True):
             URRTDEController.verified_watchdog_contract()  # inspect installed SDK; no connection
-        if not confirm_enter('确认选择该 P0；开始检查设备。选择不会自动返回 P0，需已手动放置到 P0'):
+        if not confirm_enter('确认选择该 P0；读取实际位姿并检查设备，随后展示自动准备路径'):
             return None
     controller = reader = logger = trial = None
     result = None
     try:
         if execute:
             controller = controller_factory(robot_config)
-            controller.connect(allow_start_away_from_fixed_pose=False)
+            controller.connect(allow_start_away_from_fixed_pose=True)
             clock, sleep = time.monotonic, time.sleep
         else:
             from simulation.single_point import OfflineController
@@ -83,9 +85,7 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
         if processor.force_transform_status['output_frame'] != 'Base':
             raise RobotError('measured Sensor to Base transform unavailable')
         if execute:
-            state = controller.wait_for_standstill()
-            if np.linalg.norm(state.pose[:3]-pose[:3]) > settings['start_position_tolerance_m']:
-                raise RobotError('current TCP is not at selected P0; manually reposition, no automatic motion')
+            controller.wait_for_standstill()
             if not tcp_offsets_match(read_tcp_offset_readonly(project['robot']['robot_ip']),
                                      project['tcp']['offset'], project['tcp']['offset_tolerance']):
                 raise RobotError('actual TCP differs from calibrated TCP')
@@ -101,36 +101,28 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
         logger.write_json('single_point_experiment_snapshot.json', settings)
         with keyboard_factory() as keyboard:
             if execute:
-                from app.scan_startup import hold_startup_confirmation
-                keyboard.on_wait = lambda: hold_startup_confirmation(effective, pose, controller)
-                if not confirm_enter('确认探针处于空气中且完全未接触固定目标，采集空气零偏', read_line=keyboard.read_line):
-                    raise KeyboardInterrupt('air zero cancelled')
-                capture_stationary_bias(effective, fresh, processor, controller,
-                    int(project['preprocessing']['baseline']['sample_count']), poll=keyboard.poll, logger=logger)
-                logger.write_json('air_zero.json', dict(bias_sensor=processor.zero_bias_sensor.tolist(),
-                    transform=processor.force_transform_status, timestamp=clock()))
+                prepare_startup(effective, settings, pose, controller, fresh, processor, logger, keyboard,
+                                confirm=confirm_enter)
                 presets = [float(v)*1000 for v in settings['speed_presets_mps']]
                 print(f'速度预设 mm/s: {presets}；允许范围 {settings["speed_min_mps"]*1000}–{settings["speed_max_mps"]*1000}')
                 choice = keyboard.read_text(f'输入名义接近速度 mm/s（Enter 使用 {speed*1000:g}）：')
                 if choice.strip():
                     speed = validate_speed(float(choice)/1000, settings)
-                show_group(calibration, name, settings, speed)
+                show_group(calibration, name, settings, speed, project)
             else:
                 processor.set_zero_bias([fresh.read_wrench()])
             effective['single_point_selected_group'] = name
             effective['single_point_nominal_speed_mps'] = speed
             logger.write_config_snapshot(effective)
             trial = SinglePointTrial(effective, settings, calibration, name, speed, controller, fresh,
-                processor, logger, poll=keyboard.poll if execute else lambda: None, clock=clock, sleep=sleep)
+                processor, logger, poll=keyboard.poll if execute else lambda: None, clock=clock, sleep=sleep,
+                preparation_complete=True)
             trial.record_precontact()
             if execute:
                 keyboard.on_wait = trial.hold_once
                 if not confirm_enter('静止数据已记录至少 1 秒；确认沿所示方向接近，Fxy 达阈值立即制动', read_line=keyboard.read_line):
                     raise KeyboardInterrupt('approach cancelled')
-                controller.activate_control(confirmed=True)
-                controller.enable_watchdog(settings['watchdog_frequency_hz'])
-                controller.kick_watchdog()
-                trial.hold_once()  # fresh stationary/force check after activation
+                trial.hold_once()  # fresh stationary/force check after final Enter
             result = trial.run()
     except BaseException as exc:
         # Never let sensor, keyboard or logging exceptions skip braking.
@@ -160,6 +152,9 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
             try:
                 if trial is not None:
                     trial._drain_commands()
+                elif controller is not None:
+                    logger.log_commands(list(controller.command_records))
+                    controller.command_records.clear()
                 result = result or dict(status='aborted', fault='no result')
                 if errors:
                     result.update(status='aborted', cleanup_errors=errors)
@@ -169,32 +164,20 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
             finally:
                 logger.close()
             if (run_dir/'samples.csv').exists():
-                from visualization.run_html import write_html_replay
-                from visualization.run_plots import load_trace, write_launcher
-                write_html_replay(load_trace(run_dir), run_dir)
-                write_launcher(run_dir)
+                # An aborted preparation can contain only safe-return samples;
+                # the shared scan replay intentionally excludes those samples.
+                with (run_dir/'samples.csv').open(encoding='utf-8', newline='') as source:
+                    has_trial_samples = any(row['current_state'] != 'RETURN_TO_START' for row in csv.DictReader(source))
+                if has_trial_samples:
+                    from visualization.run_html import write_html_replay
+                    from visualization.run_plots import load_trace, write_launcher
+                    write_html_replay(load_trace(run_dir), run_dir)
+                    write_launcher(run_dir)
             print(f'运行目录：{run_dir}')
         if errors and logger is None:
             raise RobotError('; '.join(errors))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
-
-
-def plan_return(project, settings, current, target):
-    if settings['return_lift_distance_m'] is None:
-        raise RobotError('自动返回未核验：请配置现场确认的抬升距离，不能假设 30 mm 安全；请手动移到安全位置')
-    effective = deepcopy(project)
-    effective['workspace'] = dict(enabled=settings.get('workspace_enabled', True),
-                                 limits=deepcopy(settings['workspace_limits'] or project['workspace']['limits']))
-    effective['safe_return'].update(return_lift_distance=settings['return_lift_distance_m'],
-        return_speed=settings['return_speed_mps'],
-        return_vertical_speed=settings.get('return_vertical_speed_mps', settings['return_speed_mps']))
-    segments = return_trajectory(effective, current, target)
-    previous = np.asarray(current)[:3]
-    for _, point, _ in segments:
-        check_segment(previous, point[:3], settings)
-        previous = point[:3]
-    return effective, segments
 
 
 def return_to_group(args, project, settings, data, name):
@@ -283,8 +266,8 @@ def menu(args, project, settings):
                     raise RobotError('TCP 配置自参考标定后发生变化')
                 updated = save_group(data, name, pose)
                 validate_group(updated, name, settings, project, require_review=False)
-                show_group(updated, name, settings, settings['speed_default_mps'])
-                print('请核验方向上直到最大搜索距离的路径，包括可能先接触目标其他部位。')
+                show_group(updated, name, settings, settings['speed_default_mps'], project)
+                print('原始 P0 仅取 XY；请在 P_ref.z 和统一竖直姿态下核验直到最大搜索距离的完整接近路径。')
                 note = input('路径核验依据（空值保存为未核验，不能真机运行）：').strip()
                 if note and not confirm_enter('确认已在现场核验完整接近路径'): note = ''
                 updated = save_group(data, name, pose, path_note=note,

@@ -13,7 +13,8 @@ from app.single_point_config import (PROJECT_PARAMETERS, load_settings, prepare,
                                      validate_speed, validate_settings)
 from app.single_point_runtime import FreshForceReader, SinglePointTrial
 from calibration.single_point import (approach_direction, load_calibration, save_group, set_reference,
-                                      validate_group, write_calibration)
+                                      validate_group, write_calibration, experiment_start_pose)
+from calibration.probe_alignment import probe_tilt_deg
 from core.models import Wrench
 from robot.rtde_controller import RobotError
 from run_single_point_contact import ROOT, main, plan_return
@@ -121,18 +122,63 @@ def bounded(settings):
     return settings
 
 
-def test_calibration_path_review_identity_z_and_vertical(config, settings):
+def test_calibration_path_review_and_identity(config, settings):
     data = demo_calibration(config)
     with pytest.raises(ValueError, match='reviewed'): validate_group(data, 'A', settings, config)
     group = data['groups']['A']
     data = save_group(data, 'A', group['tcp_pose'], path_note='whole probe and fixture checked', reviewed_distance_m=.02)
     validate_group(data, 'A', settings, config)
-    for key, value, message in [('tcp_pose', [.39, 0, .205, np.pi, 0, 0], 'fixed Z'),
-                                ('active_tcp_offset', [0]*6, 'TCP')]:
-        bad = deepcopy(data); bad['groups']['A'][key] = value
-        with pytest.raises(ValueError, match=message): validate_group(bad, 'A', settings, config)
-    bad = deepcopy(data); bad['reference_tcp_pose'][3:] = [0]*3; bad['groups']['A']['tcp_pose'][3:] = [0]*3
-    with pytest.raises(ValueError, match='vertically'): validate_group(bad, 'A', settings, config)
+    bad = deepcopy(data); bad['groups']['A']['active_tcp_offset'] = [0]*6
+    with pytest.raises(ValueError, match='TCP'): validate_group(bad, 'A', settings, config)
+
+
+@pytest.mark.parametrize('raw_pose', [[.39, 0, .9, np.pi, 0, 0], [.39, 0, .2, .1, .2, .3],
+                                    [.39, 0, -.4, 0, 0, 0]])
+def test_p0_arbitrary_z_and_orientation_are_valid_and_preserved(config, settings, tmp_path, raw_pose):
+    data = save_group(demo_calibration(config), 'A', raw_pose)
+    path = tmp_path/'cal.yaml'; write_calibration(path, data)
+    loaded = load_calibration(path)
+    target, direction = validate_group(loaded, 'A', settings, config, require_review=False)
+    assert loaded['groups']['A']['tcp_pose'] == raw_pose
+    assert target[2] == data['P_ref'][2]
+    np.testing.assert_allclose(direction, [1, 0])
+    assert probe_tilt_deg(target[3:], config['calibration']['probe_axis_tcp']) < 1e-5
+
+
+@pytest.mark.parametrize('axis', [[0, 0, 1], [1, .2, .7]])
+def test_groups_use_same_reference_height_and_physical_downward_orientation(config, settings, axis):
+    original_tcp = deepcopy(config['tcp'])
+    config['calibration']['probe_axis_tcp'] = axis
+    data = set_reference({}, [.4, 0, .2, .2, -.3, .7], config['robot']['robot_ip'], config['tcp']['offset'])
+    for name, raw in [('A', [.39, 0, .7, .1, .5, .9]), ('B', [.4, -.01, -.2, 0, 0, 0]),
+                      ('C', [.41, 0, .15, np.pi, 0, 0])]:
+        data = save_group(data, name, raw)
+    reference_before = deepcopy(data['reference_tcp_pose'])
+    targets = []
+    for name in data['groups']:
+        effective, rc, target, direction = prepare(config, settings, data, name, execute=False)
+        targets.append(target)
+        assert target[2] == data['P_ref'][2] == rc['fixed_z']
+        np.testing.assert_array_equal(target[:2], data['groups'][name]['tcp_pose'][:2])
+        np.testing.assert_allclose(direction, approach_direction(data['P_ref'], target))
+        assert probe_tilt_deg(target[3:], axis) < 1e-5
+        processor = WrenchPreprocessor.from_config(effective['preprocessing'], tool_orientation=target[3:])
+        controller = OfflineController(target, settings)
+        sensor = OfflineForceReader(controller, target, direction, processor, contact_distance=.0001)
+        trial = SinglePointTrial(effective, settings, data, name, settings['speed_default_mps'], controller,
+            FreshForceReader(sensor, settings, effective['policy'], clock=controller.clock), processor, MemoryLog(),
+            clock=controller.clock, sleep=controller.sleep, preparation_complete=True)
+        result = trial.run()
+        assert result['status'] == 'contact'
+        for row in trial.logger.samples:
+            assert row['robot'].pose[2] == data['P_ref'][2]
+            assert probe_tilt_deg(row['robot'].pose[3:], axis) < 1e-5
+        assert all(c['velocity'][2:] == [0]*4 for c in trial.logger.commands if c['kind'] == 'motion')
+    for target in targets[1:]:
+        np.testing.assert_array_equal(target[2:], targets[0][2:])
+    changed = save_group(data, 'A', [.39, 0, -.9, -.5, .3, 2.])
+    np.testing.assert_array_equal(experiment_start_pose(changed, 'A', axis), targets[0])
+    assert data['reference_tcp_pose'] == reference_before and config['tcp'] == original_tcp
 
 
 def test_whole_ray_checks_fixture_and_braking_clearance(settings):
@@ -188,7 +234,8 @@ def rig(config, settings, *, contact=.002, sensor=None, poll=lambda: None):
     fresh = FreshForceReader(raw_reader, settings, config['policy'], clock=controller.clock)
     logger = MemoryLog()
     trial = SinglePointTrial(config, settings, data, 'A', settings['speed_default_mps'],
-        controller, fresh, processor, logger, poll=poll, clock=controller.clock, sleep=controller.sleep)
+        controller, fresh, processor, logger, poll=poll, clock=controller.clock, sleep=controller.sleep,
+        preparation_complete=True)
     return trial, controller, logger
 
 
@@ -371,15 +418,110 @@ def test_logging_failure_still_confirms_actual_stop(config, settings):
     assert 'disk failure' in result['fault']
 
 
+def test_approach_is_refused_until_preparation_completes(config, settings):
+    trial, controller, logger = rig(config, settings)
+    trial.preparation_complete = False
+    result = trial.run()
+    assert result['status'] == 'aborted' and 'preparation incomplete' in result['fault']
+    assert not any(c['kind'] == 'motion' for c in logger.commands)
+    np.testing.assert_array_equal(controller.read_state().pose, trial.p0)
+
+
+def test_ready_rejects_vertical_contact_after_preparation(config, settings):
+    class Sensor:
+        def read_wrench(self): return Wrench(0., 0., .4, 0., 0., 0.)
+    trial, controller, logger = rig(config, settings, sensor=lambda c: Sensor())
+    with pytest.raises(RobotError, match='not unloaded'):
+        trial.hold_once()
+    assert not controller.command_records and not logger.commands
+
+
+@pytest.mark.parametrize('failure', ['path_cancel', 'path_drift', 'air_cancel', 'descent_failure',
+                                    'loaded_p0_xy', 'loaded_p0_z', 'approach_cancel'])
+def test_failed_or_unconfirmed_preparation_never_approaches(tmp_path, monkeypatch, config, settings, failure, capsys):
+    from argparse import Namespace
+    import run_single_point_contact as entry
+    from tests.doubles import Devices, Keyboard
+    bounded(settings)
+    settings.update(site_validation_note='fake reviewed site', return_lift_distance_m=.03)
+    config['preprocessing']['baseline']['sample_count'] = 3
+    data = demo_calibration(config)
+    data = save_group(data, 'A', [.39, 0, .9, .1, .2, .3], path_note='review at reference Z', reviewed_distance_m=.02)
+    devices = Devices(config, [.38, -.02, .17, .2, .3, .4])
+    confirmations = []
+    def confirm(prompt, **kw):
+        confirmations.append(prompt)
+        if '授权自动准备' in prompt:
+            output = capsys.readouterr().out
+            assert all(phase in output for phase in ('VERTICAL_RETREAT', 'ALIGN_PROBE_ORIENTATION',
+                                                     'MOVE_ABOVE_START', 'DESCEND_TO_START'))
+            assert devices.control_count == 0 and not devices.control.calls
+            if failure == 'path_drift': devices.receive.pose[0] += .01
+            return failure != 'path_cancel'
+        if '采集空气零偏' in prompt:
+            assert devices.receive.pose[2] == pytest.approx(.23)
+            return failure != 'air_cancel'
+        if '确认沿所示方向接近' in prompt:
+            return failure != 'approach_cancel'
+        return True
+    monkeypatch.setattr(entry, 'confirm_enter', confirm)
+    monkeypatch.setattr(entry, 'read_tcp_offset_readonly', lambda *a: config['tcp']['offset'])
+    normal_move = devices.control.moveL
+    def move(target, *args):
+        if failure == 'descent_failure' and target[2] == data['P_ref'][2]:
+            return False
+        return normal_move(target, *args)
+    devices.control.moveL = move
+    class Sensor:
+        def connect(self): pass
+        def close(self): pass
+        def read_wrench(self):
+            touching = devices.receive.pose[2] == data['P_ref'][2]
+            force = .4 if touching and failure.startswith('loaded_p0') else 0.
+            return Wrench(force if failure.endswith('_xy') else 0., 0.,
+                          force if failure.endswith('_z') else 0., 0., 0., 0.)
+    result = entry.run_trial(Namespace(execute=True, output=tmp_path, config=ROOT/'config.yaml'),
+        config, settings, data, 'A', controller_factory=devices.controller,
+        reader_factory=lambda project: Sensor(), keyboard_factory=Keyboard)
+    assert result['status'] == 'aborted'
+    assert not any(c[0] == 'speedL' and np.linalg.norm(c[1]) for c in devices.control.calls)
+    if failure in ('path_cancel', 'path_drift'):
+        assert devices.control_count == 0 and not devices.control.calls
+    if failure == 'air_cancel':
+        assert not any(c[0] == 'moveL' and c[1][2] == data['P_ref'][2] for c in devices.control.calls)
+    if failure != 'approach_cancel':
+        assert not any('确认沿所示方向接近' in p for p in confirmations)
+    run = next((tmp_path/'real'/'single_point').glob('run_*'))
+    if (run/'air_zero.json').exists():
+        assert json.loads((run/'air_zero.json').read_text())['actual_tcp_pose'][2] > data['P_ref'][2]
+    assert not (run/'startup_preparation.json').exists() or failure == 'approach_cancel'
+
+
 def test_full_hardware_mode_with_injected_devices_only(tmp_path, monkeypatch, config, settings):
     from argparse import Namespace
     import run_single_point_contact as entry
     from tests.doubles import Devices, Keyboard
     bounded(settings); settings['site_validation_note'] = 'fake site validation for tests'
-    data = demo_calibration(config)
-    data = save_group(data, 'A', data['groups']['A']['tcp_pose'], path_note='fake path check', reviewed_distance_m=.02)
-    devices = Devices(config, data['groups']['A']['tcp_pose'])
-    monkeypatch.setattr(entry, 'confirm_enter', lambda *a, **kw: True)
+    settings['return_lift_distance_m'] = .03
+    data = set_reference({}, [.4, 0, .2, .2, -.3, .7], config['robot']['robot_ip'], config['tcp']['offset'])
+    data = save_group(data, 'A', [.39, 0, .9, .1, .2, .3], path_note='fake path check at reference Z', reviewed_distance_m=.02)
+    initial = [.38, -.02, .17, .2, .3, .4]
+    devices = Devices(config, initial)
+    confirmations = []
+    def confirm(prompt, **kw):
+        confirmations.append(prompt)
+        if '授权自动准备' in prompt:
+            assert devices.control_count == 0 and not devices.control.calls
+        elif '采集空气零偏' in prompt:
+            assert devices.receive.pose[2] > data['P_ref'][2]
+            assert probe_tilt_deg(devices.receive.pose[3:], config['calibration']['probe_axis_tcp']) < 1e-5
+            assert not any(c[0] == 'speedL' and np.linalg.norm(c[1]) for c in devices.control.calls)
+        elif '确认沿所示方向接近' in prompt:
+            run = next((tmp_path/'real'/'single_point').glob('run_*'))
+            assert json.loads((run/'startup_preparation.json').read_text())['status'] == 'complete'
+            np.testing.assert_allclose(devices.receive.pose, experiment_start_pose(data, 'A', config['calibration']['probe_axis_tcp']))
+        return True
+    monkeypatch.setattr(entry, 'confirm_enter', confirm)
     monkeypatch.setattr(entry, 'read_tcp_offset_readonly', lambda *a: config['tcp']['offset'])
     class Sensor:
         def connect(self): pass
@@ -396,10 +538,21 @@ def test_full_hardware_mode_with_injected_devices_only(tmp_path, monkeypatch, co
     assert sum(c[0] == 'setWatchdog' for c in calls) == 1
     assert any(c[0] == 'speedL' and c[1] == [0]*6 for c in calls)
     assert any(c[0] == 'stopScript' for c in calls)
+    moves = [c[1] for c in calls if c[0] == 'moveL']
+    assert len(moves) == 4
+    np.testing.assert_allclose(moves[0], [initial[0], initial[1], .23, *initial[3:]])
+    np.testing.assert_allclose(moves[1][:3], moves[0][:3])
+    assert probe_tilt_deg(moves[1][3:], config['calibration']['probe_axis_tcp']) < 1e-5
+    np.testing.assert_allclose(moves[2][:3], [.39, 0, .23])
+    np.testing.assert_allclose(moves[3][:3], [.39, 0, .2])
+    assert len(confirmations) == 4
     run = next((tmp_path/'real'/'single_point').glob('run_*'))
     assert (run/'air_zero.json').exists()
+    zero = json.loads((run/'air_zero.json').read_text())
+    assert zero['location'] == 'above_selected_P0' and zero['actual_tcp_pose'][2] == pytest.approx(.23)
     with (run/'samples.csv').open() as f: rows = list(csv.DictReader(f))
-    assert float(rows[100]['actual_tcp_timestamp'])-float(rows[0]['actual_tcp_timestamp']) >= .99
+    ready = [r for r in rows if r['current_state'] == 'READY']
+    assert float(ready[-1]['actual_tcp_timestamp'])-float(ready[0]['actual_tcp_timestamp']) >= .99
 
 
 def test_offline_cli_logs_independent_timestamps_full_snapshots_and_six_wrench(config, tmp_path):

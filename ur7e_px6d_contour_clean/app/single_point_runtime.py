@@ -8,6 +8,8 @@ import time
 
 import numpy as np
 
+from calibration.single_point import experiment_start_pose
+from calibration.probe_alignment import probe_tilt_deg
 from core.models import PolicyCommand, PolicyWaypoint, Wrench
 from robot.rtde_controller import RobotError, _orientation_distance
 from safety.force_guard import force_safety_reason, raw_safety_reason
@@ -47,13 +49,15 @@ class FreshForceReader:
 
 class SinglePointTrial:
     def __init__(self, project, settings, calibration, name, speed, controller, reader,
-                 preprocessor, logger, *, poll=lambda: None, clock=time.monotonic, sleep=time.sleep):
+                 preprocessor, logger, *, poll=lambda: None, clock=time.monotonic, sleep=time.sleep,
+                 preparation_complete=False):
         from app.single_point_config import validate_speed
         self.project, self.s, self.calibration, self.name = project, settings, calibration, name
         self.speed = validate_speed(speed, settings)
         self.controller, self.reader, self.processor, self.logger = controller, reader, preprocessor, logger
         self.poll, self.clock, self.sleep = poll, clock, sleep
-        self.p0 = np.asarray(calibration['groups'][name]['tcp_pose'], dtype=float)
+        self.p0 = experiment_start_pose(calibration, name, project['calibration']['probe_axis_tcp'])
+        self.preparation_complete = preparation_complete
         self.direction = np.asarray(calibration['groups'][name]['direction_xy'], dtype=float)
         self.state = 'READY'
         self.robot = self.raw = self.processed = None
@@ -136,11 +140,14 @@ class SinglePointTrial:
     def _stationary(self):
         r = self.robot
         if (np.linalg.norm(r.pose[:3]-self.p0[:3]) > self.s['start_position_tolerance_m'] or
+            abs(r.pose[2]-self.p0[2]) > self.s['fixed_z_tolerance_m'] or
             _orientation_distance(r.pose[3:], self.p0[3:]) > self.s['orientation_tolerance_rad'] or
+            probe_tilt_deg(r.pose[3:], self.project['calibration']['probe_axis_tcp']) > self.s['probe_tilt_max_deg'] or
             np.linalg.norm(r.tcp_speed[:3]) > self.s['settle_speed_mps'] or
             np.linalg.norm(r.tcp_speed[3:]) > .005):
-            raise RobotError('manually place the stationary TCP at the selected P0')
-        if np.hypot(self.processed.fx, self.processed.fy) >= self.s['unloaded_max_fxy_N']:
+            raise RobotError('prepared P0 must be stationary at reference Z with a downward probe')
+        if (np.hypot(self.processed.fx, self.processed.fy) >= self.s['unloaded_max_fxy_N'] or
+            np.linalg.norm(self.processor.air_compensated_wrench_base(self.raw).force) >= self.s['unloaded_max_fxy_N']):
             raise RobotError('P0 is not unloaded; do not zero against the target')
 
     def _record(self, stamp):
@@ -233,6 +240,8 @@ class SinglePointTrial:
         return None
 
     def approach(self):
+        if not self.preparation_complete:
+            raise RobotError('startup preparation incomplete; approach refused')
         self.state = 'APPROACH'
         self.approach_start = self.clock()
         self.previous_pose = self.p0.copy()

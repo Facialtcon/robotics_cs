@@ -17,7 +17,7 @@
 .venv/bin/python run_single_point_contact.py --simulate --group B --speed 0.018
 # 真机交互菜单，仅由现场操作人员主动运行
 .venv/bin/python run_single_point_contact.py --execute
-# 真机选择已有 P0，不自动移到该 P0，仍需多次新的 Enter 确认
+# 真机选择已有 P0：展示准备路径，经 Enter 确认后自动抬升、调正、采零并下降
 .venv/bin/python run_single_point_contact.py --execute --group A --speed 0.018
 ```
 
@@ -79,7 +79,8 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 ```
 
 首次先在菜单选 **1** 保存 P_ref，再反复选 **2** 添加 A/B/C；选 **5** 启动实验。
-先手动把机器人放到选定 P0，按提示确认空气零偏、速度和开始接近。运行时 Q/Esc/Ctrl+C 停止。
+不要求提前手动调到选定 P0 的高度和姿态。按提示核验并确认准备路径、上方空气零偏、速度和开始接近。
+运行时 Q/Esc/Ctrl+C 停止。
 返回指定 P0：重新进入上述实机菜单，选 **6**，选组、核验展示路径、填写依据，再按 Enter；选择组本身不运动。
 
 ## 多组 P0 标定
@@ -87,28 +88,43 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 1. 在 `single_point_experiment.yaml` 填写 `site_validation_note`，记录本次速度、阈值、制动距离和路径检查。
    共享参数继承原 `config.yaml`；当前默认速度 18 mm/s，允许输入范围 0.1–30 mm/s。
    若原配置启用了工作空间，沿用其 Base XYZ 边界；原配置关闭时也保持关闭，但仍检查距离、时间和已配置障碍盒。
-2. 运行真机菜单，选择 **1**。手动将 TCP 移到几何参考位置，探针竖直向下、停稳，
+2. 运行真机菜单，选择 **1**。手动将 TCP 移到几何参考位置并停稳，允许参考姿态不竖直。
    按 Enter 后仅通过 Receive 和只读 TCP 查询保存 P_ref、完整参考姿态、时间、机器人及 TCP 配置。
    不激活 Control，不自动运动到 P_ref。
-3. 手动将 TCP 移到第一组空气中的起点，保持与参考相同的 Z 和姿态。选 **2**，输入 **A**，
-   按 Enter 读取完整起始 TCP 位姿。软件计算 `normalize(P_ref.xy-P0.xy)`。
-   检查直到最大搜索距离的完整路径，填写现场核验依据，再用 Enter 确认路径核验。
+3. 手动将 TCP 移到第一组 P0 的 XY 位置，Z 和姿态可以任意不同。选 **2**，输入 **A**，
+   按 Enter 读取完整原始 TCP 位姿；实验起点只使用其中的 XY。软件计算 `normalize(P_ref.xy-P0.xy)`，
+   同时显示最终起点 `[P0.x, P0.y, P_ref.z, downward_orientation]`。
+   在统一参考高度和竖直姿态下检查直到最大搜索距离的完整路径，填写现场核验依据，再用 Enter 确认路径核验。
    留空可以保存标定，但禁止该组真机实验。
 4. 按同样步骤新增 **B、C、D**。菜单 **3** 查看所有组；**4** 逐组重新采集或确认删除。
    P_ref 有已存 P0 时禁止改写；确需重新标定，先逐组删除，再采集新参考和各组 P0。
 
 `single_point_calibration.yaml` 与 `scan_calibration.yaml` 完全独立。
-校验会拒绝 XY 重合、非法数字、错误方向、Z/姿态不一致、非向下探针及 TCP 不一致。
+P_ref 保存完整 `reference_tcp_pose`，`P_ref` XYZ 字段保持兼容。参考 XY 仅确定接近方向，
+参考 Z 是所有组统一扫描高度。参考姿态通过 `downward_probe_orientation()` 推导统一竖直姿态，
+把 `calibration.probe_axis_tcp` 指定的物理轴对准 Base -Z，不修改 TCP 偏置。
+所有组使用同一个最终姿态；原始 P0 Z 和姿态仅留作标定记录，不参与实验起点计算。
+校验会拒绝 XY 重合、非法数字、错误方向及 TCP 不一致，允许原始 Z 和姿态不同。
 探针直径 **3 mm**；P_ref 是几何参考，不保证不同方向都接触同一个物理点。
 操作人员必须检查路径是否先碰到目标的其他部分。`forbidden_boxes` 用于夹具或其他障碍，
 不要把预期接触的目标整体设为禁入盒；软件检查包含探针半径和间隙，但不能替代整套工具的现场检查。
 
 ## 选择方向和实验流程
 
-菜单 **5** 选择 P0-A/B/C 等，只选择和显示参数，不自动移动。
-人工将机器人放在选定的 P0 并停稳，确认 TCP 和传感器正常、探针未接触目标，再采集现有空气零偏。
-输入本次速度（交互输入单位 **mm/s**，命令行 `--speed` 单位 **m/s**），检查有效范围。
-静止记录至少 1 秒，再按新的 Enter 开始。
+菜单 **5** 选择 P0-A/B/C 等，先显示原始标定、生成的实验起点和方向。选择组本身不运动。
+程序只读实际 TCP 位姿并核对 TCP/传感器，使用现有安全返回逻辑生成完整准备路径：
+
+1. 展示实际起点、抬升高度、旋转、高位 XY 转移和下降路径；现场核验后按新的 Enter 授权。
+2. 在当前 XY 安全抬升，停稳后自动调正探针，再移动至目标 P0 的 XY 上方。
+3. 在高于 `P_ref.z` 的安全位置停稳，操作人员确认完全无接触后采集空气零偏。
+   抬升和调姿前只执行 PX6D 原始力保护，不在目标接触状态采零。
+4. 使用空气补偿后的力监控下降到 `P_ref.z`，检查停稳、竖直和 P0 无接触。
+   准备失败、路径未确认或 P0 有接触都会拒绝开始接近。
+5. 输入本次速度（交互单位 **mm/s**，`--speed` 单位 **m/s**），静止记录至少 1 秒，
+   按新的 Enter 开始单点接近。
+
+原有抬升距离必须经过现场核验，不能假设 30 mm 一定安全；确认期间实际位姿改变需重新规划。
+实验沿 Base XY 运动，Z 始终为 `P_ref.z`；不会把 P_ref 的 XY 当作运动终点。
 
 流程为 READY → APPROACH → CONTACT_STOP → SETTLING → FINISHED。
 `app/single_point_runtime.py` 的 `SinglePointTrial.approach()` 在第一次有效的滤波 Base Fxy
@@ -127,6 +143,7 @@ PX6D 失效、非有限数据、请求超时、过期观测、RTDE 异常、人�
 ## 返回 P0
 
 菜单 **6** 复用 `SafeReturnExecutor` 和 `return_trajectory`。
+返回目标同样是由 P0 XY、P_ref Z 和统一竖直姿态生成的六维位姿。
 默认抬升距离沿用原 `safe_return.return_lift_distance`，当前为 30 mm；数值不作为路径已经安全的证明。
 每次仍需现场核验，展示实际起点、抬升、姿态对齐、高位转移、下降的完整路径，
 校验工作空间和障碍盒，再要求填写当前路径的现场核验依据及新的 Enter 运动确认。
@@ -147,6 +164,8 @@ PX6D 失效、非有限数据、请求超时、过期观测、RTDE 异常、人�
   阈值是滤波测量的 crossing，真实物理接触可能更早。
 - `config_snapshot.yaml`、`single_point_calibration_snapshot.json`、`single_point_experiment_snapshot.json`、
   `air_zero.json`（真机）：完整有效配置、标定、空气零偏与变换参考信息。
+  `startup_plan.json` 保存已确认的完整准备路径，`startup_preparation.json` 保存准备完成后的实际位姿和探针倾角；
+  `air_zero.json` 另记录上方采零位置，便于确认采零发生在下降之前。
   六维力矩的参考点由原预处理配置决定，需结合 `air_zero.json` 的变换状态解读。
 - `实验回放.html`：实际 XY 轨迹、Base Fx/Fy/Fz 和 Tx/Ty/Tz（图例明确 N/Nm，均可单独开关）、
   Fxy、实际/指令 XY 速度、阈值、触发与实际停车事件。没有目标轮廓。

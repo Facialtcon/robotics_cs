@@ -6,9 +6,8 @@ import re
 import numpy as np
 import yaml
 
-from calibration.probe_alignment import probe_tilt_deg
+from calibration.probe_alignment import downward_probe_orientation, probe_tilt_deg
 from experiment_logging.paths import wall_time_fields
-from robot.rtde_controller import _orientation_distance
 from robot.tcp_identity import normalize_tcp_offset, tcp_offsets_match
 
 LIMITATION = ('探针直径 3 mm：P_ref 是几何参考，不保证不同方向接触同一物理点。'
@@ -83,19 +82,25 @@ def load_calibration(path):
     return data
 
 
+def experiment_start_pose(calibration, name, probe_axis_tcp):
+    """Only P0 XY participates; reference Z and heading define every trial."""
+    recorded = vector(calibration['groups'][name]['tcp_pose'], 6, 'P0')
+    reference = vector(calibration['reference_tcp_pose'], 6, 'reference TCP pose')
+    if not np.allclose(vector(calibration['P_ref'], 3, 'P_ref'), reference[:3], atol=1e-12, rtol=0):
+        raise ValueError('P_ref differs from recorded reference pose')
+    orientation = downward_probe_orientation(reference[3:], probe_axis_tcp)
+    return np.r_[recorded[:2], reference[2], orientation]
+
+
 def validate_group(calibration, name, settings, project, *, require_review=True):
     group = calibration['groups'][name]
     pose = vector(group['tcp_pose'], 6, 'P0')
-    reference_pose = vector(calibration['reference_tcp_pose'], 6, 'reference TCP pose')
     direction = approach_direction(calibration['P_ref'], pose)
     if not np.allclose(direction, vector(group['direction_xy'], 2, 'direction'), atol=1e-9, rtol=0):
         raise ValueError('saved approach direction is invalid')
-    if abs(pose[2]-reference_pose[2]) > settings['fixed_z_tolerance_m']:
-        raise ValueError('all P0s and P_ref must share fixed Z')
-    if _orientation_distance(pose[3:], reference_pose[3:]) > settings['orientation_tolerance_rad']:
-        raise ValueError('all P0s must share the fixed reference orientation')
+    pose = experiment_start_pose(calibration, name, project['calibration']['probe_axis_tcp'])
     if probe_tilt_deg(pose[3:], project['calibration']['probe_axis_tcp']) > settings['probe_tilt_max_deg']:
-        raise ValueError('probe must point vertically down; adjust manually, no automatic alignment')
+        raise ValueError('derived probe orientation must point vertically down')
     if calibration['robot_ip'] != project['robot']['robot_ip']:
         raise ValueError('calibration robot identity differs from config')
     for tcp in (calibration['active_tcp_offset'], group['active_tcp_offset']):
