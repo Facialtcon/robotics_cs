@@ -79,6 +79,7 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 ```
 
 首次先在菜单选 **1** 保存 P_ref，再反复选 **2** 添加 A/B/C；选 **5** 启动实验。
+标定时在示教器选择 **Local**，人工移动 TCP；自动实验和返回 P0 前由操作人员切换 **Remote**。
 不要求提前手动调到选定 P0 的高度和姿态。按提示核验并确认准备路径、上方空气零偏、速度和开始接近。
 运行时 Q/Esc/Ctrl+C 停止。
 返回指定 P0：重新进入上述实机菜单，选 **6**，选组、核验展示路径、填写依据，再按 Enter；选择组本身不运动。
@@ -88,9 +89,11 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 1. 在 `single_point_experiment.yaml` 填写 `site_validation_note`，记录本次速度、阈值、制动距离和路径检查。
    共享参数继承原 `config.yaml`；当前默认速度 18 mm/s，允许输入范围 0.1–30 mm/s。
    若原配置启用了工作空间，沿用其 Base XYZ 边界；原配置关闭时也保持关闭，但仍检查距离、时间和已配置障碍盒。
-2. 运行真机菜单，选择 **1**。手动将 TCP 移到几何参考位置并停稳，允许参考姿态不竖直。
-   按 Enter 后仅通过 Receive 和只读 TCP 查询保存 P_ref、完整参考姿态、时间、机器人及 TCP 配置。
-   不激活 Control，不自动运动到 P_ref。
+2. 运行真机菜单，选择 **1**。在示教器选择 Local，人工将 TCP 移到几何参考位置并停稳，允许参考姿态不竖直。
+   按 Enter 后，程序依次显示连接 RTDE Receive、读取实际 TCP、停稳检查、只读 TCP 配置核对和读取的坐标。
+   随后保存 P_ref、完整参考姿态、时间、机器人及 TCP 配置，重新读取 YAML 并比较完整内容及原始精度。
+   只有回读校验通过才显示“标定成功：P_ref”和绝对保存路径；失败会显示具体原因，取消会明确提示，然后返回菜单。
+   不激活 Control，不发送运动命令，不要求为了只读标定切换 Remote。
 3. 手动将 TCP 移到第一组 P0 的 XY 位置，Z 和姿态可以任意不同。选 **2**，输入 **A**，
    按 Enter 读取完整原始 TCP 位姿；实验起点只使用其中的 XY。软件计算 `normalize(P_ref.xy-P0.xy)`，
    同时显示最终起点 `[P0.x, P0.y, P_ref.z, downward_orientation]`。
@@ -98,6 +101,37 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
    留空可以保存标定，但禁止该组真机实验。
 4. 按同样步骤新增 **B、C、D**。菜单 **3** 查看所有组；**4** 逐组重新采集或确认删除。
    P_ref 有已存 P0 时禁止改写；确需重新标定，先逐组删除，再采集新参考和各组 P0。
+
+P0 也使用同样的九步标定提示、保存和回读校验。路径依据留空时明确显示“坐标已保存，路径未完成核验”；
+取消路径确认则不保存本次新标定。新增组会保留已有参考点和其他组的完整数据。
+菜单 **3** 显示中文标定表：P_ref XYZ、已保存 P0 数量、每组 XY、相对 Base +X 的方向角、保存状态和路径核验状态。
+路径核验“已完成”要求保存的依据、时间及核验距离覆盖当前最大搜索距离。
+正常界面的坐标统一使用 **mm，三位小数**；姿态旋转向量使用 rad，方向角使用度。
+内部几何、YAML、日志和快照继续使用 SI 单位和完整精度。查看完整原始数据需主动使用离线调试命令：
+
+```bash
+.venv/bin/python run_single_point_contact.py --show-calibration-json \
+  --calibration single_point_calibration.yaml
+```
+
+此命令只读取文件，不连接任何机器人接口。
+
+## Local / Remote 检查
+
+标定通过 RTDE Receive（30004）和 Secondary 只读端口（30012）查询状态/TCP。
+UR 官方说明这些状态监控接口可以在 Local 和 Remote 模式使用。
+[UR 官方接口说明](https://www.universal-robots.com/articles/ur/interface-communication/remote-control-via-tcpip/)
+
+程序另外通过 Dashboard Server（29999）只发送 `is in remote control` 查询。
+`true` 显示“已确认 Remote”；`false` 显示“Local / Remote 未启用”。
+未知回复、超时、连接失败或不支持该命令都明确显示“未知，未确认 Remote”及原因。
+此命令从 e-Series PolyScope 5.6.0 起支持，与 Manual/Automatic 操作模式不是同一个查询。
+[UR 官方 Dashboard 命令表](https://www.universal-robots.com/manuals/EN/HTML/SW5_23/Content/prod-dashboard/Dashboard_table.htm)
+
+只读标定在模式未知时仍可继续读取，不会强制切换 Remote。
+自动准备和菜单 **6** 返回则在路径 Enter 确认后、创建 Control 前重新查询模式：
+只有明确确认 Remote 才允许后续自动运动；Local 或查询失败时报告原因并拒绝自动运动，操作人员处理后重新核验路径。
+程序不发送任何模式切换、启动、上电或解锁命令；模式查询不会代替已有的路径核验和 Enter 确认。
 
 `single_point_calibration.yaml` 与 `scan_calibration.yaml` 完全独立。
 P_ref 保存完整 `reference_tcp_pose`，`P_ref` XYZ 字段保持兼容。参考 XY 仅确定接近方向，

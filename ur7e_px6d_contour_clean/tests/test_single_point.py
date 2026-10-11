@@ -37,6 +37,13 @@ def settings():
     return values
 
 
+@pytest.fixture
+def fake_remote(monkeypatch):
+    from app import single_point_ui
+    from robot.control_mode import ControlMode
+    monkeypatch.setattr(single_point_ui, 'read_control_mode', lambda ip: ControlMode('remote', '模拟 Dashboard 回复 true'))
+
+
 def test_default_parameters_copy_original_configuration(config):
     original = deepcopy(config)
     values = load_settings(ROOT/'single_point_experiment.yaml', config)
@@ -438,7 +445,7 @@ def test_ready_rejects_vertical_contact_after_preparation(config, settings):
 
 @pytest.mark.parametrize('failure', ['path_cancel', 'path_drift', 'air_cancel', 'descent_failure',
                                     'loaded_p0_xy', 'loaded_p0_z', 'approach_cancel'])
-def test_failed_or_unconfirmed_preparation_never_approaches(tmp_path, monkeypatch, config, settings, failure, capsys):
+def test_failed_or_unconfirmed_preparation_never_approaches(tmp_path, monkeypatch, config, settings, failure, capsys, fake_remote):
     from argparse import Namespace
     import run_single_point_contact as entry
     from tests.doubles import Devices, Keyboard
@@ -497,7 +504,7 @@ def test_failed_or_unconfirmed_preparation_never_approaches(tmp_path, monkeypatc
     assert not (run/'startup_preparation.json').exists() or failure == 'approach_cancel'
 
 
-def test_full_hardware_mode_with_injected_devices_only(tmp_path, monkeypatch, config, settings):
+def test_full_hardware_mode_with_injected_devices_only(tmp_path, monkeypatch, config, settings, fake_remote):
     from argparse import Namespace
     import run_single_point_contact as entry
     from tests.doubles import Devices, Keyboard

@@ -7,9 +7,10 @@ import numpy as np
 from app.operator_input import confirm_enter
 from app.scan_startup import capture_stationary_bias, hold_startup_confirmation
 from app.single_point_config import check_segment
+from app.single_point_ui import show_motion_path, require_remote_mode
 from calibration.probe_alignment import probe_tilt_deg
 from robot.rtde_controller import RobotError, _orientation_distance
-from safety.safe_return import SafeReturnExecutor, PX6DForceMonitor, return_trajectory, print_return_plan
+from safety.safe_return import SafeReturnExecutor, PX6DForceMonitor, return_trajectory
 
 
 def plan_return(project, settings, current, target):
@@ -35,8 +36,8 @@ def prepare_startup(project, settings, target, controller, reader, processor, lo
     current = controller.wait_for_standstill().pose.copy()
     config, segments = plan_return(project, settings, current, target)
     axis = project['calibration']['probe_axis_tcp']
-    print(f'当前实际 TCP: {current.tolist()}\n本次生成的实验起点: {target.tolist()}')
-    print_return_plan(config, current, target, segments)
+    print('准备自动运动：请在示教器切换 Remote 模式；模式只读检查通过后仍需路径核验和 Enter 确认。')
+    show_motion_path(current, target, segments)
     print('准备顺序：安全抬升 → 探针轴对准 Base -Z → P0 的 XY 上方 → 空气零偏 → 下降到 P_ref.z。')
     print('请现场核验完整工具、目标和夹具的扫掠空间、旋转空间及抬升高度；P_ref 的 XY 不是运动终点。')
     monitor = PX6DForceMonitor(config, reader, processor, raw_only=True)
@@ -65,6 +66,7 @@ def prepare_startup(project, settings, target, controller, reader, processor, lo
     logger.write_json('startup_plan.json', dict(initial=current.tolist(), target=target.tolist(),
         segments=[dict(phase=k, pose=p.tolist(), speed=v) for k, p, v in segments],
         path_confirmed=True, site_review=settings['site_validation_note']))
+    require_remote_mode(project['robot']['robot_ip'])
     controller.activate_control(confirmed=True)
     controller.enable_watchdog(settings['watchdog_frequency_hz'])
     controller.kick_watchdog()
