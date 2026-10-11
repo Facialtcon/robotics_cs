@@ -1,0 +1,14 @@
+# Synthetic environment only, independent of measured target_geometry_calibration.yaml.
+base_config: simulation_config.yaml
+scene_name: fixed_target_square
+force_model:
+  granular_drag_force: 0.0
+  friction_coefficient: 0.20
+target_shape: rectangle
+target_center: [0.0, 0.0]
+target_width: 0.11
+target_height: 0.11
+target_rotation_deg: 0.0
+calibration_point_0: [-0.065, 0.0]
+calibration_point_1: [-0.035, 0.0]
+start_point: [-0.065, 0.0]

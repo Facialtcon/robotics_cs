@@ -1,5 +1,5 @@
 # Shared values below mirror config.yaml and are refreshed from --config at load.
-# Only parameters without an equivalent in the original runner remain independent.
+# Single-point workspace, experiment timeout and stop budgets remain independent.
 inherit_project_parameters: true
 # Independent calibration-only XY separation; SI units, default 5 mm.
 min_approach_calibration_distance_m: 0.005
@@ -9,13 +9,7 @@ speed_default_mps: 0.018
 speed_presets_mps: [0.006, 0.012, 0.018]
 contact_threshold_N: 1.0
 unloaded_max_fxy_N: 0.2
-# Independent single-point budgets; never overwritten by continuous tracking.
-# Freeze each group's travel at 2 * distance(P0.xy, P_ref.xy) + confirmed margin.
-search_distance_mode: reference_distance
-search_distance_multiplier: 2.0
-max_search_distance_m: 0.80  # finite hard cap; insufficient candidates refuse startup
-search_margin_m: 0.0        # optional on-site margin, confirmed by the existing final Enter
-max_search_margin_m: 0.020  # maximum permitted extra travel (20 mm)
+# Independent safety timeout; expiry aborts the experiment, never completes contact.
 max_approach_time_sec: 110.0
 precontact_record_sec: 1.0
 post_stop_record_sec: 0.5
@@ -37,9 +31,22 @@ watchdog_frequency_hz: 20.0
 require_watchdog: false
 speed_acceleration_mps2: 0.050
 stop_deceleration_mps2: 0.200
-# Match the original workspace switch; limits are ignored when disabled.
-workspace_enabled: false
-workspace_limits: {x_min: 0.0, x_max: 0.0, y_min: 0.0, y_max: 0.0, z_min: 0.0, z_max: 0.0}
+# Reuse the existing taught Base XY boundary, per operator instruction.
+# Source: workspace/config/workspace_calibration.yaml, raw_points P0 -> P1 -> P2 -> P3.
+# The recorded corner Z/average_z describes a plane, NOT permissible Z limits.
+# Scan Z remains P_ref.z; preparation/return retain their existing finite lift checks.
+workspace_enabled: true
+workspace_verified: true
+workspace_limits:
+  x_min: 0.4069454163317329
+  x_max: 0.8869127470923451
+  y_min: -0.4095432616985605
+  y_max: 0.5623436934434348
+workspace_xy_polygon:
+  - [0.8672075220846351, 0.5623436934434348]
+  - [0.8869127470923451, -0.40063733954400454]
+  - [0.4247178814322199, -0.4095432616985605]
+  - [0.4069454163317329, 0.5544289186670667]
 # Boxes for fixtures/other obstacles; omit the intended contacted object.
 # Each box: {x_min: ..., x_max: ..., y_min: ..., y_max: ..., z_min: ..., z_max: ...}
 forbidden_boxes: []

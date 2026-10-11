@@ -18,7 +18,9 @@ from tests.doubles import Devices, Keyboard
 
 @pytest.fixture
 def settings(config):
-    return load_settings(entry.ROOT/'single_point_experiment.yaml', config)
+    values = load_settings(entry.ROOT/'single_point_experiment.yaml', config)
+    values.update(workspace_enabled=False, workspace_limits=None, workspace_xy_polygon=None)
+    return values
 
 
 def menu_run(monkeypatch, args, config, settings, answers):
@@ -249,6 +251,8 @@ def test_dashboard_invalid_greeting_does_not_send_commands():
 
 @pytest.mark.parametrize('mode', ['local', 'unknown'])
 def test_automatic_preparation_reports_remote_requirement_and_blocks_unconfirmed_mode(tmp_path, monkeypatch, config, settings, capsys, mode):
+    from tests.test_single_point import bounded
+    bounded(settings)
     data = demo_calibration(config)
     args = temporary_args(tmp_path, data)
     devices = Devices(config, [.39, 0, .2, np.pi, 0, 0])
@@ -353,7 +357,7 @@ def test_return_keeps_actual_guards_and_enter_confirmation_without_text(
         entry.return_to_group(args, config, settings, data, 'A')
     else:
         expected = dict(path_drift='位姿已变动', workspace='workspace', obstacle='intersects',
-                        force_limit='force.*limit', sensor_failure='sensor stream failure')[failure]
+                        force_limit='force.*(limit|threshold)', sensor_failure='sensor stream failure')[failure]
         with pytest.raises((RobotError, ValueError, ReturnAborted, PX6DTimeout), match=expected):
             entry.return_to_group(args, config, settings, data, 'A')
     assert devices.control_count == 0 and not devices.control.calls

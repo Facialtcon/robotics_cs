@@ -154,10 +154,14 @@ def load_trace(run_dir):
         pose = np.asarray(snapshot.get('tcp_pose', []), dtype=float)
         if snapshot.get('stop_observation', {}).get('standstill_confirmed') is True and pose.shape == (6,) and np.isfinite(pose).all():
             stop_position = pose[:2]*1000.
+    target = target_outline(config.get('experiment', {}).get('target'))
+    if config.get('fixed_target_experiment'):
+        from visualization.fixed_target import recorded_outline
+        target = recorded_outline(run_dir)
     return RunTrace(run_dir, times-times[0], times, xy, force, states, phase,
                     first_index, event_indices, fields, actual, actual_stamps-times[0],
                     commands, command_stamps-times[0], selected_events, config, unfiltered,
-                    contact_source, target_outline(config.get('experiment', {}).get('target')), stop_position)
+                    contact_source, target, stop_position)
 
 
 def target_outline(target):

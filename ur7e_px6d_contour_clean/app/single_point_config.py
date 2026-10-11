@@ -6,8 +6,7 @@ import math
 import numpy as np
 import yaml
 
-from calibration.single_point import (DEFAULT_MIN_APPROACH_DISTANCE_M, calibration_distance_m,
-                                      validate_group, vector)
+from calibration.single_point import DEFAULT_MIN_APPROACH_DISTANCE_M, validate_group, vector
 from config.loader import runtime_robot_config
 
 # Copy values from the selected original config at load time, so the two entry
@@ -28,8 +27,6 @@ PROJECT_PARAMETERS = {
     'path_clearance_m': ('continuous_tracking', 'boundary_margin'),
     'watchdog_frequency_hz': ('continuous_tracking', 'watchdog_frequency_hz'),
     'require_watchdog': ('continuous_tracking', 'continuous_require_watchdog'),
-    'workspace_enabled': ('workspace', 'enabled'),
-    'workspace_limits': ('workspace', 'limits'),
     'return_lift_distance_m': ('safe_return', 'return_lift_distance'),
     'return_speed_mps': ('safe_return', 'return_speed'),
     'return_vertical_speed_mps': ('safe_return', 'return_vertical_speed'),
@@ -57,18 +54,12 @@ def validate_speed(speed, settings):
 
 def validate_settings(settings):
     settings.setdefault('min_approach_calibration_distance_m', DEFAULT_MIN_APPROACH_DISTANCE_M)
-    settings.setdefault('search_distance_mode', 'fixed')
-    settings.setdefault('search_distance_multiplier', 1.)
-    settings.setdefault('search_margin_m', 0.)
-    settings.setdefault('max_search_margin_m', .02)
-    if settings['search_distance_mode'] not in ('fixed', 'reference_distance'):
-        raise ValueError('search_distance_mode must be fixed or reference_distance')
-    margin, limit = settings['search_margin_m'], settings['max_search_margin_m']
-    if (isinstance(margin, bool) or isinstance(limit, bool) or
-        not np.isfinite([margin, limit]).all() or not 0 <= margin <= limit or limit < 0):
-        raise ValueError('search_margin_m must be finite, nonnegative and within max_search_margin_m')
+    settings.setdefault('workspace_verified', False)
+    settings.setdefault('workspace_xy_polygon', None)
+    if not isinstance(settings['workspace_verified'], bool):
+        raise ValueError('workspace_verified must be a boolean')
     positive = ('speed_min_mps', 'speed_max_mps', 'speed_default_mps', 'contact_threshold_N',
-        'unloaded_max_fxy_N', 'max_search_distance_m', 'search_distance_multiplier', 'max_approach_time_sec',
+        'unloaded_max_fxy_N', 'max_approach_time_sec',
         'precontact_record_sec', 'post_stop_record_sec', 'control_rate_hz', 'max_force_age_sec',
         'max_robot_age_sec', 'max_cycle_sec', 'settle_speed_mps', 'settle_hold_sec', 'stop_timeout_sec',
         'start_position_tolerance_m', 'fixed_z_tolerance_m', 'orientation_tolerance_rad',
@@ -98,30 +89,14 @@ def validate_settings(settings):
     return settings
 
 
-def resolve_search_budget(settings, calibration, name, *, speed=None, require_coverage=True):
-    """Freeze a bounded per-group budget; P_ref remains a geometric reference."""
-    result = deepcopy(settings)
-    validate_settings(result)
-    distance = calibration_distance_m(calibration['P_ref'], calibration['groups'][name]['tcp_pose'])
-    candidate = distance * float(result['search_distance_multiplier']) + result['search_margin_m']
-    cap = float(result.get('configured_max_search_distance_m', result['max_search_distance_m']))
-    if not math.isfinite(cap) or cap <= 0:
-        raise ValueError('configured_max_search_distance_m must be finite and positive')
-    if candidate > cap and (require_coverage or result['search_distance_mode'] == 'reference_distance'):
-        raise ValueError(f'搜索预算不足：P0 到 P_ref 的 XY 距离 {distance*1000:.3f} mm，'
-                         f'行程倍率 {float(result["search_distance_multiplier"]):.3f}，'
-                         f'余量 {result["search_margin_m"]*1000:.3f} mm，候选行程 {candidate*1000:.3f} mm，'
-                         f'独立上限仅 {cap*1000:.3f} mm。请现场检查完整路径后调整单点实验预算；未授权运动。')
-    actual = candidate if result['search_distance_mode'] == 'reference_distance' else cap
-    speed = validate_speed(result['speed_default_mps'] if speed is None else speed, result)
-    minimum_time = actual / speed
-    if require_coverage and minimum_time >= result['max_approach_time_sec']:
-        raise ValueError(f'搜索时间预算不足：按 {speed*1000:.3f} mm/s 覆盖 {actual*1000:.3f} mm '
-                         f'至少需要 {minimum_time:.3f} s，当前上限 {result["max_approach_time_sec"]:.3f} s；未授权接近。')
-    result.update(max_search_distance_m=actual, configured_max_search_distance_m=cap,
-                  reference_distance_m=distance, candidate_search_distance_m=candidate,
-                  minimum_search_time_sec=minimum_time)
-    return result
+def require_motion_boundary(settings):
+    """A finite, independently configured and site-verified workspace is mandatory."""
+    if settings.get('workspace_enabled') is not True:
+        raise ValueError('workspace 安全边界未启用：拒绝真机实验；请配置并现场验证单点实验工作空间。')
+    if not isinstance(settings.get('workspace_limits'), dict):
+        raise ValueError('workspace 安全边界未配置：拒绝真机实验。')
+    if settings.get('workspace_verified') is not True:
+        raise ValueError('workspace 安全边界尚未经过现场验证：拒绝真机实验；验证后设置 workspace_verified: true。')
 
 
 def load_settings(path, project=None):
@@ -134,6 +109,18 @@ def load_settings(path, project=None):
     return validate_settings(inherit_parameters(data, project))
 
 
+def shared_workspace_config(project, settings):
+    """Keep a taught XY boundary separate from the shared controller's XYZ box."""
+    configured = settings['workspace_limits'] or project['workspace']['limits']
+    xy_only = settings.get('workspace_xy_polygon') is not None and not any(
+        key in configured for key in ('z_min', 'z_max'))
+    # The legacy guard constructor requires six keys even with its XYZ box off.
+    # Retain its unused original Z entries; never infer Z safety from the plane.
+    limits = deepcopy(project['workspace']['limits'])
+    limits.update(deepcopy(configured))
+    return dict(enabled=settings.get('workspace_enabled', True) and not xy_only, limits=limits)
+
+
 def check_segment(start, end, settings):
     """Swept TCP proxy with probe-radius clearance; operator must check whole tool."""
     start, end = vector(start, 3, 'path start'), vector(end, 3, 'path end')
@@ -142,12 +129,26 @@ def check_segment(start, end, settings):
     if enabled and not isinstance(bounds, dict):
         raise ValueError('workspace_limits must be configured when workspace checking is enabled')
     pad = settings['probe_diameter_m']/2 + settings['path_clearance_m']
-    for i, axis in enumerate('xyz' if enabled else ''):
-        lo, hi = float(bounds[axis+'_min']), float(bounds[axis+'_max'])
+    polygon = settings.get('workspace_xy_polygon')
+    axes = 'xy' if polygon is not None and not any(key in (bounds or {}) for key in ('z_min', 'z_max')) else 'xyz'
+    for i, axis in enumerate(axes if enabled else ''):
+        try:
+            lo, hi = float(bounds[axis+'_min']), float(bounds[axis+'_max'])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f'workspace_limits 缺少有效的 {axis} 边界') from exc
         if not np.isfinite([lo, hi]).all() or lo+pad >= hi-pad:
             raise ValueError('invalid independent workspace')
         if min(start[i], end[i]) < lo+pad or max(start[i], end[i]) > hi-pad:
             raise ValueError('approach/return path outside independent workspace clearance')
+    if enabled and polygon is not None:
+        # Reuse the existing convex four-corner checker. Both endpoints inside
+        # the inset convex polygon imply the entire straight segment is inside.
+        from robot.rtde_controller import RobotError, check_continuous_xy
+        try:
+            for point in (start, end):
+                check_continuous_xy(dict(continuous_xy_polygon=polygon, continuous_boundary_margin=pad), point[:2])
+        except (RobotError, TypeError, ValueError) as exc:
+            raise ValueError(f'path outside calibrated workspace XY boundary: {exc}') from exc
     for box in settings['forbidden_boxes']:
         low = np.array([box[a+'_min'] for a in 'xyz'], dtype=float)
         high = np.array([box[a+'_max'] for a in 'xyz'], dtype=float)
@@ -169,8 +170,10 @@ def check_segment(start, end, settings):
 def prepare(project, settings, calibration, name, *, execute, speed=None, approach=True):
     validate_settings(settings)
     pose, direction = validate_group(calibration, name, settings, project)
-    if approach:
-        settings = resolve_search_budget(settings, calibration, name, speed=speed, require_coverage=execute)
+    if speed is not None:
+        validate_speed(speed, settings)
+    if execute and approach:
+        require_motion_boundary(settings)
     effective = deepcopy(project)
     # No granular medium. Change only this run snapshot, never config.yaml.
     effective['preprocessing']['granular_baseline_output'] = [0.] * 6
@@ -190,10 +193,9 @@ def prepare(project, settings, calibration, name, *, execute, speed=None, approa
     if settings['contact_threshold_N'] >= project['policy']['safety_force_threshold']:
         raise ValueError('contact threshold must be below the existing hard processed-force limit')
     if settings['workspace_limits'] is not None or not settings.get('workspace_enabled', True):
-        effective['workspace'] = dict(enabled=settings.get('workspace_enabled', True),
-                                     limits=deepcopy(settings['workspace_limits'] or project['workspace']['limits']))
+        effective['workspace'] = shared_workspace_config(project, settings)
         end = pose[:3].copy()
-        end[:2] += direction * (settings['max_search_distance_m']+settings['braking_margin_m'])
+        end[:2] += direction * (settings['speed_max_mps']/settings['control_rate_hz']+settings['braking_margin_m'])
         if approach:
             check_segment(pose[:3], end, settings)
     elif execute:
@@ -208,4 +210,8 @@ def prepare(project, settings, calibration, name, *, execute, speed=None, approa
         continuous_require_watchdog=execute and settings.get('require_watchdog', True),
         continuous_sample_age_sec=settings['max_robot_age_sec'],
         continuous_settle_speed_mps=settings['settle_speed_mps'])
+    if settings.get('workspace_enabled') and settings.get('workspace_xy_polygon') is not None:
+        # Activate only the existing geometry guard, never the continuous policy.
+        robot_config.update(continuous_xy_polygon=deepcopy(settings['workspace_xy_polygon']),
+                            continuous_boundary_margin=settings['probe_diameter_m']/2+settings['path_clearance_m'])
     return effective, robot_config, pose, direction

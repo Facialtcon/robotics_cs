@@ -28,11 +28,10 @@ def settings():
     # Small independent test scenarios; production defaults are checked below.
     values = load_settings(ROOT/'single_point_experiment.yaml')
     values.update(inherit_project_parameters=False, speed_max_mps=.002, speed_default_mps=.0005,
-        speed_presets_mps=[.0002, .0005, .001], search_distance_mode='fixed', search_distance_multiplier=1.,
-        max_search_distance_m=.02, max_approach_time_sec=60.,
+        speed_presets_mps=[.0002, .0005, .001], max_approach_time_sec=60.,
         max_force_age_sec=.06, max_cycle_sec=.08, settle_hold_sec=.1, stop_timeout_sec=2.,
         start_position_tolerance_m=.0002, fixed_z_tolerance_m=.0002, watchdog_frequency_hz=10.,
-        require_watchdog=True, workspace_enabled=True, workspace_limits=None, return_lift_distance_m=None,
+        require_watchdog=True, workspace_enabled=False, workspace_xy_polygon=None, workspace_limits=None, return_lift_distance_m=None,
         return_speed_mps=.0005, return_vertical_speed_mps=.0005, speed_acceleration_mps2=.002,
         stop_deceleration_mps2=.002)
     return values
@@ -53,7 +52,8 @@ def test_default_parameters_copy_original_configuration(config):
     assert values['speed_default_mps'] == .018
     assert values['speed_max_mps'] == .030
     assert values['speed_presets_mps'] == [.006, .012, .018]
-    assert values['workspace_enabled'] is False and values['require_watchdog'] is False
+    assert values['workspace_enabled'] is True and values['workspace_verified'] is True
+    assert values['workspace_xy_polygon'] is not None and values['require_watchdog'] is False
     assert config == original
     config['continuous_tracking']['watchdog_frequency_hz'] = 1000.
     # An unused watchdog frequency must not impose a new cycle constraint.
@@ -70,6 +70,7 @@ def test_parameter_inheritance_uses_selected_config_and_keeps_speed_range(config
     assert values['speed_default_mps'] == .009 and values['speed_max_mps'] == .020
     assert validate_speed(.018, values) == .018
     with pytest.raises(ValueError): validate_speed(.021, values)
+    values.update(workspace_enabled=False, workspace_xy_polygon=None, workspace_limits=None)
     effective, rc, _, _ = prepare(config, values, demo_calibration(config), 'A', execute=False)
     assert effective['sensor']['serial_port'] == 'fake-selected-port'
     assert effective['tcp'] == config['tcp'] and effective['robot'] == config['robot']
@@ -84,12 +85,12 @@ def test_show_config_is_offline_and_uses_original_defaults(capsys):
     assert '"speed_max_mps": 0.03' in output
 
 
-def test_inherited_return_and_workspace_follow_original_switch(config):
+def test_return_reuses_copied_xy_boundary_and_original_lift(config):
     values = load_settings(ROOT/'single_point_experiment.yaml', config)
-    pose = [.39, 0, .2, np.pi, 0, 0]
-    effective, segments = plan_return(config, values, pose, [.4, 0, .2, np.pi, 0, 0])
+    pose = [.54, .1, -.01, np.pi, 0, 0]
+    effective, segments = plan_return(config, values, pose, [.55, .1, -.01, np.pi, 0, 0])
     assert not effective['workspace']['enabled']
-    assert segments[0][1][2] == pytest.approx(.23)
+    assert segments[0][1][2] == pytest.approx(.02)
     assert segments[0][2] == config['safe_return']['return_vertical_speed']
     assert segments[2][2] == config['safe_return']['return_speed']
 
@@ -126,6 +127,7 @@ def test_corrupt_direction_and_reference_rejected(tmp_path, config):
 
 
 def bounded(settings):
+    settings.update(workspace_enabled=True, workspace_verified=True, workspace_xy_polygon=None)
     settings['workspace_limits'] = dict(x_min=.3, x_max=.5, y_min=-.1, y_max=.1, z_min=.1, z_max=.3)
     return settings
 
@@ -237,7 +239,8 @@ def test_one_second_history_enforced(settings):
 
 
 class MemoryLog:
-    def __init__(self): self.samples = []; self.commands = []; self.events = []
+    def __init__(self): self.samples = []; self.commands = []; self.events = []; self.json = {}
+    def write_json(self, name, payload): self.json[name] = deepcopy(payload)
     def log_commands(self, records): self.commands.extend(deepcopy(records))
     def log_sample(self, stamp, raw, processed, robot, command, *args, **kwargs):
         self.samples.append(dict(stamp=stamp, raw=raw, processed=processed, robot=robot,
@@ -292,9 +295,9 @@ def test_passing_reference_does_not_mean_contact(config, settings):
     trial, controller, logger = rig(config, settings, contact=1.)
     # A near reference along the same direction; no reference-based termination.
     trial.calibration['P_ref'] = [.3905, 0, .2]
-    settings['max_search_distance_m'] = .001
+    settings['max_approach_time_sec'] = 2.
     result = trial.run()
-    assert result['status'] == 'no_contact' and result['reason'] == 'NO_CONTACT_DISTANCE'
+    assert result['status'] == 'aborted' and result['reason'] == 'EXPERIMENT_TIME_LIMIT'
     assert controller.read_state().pose[0] > .3905
     assert result['threshold_trigger_sec'] is None
     assert not any(e.event_type == 'FIRST_THRESHOLD_STOP_REQUEST' for e in logger.events)
@@ -332,10 +335,11 @@ def test_stop_confirmation_revocation_never_reports_success(config, settings):
 def test_independent_time_budget(config, settings):
     settings['max_approach_time_sec'] = .1
     trial, _, _ = rig(config, settings, contact=1.)
-    assert trial.run()['reason'] == 'NO_CONTACT_TIME'
+    result = trial.run()
+    assert result['reason'] == 'EXPERIMENT_TIME_LIMIT' and result['status'] == 'aborted'
 
 
-@pytest.mark.parametrize('kind', ['timeout', 'nan', 'stale', 'hard_force'])
+@pytest.mark.parametrize('kind', ['timeout', 'nan', 'stale', 'hard_force', 'hard_torque'])
 def test_invalid_sensor_stops_without_motion_and_keeps_tcp_tail(config, settings, kind):
     class BadSensor:
         def __init__(self, controller): self.controller = controller
@@ -343,12 +347,20 @@ def test_invalid_sensor_stops_without_motion_and_keeps_tcp_tail(config, settings
         def sample_timestamp(self): return self.controller.clock()-1 if kind == 'stale' else self.controller.clock()
         def read_wrench(self):
             if kind == 'timeout': raise PX6DTimeout('timeout')
-            return Wrench.from_sequence([np.nan if kind == 'nan' else 100 if kind == 'hard_force' else 0, 0, 0, 0, 0, 0])
+            return Wrench.from_sequence([np.nan if kind == 'nan' else 100 if kind == 'hard_force' else 0,
+                                        0, 0, 100 if kind == 'hard_torque' else 0, 0, 0])
     trial, _, logger = rig(config, settings, sensor=BadSensor)
     result = trial.run()
     assert result['status'] == 'aborted' and result['actual_standstill_sec'] is not None
     assert not any(c['kind'] == 'motion' for c in logger.commands)
-    assert logger.samples and all(r['extra']['force_valid'] == 0 for r in logger.samples)
+    assert logger.samples
+    if kind in ('hard_force', 'hard_torque'):
+        assert result['safety_events'] and not result['force_read_error']
+        assert result['post_stop_record_completed']
+        assert all(r['extra']['force_valid'] == 1 for r in logger.samples)
+    else:
+        assert result['force_read_error'] and not result['post_stop_record_completed']
+        assert all(r['extra']['force_valid'] == 0 for r in logger.samples)
 
 
 def test_operator_abort(config, settings):
@@ -408,15 +420,15 @@ def test_before_send_rechecks_force_after_shared_rtde_read(config, settings):
     owner.close()
 
 
-def test_trial_before_send_rejects_expired_force_and_fresh_distance(config, settings):
-    from app.single_point_runtime import SinglePointSearchLimit
+def test_trial_before_send_rejects_expired_force_and_time_limit(config, settings):
+    from app.single_point_runtime import SinglePointSafetyLimit
     trial, c, _ = rig(config, settings)
-    trial.hold_once()
+    trial.authorize_approach()
     c.sleep(settings['max_force_age_sec']+.01)
     with pytest.raises(RobotError, match='expired'): trial._before_send(c.read_state())
     trial.hold_once()
-    c.model.pose[0] = trial.p0[0]+settings['max_search_distance_m']
-    with pytest.raises(SinglePointSearchLimit): trial._before_send(c.read_state())
+    trial.approach_start = c.clock()-settings['max_approach_time_sec']
+    with pytest.raises(SinglePointSafetyLimit): trial._before_send(c.read_state())
 
 
 def test_scheduling_gap_stops_persistent_command(config, settings):
@@ -448,12 +460,14 @@ def test_approach_is_refused_until_preparation_completes(config, settings):
     np.testing.assert_array_equal(controller.read_state().pose, trial.p0)
 
 
-def test_ready_rejects_vertical_contact_after_preparation(config, settings):
+def test_vertical_contact_checked_after_final_approach_authorization(config, settings):
     class Sensor:
         def read_wrench(self): return Wrench(0., 0., .4, 0., 0., 0.)
     trial, controller, logger = rig(config, settings, sensor=lambda c: Sensor())
+    trial.hold_once()
+    assert not trial.experiment_checks_active and not trial.fault
     with pytest.raises(RobotError, match='not unloaded'):
-        trial.hold_once()
+        trial.authorize_approach()
     assert not controller.command_records and not logger.commands
 
 
@@ -510,12 +524,16 @@ def test_failed_or_unconfirmed_preparation_never_approaches(tmp_path, monkeypatc
         assert devices.control_count == 0 and not devices.control.calls
     if failure == 'air_cancel':
         assert not any(c[0] == 'moveL' and c[1][2] == data['P_ref'][2] for c in devices.control.calls)
-    if failure != 'approach_cancel':
+    if failure not in ('approach_cancel', 'loaded_p0_xy', 'loaded_p0_z'):
         assert not any('确认沿所示方向接近' in p for p in confirmations)
+    else:
+        assert any('确认沿所示方向接近' in p for p in confirmations)
+    if failure.startswith('loaded_p0'):
+        assert result['experiment_checks_active'] and 'not unloaded' in result['fault']
     run = next((tmp_path/'real'/'single_point').glob('run_*'))
     if (run/'air_zero.json').exists():
         assert json.loads((run/'air_zero.json').read_text())['actual_tcp_pose'][2] > data['P_ref'][2]
-    assert not (run/'startup_preparation.json').exists() or failure == 'approach_cancel'
+    assert not (run/'startup_preparation.json').exists() or failure in ('approach_cancel', 'loaded_p0_xy', 'loaded_p0_z')
 
 
 def test_full_hardware_mode_with_injected_devices_only(tmp_path, monkeypatch, config, settings, fake_remote):

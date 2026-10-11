@@ -5,6 +5,13 @@ window.addEventListener('error', e => {
   $('error').textContent = '回放错误：' + e.message;
 });
 const D = JSON.parse($('replay-data').textContent);
+const targetVisibility={shown:!!D.target};
+if(D.fixed_target&&D.target){
+  $('target-options').hidden=false;$('show-target').checked=true;
+  $('show-target').onchange=()=>{
+    targetVisibility.shown=$('show-target').checked;delete cache.xy;dirty=true;render();
+  };
+}
 const S = D.samples, A = D.actual, C = D.commands;
 const colors = ['#3975ae', '#c65050', '#16836b'], phases = ['#3975ae', '#16836b', '#e68621'];
 const finite = v => typeof v === 'number' && Number.isFinite(v);
@@ -87,6 +94,20 @@ function fittedXY(points) {
   return {cx:(x[0]+x[1])/2,cy:(y[0]+y[1])/2,span:Math.max(x[1]-x[0],y[1]-y[0])};
 }
 const allPoints=S.filter(r=>finite(r[1])&&finite(r[2])).map(r=>r.slice(1,3));
+const edgeAnalysis=D.contact_force_direction_analysis;
+const edgeCalibration=edgeAnalysis?.target_edge?.status==='available'?edgeAnalysis.target_edge.calibration:null;
+const validXY=p=>Array.isArray(p)&&p.length>=2&&p.slice(0,2).every(finite);
+const edgePoints=edgeCalibration&&edgeCalibration.frame==='Base'&&validXY(edgeCalibration.A?.tcp_pose)&&validXY(edgeCalibration.B?.tcp_pose)?
+  [edgeCalibration.A.tcp_pose.slice(0,2).map(v=>v*1000),edgeCalibration.B.tcp_pose.slice(0,2).map(v=>v*1000)]:null;
+const edgeVisibility={boundary:true,force:true,analysis:true};
+const triggerPose=edgeAnalysis?.actual_at_threshold?.pose;
+const triggerForce=edgeAnalysis?.filtered_base_xy_N;
+const triggerPoint=validXY(triggerPose)?triggerPose.slice(0,2).map(v=>v*1000):null;
+const triggerTime=finite(edgeAnalysis?.threshold_trigger_sec)?edgeAnalysis.threshold_trigger_sec:null;
+const triggerUnit=edgeAnalysis?.status==='available'&&validXY(triggerForce)&&Math.hypot(...triggerForce)>1e-6?
+  triggerForce.map(v=>v/Math.hypot(...triggerForce)):null;
+if(edgePoints)allPoints.push(...edgePoints);
+if(triggerPoint)allPoints.push(triggerPoint);
 if(D.target)allPoints.push(...D.target);
 if(D.stop)allPoints.push(D.stop);
 const fullXY=fittedXY(allPoints);
@@ -94,6 +115,8 @@ const firstContact=D.first_contact;
 const contactStart=finite(firstContact.time_sec)?firstContact.time_sec:null;
 const contactPoints=contactStart===null?[]:S.filter(r=>r[0]>=contactStart&&finite(r[1])&&finite(r[2])).map(r=>r.slice(1,3));
 if(contactPoints.length&&D.target)contactPoints.push(...D.target);
+if(contactPoints.length&&edgePoints)contactPoints.push(...edgePoints);
+if(contactPoints.length&&triggerPoint)contactPoints.push(triggerPoint);
 const contactXY=contactPoints.length?fittedXY(contactPoints):fullXY;
 views.xy={...contactXY};
 const forceNorm=Math.max(.2,D.deadband.reference||1.5);
@@ -135,6 +158,25 @@ legend('force');legend('velocity');
 eventOptions('event-kinds',[['first','首次接触'],['contact','接触确认'],['tracking','进入跟踪'],
   ['lost','丢失接触'],['recovered','恢复接触'],['stop','停止事件']],true);
 eventOptions('event-layers',[['text','事件文字'],['lines','事件竖线'],['markers','TCP轨迹上的事件标记']],false);
+if(D.single_point){
+  $('edge-options').hidden=false;
+  $('edge-hint').hidden=!edgePoints;
+  for(const [key,name] of [['boundary','显示标定边界'],['force','显示首次接触力方向'],['analysis','显示夹角分析']]){
+    const label=document.createElement('label'),input=document.createElement('input');
+    input.type='checkbox';input.checked=true;input.setAttribute('aria-label',name);
+    input.onchange=()=>{edgeVisibility[key]=input.checked;$('edge-analysis-panel').hidden=!edgeVisibility.analysis;dirty=true;render();};
+    label.append(input,document.createTextNode(name));$('edge-options').append(label);
+  }
+  $('edge-analysis-panel').hidden=false;
+  $('edge-analysis').textContent=edgeAnalysis?.status==='available'?
+    '标定边界方向：'+fmt(edgeAnalysis.boundary_direction_deg)+'°\n接触力方向：'+fmt(edgeAnalysis.force_direction_deg)+
+    '°\n力与边界夹角：'+fmt(edgeAnalysis.angle_to_edge_deg)+'°\n理想垂直夹角：90°\n垂直方向偏差：'+
+    fmt(edgeAnalysis.perpendicular_error_deg)+'°\n触发时Fxy：'+fmt(edgeAnalysis.fxy_N,3)+' N'+
+    '\n滤波前 Base Fx / Fy：'+(edgeAnalysis.unfiltered_base_xy_N||[]).map(v=>fmt(v,3)).join(' / ')+
+    (edgeAnalysis.unfiltered_analysis?' N；滤波前夹角：'+fmt(edgeAnalysis.unfiltered_analysis.angle_to_edge_deg)+'°':
+      '\n'+(edgeAnalysis.unfiltered_reason||'滤波前数据未记录')):
+    '无法计算：'+(edgeAnalysis?.reason||'旧实验未记录目标直边及阈值帧方向分析；未使用当前标定或停车后力代替。');
+}
 for(const [id,mode] of [['events-all','all'],['events-none','none'],['events-default','default']])$(id).onclick=()=>{
   eventVisibility.kinds=new Set(mode==='all'?Object.keys(eventGroups):mode==='default'?['lost','recovered']:[]);
   for(const layer of ['text','lines','markers'])eventVisibility[layer]=mode!=='none';
@@ -332,11 +374,21 @@ function markerLabels(c,g,markers) {
 }
 function drawXY(row,actual) {
   const {c,w,h}=surface('xy'),g=spatialGeometry('xy',w,h);
+  geometry.xy.targetOutline=targetVisibility.shown?D.target:null;
   const key=JSON.stringify([w,h,window.devicePixelRatio,views.xy]);
   const project=p=>[g.x(p[0]),g.y(p[1])];
   if(!cache.xy||cache.xy.key!==key){
     axes(c,g,g.xlim,g.ylim,'Base X [mm]','Base Y [mm]');
-    clip(c,g);if(D.target)line(c,D.target.map(project),'#344256',1.4,[6,4]);
+    clip(c,g);
+    if(D.target&&targetVisibility.shown){
+      const outline=D.target.map(project);
+      if(D.fixed_target){
+        c.beginPath();c.moveTo(...outline[0]);
+        for(const point of outline.slice(1))c.lineTo(...point);
+        c.closePath();c.fillStyle='rgba(52,66,86,0.12)';c.fill();
+      }
+      line(c,outline,'#344256',1.4,[6,4]);
+    }
     const path=[];let previous=null;
     for(const r of S){
       if(!finite(r[1])||!finite(r[2])){previous=null;continue;}
@@ -365,8 +417,27 @@ function drawXY(row,actual) {
   }
   tc.restore();item.trailEnd=target;c.drawImage(item.trail,0,0,w,h);
   clip(c,g);
+  geometry.xy.edgeOverlay={boundary:null,forceArrow:null};
+  if(edgePoints&&edgeVisibility.boundary){
+    line(c,edgePoints.map(project),'#d97706',2.4,[7,4]);
+    markerLabels(c,g,edgePoints.map((point,i)=>({point:project(point),color:'#d97706',label:i?'B':'A'})));
+    geometry.xy.edgeOverlay.boundary=edgePoints;
+  }
+  // A direction illustration fixed at the actual threshold TCP observation.
+  // Normalize only length; preserve measured signs in the common Base XY axes.
+  if(triggerPoint&&triggerUnit&&edgeVisibility.force&&triggerTime!==null){
+    const length=views.xy.span*.12,end=triggerPoint.map((v,i)=>v+triggerUnit[i]*length);
+    const beginPixel=project(triggerPoint),endPixel=project(end);
+    arrow(c,...beginPixel,endPixel[0]-beginPixel[0],endPixel[1]-beginPixel[1],'#701a75');
+    markerLabels(c,g,[{point:beginPixel,color:'#701a75',label:'首次阈值触发'}]);
+    geometry.xy.edgeOverlay.forceArrow={start:triggerPoint,end,unit:triggerUnit,normalized:true};
+  }
   const markers=[{point:project(S[0].slice(1,3)),color:'#26384d',label:'起点'},
     {point:project(S[S.length-1].slice(1,3)),color:'#26384d',label:'最终记录'}];
+  if(D.fixed_target&&contactStart!==null&&elapsed>=contactStart){
+    const index=lastAt(S,contactStart),point=index>=0?S[index].slice(1,3):null;
+    if(point&&point.every(finite))markers.push({point:project(point),color:'#9b287b',label:'首次接触'});
+  }
   if(D.stop&&eventVisibility.kinds.has('stop')&&(eventVisibility.markers||eventVisibility.text))
     markers.push({point:project(D.stop),color:'#b72a33',label:'停止确认',marker:eventVisibility.markers,text:eventVisibility.text});
   const counts={CONTACT_LOST:0,REACQUIRED:0};
@@ -612,5 +683,5 @@ $('note').textContent='内嵌全部 '+D.sample_count+' 帧和原始发送时间�
   '主时间轴滚轮缩放、Shift+拖动平移；完整实验时间按钮恢复全局。';
 window.addEventListener('resize',()=>dirty=true);
 render();requestAnimationFrame(frame);
-window.experimentReplay={seek,render,frame,setRate,resetView,wheelView,niceTicks,peakPoints,eventEnabled,eventVisibility,cache,data:D,views,geometry,
+window.experimentReplay={seek,render,frame,setRate,resetView,wheelView,niceTicks,peakPoints,eventEnabled,eventVisibility,edgeVisibility,targetVisibility,cache,data:D,views,geometry,
   get time(){return elapsed;},get rate(){return rate;},get playing(){return playing;}};

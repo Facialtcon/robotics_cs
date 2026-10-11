@@ -20,11 +20,20 @@ EXTRA_FIELDS = ('force_read_start_sec', 'force_read_end_sec', 'force_valid',
     'approach_direction_x', 'approach_direction_y', 'nominal_approach_speed_mps',
     'threshold_trigger_sec', 'braking_request_sec', 'standstill_confirmed_sec',
     'stop_phase', 'stop_failure_kind', 'timeout_phase', 'post_stop_record_start_sec',
-    'post_stop_record_end_sec', 'standstill_speed_mps', 'distance_trigger_sec')
+    'post_stop_record_end_sec', 'standstill_speed_mps', 'force_safety_reason',
+    'processed_torque_norm_Nm', 'force_read_error', 'experiment_checks_active',
+    'experiment_checks_activated_sec')
 
 
-class SinglePointSearchLimit(RobotError):
-    """Fresh execution read reached the independent distance budget."""
+class SinglePointSafetyLimit(RobotError):
+    """The independent experiment time limit expired before a velocity send."""
+
+
+class ForceSafetyThresholdExceeded(RobotError):
+    """A fresh finite measurement exceeded a limit; the sensor still works."""
+    def __init__(self, reason, raw):
+        super().__init__(reason)
+        self.raw = raw
 
 
 class FreshForceReader:
@@ -33,19 +42,22 @@ class FreshForceReader:
         self.reader, self.settings, self.hard_limits, self.clock = reader, settings, hard_limits, clock
         self.start = self.end = None
 
-    def read_wrench(self):
+    def read_wrench(self, *, enforce_limits=True):
         started = self.clock()
         raw = self.reader.read_wrench()  # PX6D issues a fresh validated request every call.
         ended = self.clock()
         if ended < started or ended-started > self.settings['max_force_age_sec']:
             raise RobotError('stale force request; cannot authorize motion')
-        reason = raw_safety_reason(raw, self.hard_limits)
-        if reason:
-            raise RobotError(reason)
         source_stamp = getattr(self.reader, 'sample_timestamp', ended)
         if not np.isfinite(source_stamp) or not 0 <= ended-source_stamp <= self.settings['max_force_age_sec']:
             raise RobotError('stale force sample')
         self.start, self.end = started, ended
+        reason = raw_safety_reason(raw, self.hard_limits)
+        if reason:
+            if not np.isfinite(raw.array()).all():
+                raise RobotError(reason)
+            if enforce_limits:
+                raise ForceSafetyThresholdExceeded(reason, raw)
         return raw
 
 
@@ -60,6 +72,8 @@ class SinglePointTrial:
         self.poll, self.clock, self.sleep = poll, clock, sleep
         self.p0 = experiment_start_pose(calibration, name, project['calibration']['probe_axis_tcp'])
         self.preparation_complete = preparation_complete
+        self.experiment_checks_active = False
+        self.experiment_checks_activated_sec = None
         self.direction = np.asarray(calibration['groups'][name]['direction_xy'], dtype=float)
         self.state = 'READY'
         self.robot = self.raw = self.processed = None
@@ -74,8 +88,11 @@ class SinglePointTrial:
         self.fault = ''
         self.stop_requested = False
         self.force_failed = False
+        self.force_failure_detail = ''
+        self.force_safety_reason = ''
+        self.safety_events = []
         self.last_motion_cycle = None
-        self.distance_trigger = None
+        self.trigger_force = None
         self.stop_speed = None
         self.stop_phase = 'NOT_REQUESTED'
         self.stop_failure_kind = self.timeout_phase = None
@@ -87,6 +104,8 @@ class SinglePointTrial:
         self.controller.before_velocity_send = self._before_send
 
     def _before_send(self, robot):
+        if not self.experiment_checks_active or self.stop_requested:
+            raise RobotError('formal approach not authorized or already stopped; velocity send refused')
         now = self.clock()
         if not self.force_valid or now-self.reader.start > self.s['max_force_age_sec']:
             raise RobotError('force expired during execution read; velocity send refused')
@@ -94,20 +113,14 @@ class SinglePointTrial:
             raise RobotError('TCP sample expired before SDK send')
         delta = robot.pose[:2]-self.p0[:2]
         along = float(delta @ self.direction)
-        if along+self.speed/self.s['control_rate_hz'] >= self.s['max_search_distance_m']:
-            self.distance_trigger = self._actual_observation(robot)
-            raise SinglePointSearchLimit('NO_CONTACT_DISTANCE')
+        if self.approach_start is not None and now-self.approach_start >= self.s['max_approach_time_sec']:
+            raise SinglePointSafetyLimit('EXPERIMENT_TIME_LIMIT')
         if np.linalg.norm(delta-along*self.direction) > self.s['start_position_tolerance_m']:
             raise RobotError('fresh execution pose departed from calibrated ray')
         from app.single_point_config import check_segment
-        if self.s['workspace_limits'] is not None:
-            end = robot.pose[:3].copy()
-            end[:2] += self.direction*(self.speed/self.s['control_rate_hz']+self.s['braking_margin_m'])
-            check_segment(robot.pose[:3], end, self.s)
-
-    def _actual_observation(self, robot):
-        return dict(timestamp=robot.timestamp, observed_host_sec=self.clock(),
-                    pose=robot.pose.tolist(), velocity=robot.tcp_speed.tolist())
+        end = robot.pose[:3].copy()
+        end[:2] += self.direction*(self.speed/self.s['control_rate_hz']+self.s['braking_margin_m'])
+        check_segment(robot.pose[:3], end, self.s)
 
     def _event(self, kind, stamp, *, pose=None):
         self.logger.log_waypoint(PolicyWaypoint(stamp, self.state, kind,
@@ -122,13 +135,21 @@ class SinglePointTrial:
     def _observe(self, *, diagnostic=False):
         started = self.clock()
         self.force_valid = False
+        self.force_safety_reason = ''
         if not self.force_failed:
             try:
-                self.raw = self.reader.read_wrench()
-            except Exception:
+                self.raw = self.reader.read_wrench(enforce_limits=self.experiment_checks_active or diagnostic)
+            except ForceSafetyThresholdExceeded as exc:
+                if not diagnostic:
+                    raise
+                # Braking is already requested. Preserve the valid over-limit
+                # sample and keep reading; it is not a disconnected sensor.
+                self.raw = exc.raw
+            except Exception as exc:
                 if not diagnostic:
                     raise
                 self.force_failed = True
+                self.force_failure_detail = f'{type(exc).__name__}: {exc}'
         self.robot = (self.controller.read_diagnostic_state() if diagnostic else self.controller.read_state())
         now = self.clock()
         if not np.isfinite(np.r_[self.robot.pose, self.robot.tcp_speed, self.robot.timestamp]).all():
@@ -148,13 +169,48 @@ class SinglePointTrial:
             self.peak_filtered = max(self.peak_filtered, float(np.hypot(self.processed.fx, self.processed.fy)))
             self.peak_unfiltered = max(self.peak_unfiltered, float(np.linalg.norm(self.processor.force_base[:2])))
             reason = force_safety_reason(self.raw, self.processed, self.project['policy'])
-            if reason:
-                raise RobotError(reason)
+            if reason and (self.experiment_checks_active or diagnostic):
+                self._note_force_safety(reason, now)
+                if not diagnostic:
+                    raise RobotError(reason)
         if now-started > self.s['max_cycle_sec']:
             raise RobotError('observation cycle deadline exceeded')
         return now
 
-    def _stationary(self):
+    def _note_force_safety(self, reason, stamp):
+        """Keep bounded, measured safety evidence separately from stop failures."""
+        policy = self.project['policy']
+        checks = {
+            'processed force safety threshold exceeded': (self.processed.force, 'safety_force_threshold', 'N'),
+            'processed torque safety threshold exceeded': (self.processed.torque, 'safety_torque_threshold', 'N·m'),
+            'absolute raw force safety threshold exceeded': (self.raw.force, 'absolute_raw_force_threshold', 'N'),
+            'absolute raw torque safety threshold exceeded': (self.raw.torque, 'absolute_raw_torque_threshold', 'N·m'),
+        }
+        self.force_safety_reason = reason
+        # Record every exceeded limit, even when the shared guard returns only
+        # its first match. This does not change the guard or any thresholds.
+        for detail, (vector, key, unit) in checks.items():
+            value, limit = float(np.linalg.norm(vector)), float(policy[key])
+            if value < limit:
+                continue
+            event = next((item for item in self.safety_events if item['reason'] == detail), None)
+            if event is None:
+                event = dict(reason=detail, phase=self.stop_phase if self.stop_requested else self.state,
+                    first_sec=stamp, force_read_start_sec=self.reader.start, force_read_end_sec=self.reader.end,
+                    value=value, limit=limit, unit=unit, sample_count=0, peak_value=value, peak_sec=stamp,
+                    peak_phase=self.stop_phase if self.stop_requested else self.state,
+                    raw_wrench_sensor=self.raw.array().tolist(),
+                    processed_wrench_base=self.processed.array().tolist(), tcp_pose=self.robot.pose.tolist())
+                self.safety_events.append(event)
+                message = f'{detail}: {value:.3f} >= {limit:.3f} {unit}'
+                self.fault = f'{self.fault}; {message}' if self.fault else message
+            event['sample_count'] += 1
+            event['last_sec'] = stamp
+            if value > event['peak_value']:
+                event.update(peak_value=value, peak_sec=stamp,
+                             peak_phase=self.stop_phase if self.stop_requested else self.state)
+
+    def _stationary(self, *, check_unloaded=True):
         r = self.robot
         if (np.linalg.norm(r.pose[:3]-self.p0[:3]) > self.s['start_position_tolerance_m'] or
             abs(r.pose[2]-self.p0[2]) > self.s['fixed_z_tolerance_m'] or
@@ -163,7 +219,7 @@ class SinglePointTrial:
             np.linalg.norm(r.tcp_speed[:3]) > self.s['settle_speed_mps'] or
             np.linalg.norm(r.tcp_speed[3:]) > .005):
             raise RobotError('prepared P0 must be stationary at reference Z with a downward probe')
-        if (np.hypot(self.processed.fx, self.processed.fy) >= self.s['unloaded_max_fxy_N'] or
+        if check_unloaded and (np.hypot(self.processed.fx, self.processed.fy) >= self.s['unloaded_max_fxy_N'] or
             np.linalg.norm(self.processor.air_compensated_wrench_base(self.raw).force) >= self.s['unloaded_max_fxy_N']):
             raise RobotError('P0 is not unloaded; do not zero against the target')
 
@@ -186,7 +242,12 @@ class SinglePointTrial:
             post_stop_record_start_sec=self.post_record_start if self.post_record_start is not None else '',
             post_stop_record_end_sec=self.post_record_end if self.post_record_end is not None else '',
             standstill_speed_mps=float(np.linalg.norm(self.stop_speed[:3])) if self.stop_speed is not None else '',
-            distance_trigger_sec=self.distance_trigger['observed_host_sec'] if self.distance_trigger else '',
+            force_safety_reason=self.force_safety_reason,
+            processed_torque_norm_Nm=float(np.linalg.norm(self.processed.torque)) if self.force_valid else '',
+            force_read_error=self.force_failure_detail,
+            experiment_checks_active=int(self.experiment_checks_active),
+            experiment_checks_activated_sec=self.experiment_checks_activated_sec if
+                self.experiment_checks_activated_sec is not None else '',
             processed_force_frame='Base',
             **(self.processor.force_log_fields if self.force_valid else {}))
         # PolicyCommand is only the existing immutable log format here.
@@ -205,10 +266,16 @@ class SinglePointTrial:
         if self.poll() in ('Q', 'ESC'):
             raise KeyboardInterrupt('operator stopped before approach')
         stamp = self._observe()
-        self._stationary()
+        self._stationary(check_unloaded=self.experiment_checks_active)
         self._kick()
         self._record(stamp)
         self.logger.check_health()
+
+    def authorize_approach(self):
+        """Called after the existing final Enter; validate before any velocity."""
+        self.experiment_checks_active = True
+        self.experiment_checks_activated_sec = self.clock()
+        self.hold_once()
 
     def record_precontact(self):
         started = self.clock()
@@ -229,25 +296,30 @@ class SinglePointTrial:
         self.stop_requested = True
         self.stop_phase = 'BRAKING_CONFIRMATION'
         self.state = 'CONTACT_STOP' if contact else 'SETTLING'
-        if reason == 'NO_CONTACT_DISTANCE' and self.distance_trigger is None and self.robot is not None:
-            self.distance_trigger = self._actual_observation(self.robot)
         if contact:
             self.trigger_force_time = self.reader.end
             self.actual_before = deepcopy(self.previous_actual)
             self.actual_at_threshold = dict(timestamp=self.robot.timestamp,
                 velocity=self.robot.tcp_speed.tolist(), pose=self.robot.pose.tolist())
+            self.trigger_force = dict(frame='Base', fxy_N=float(np.hypot(self.processed.fx, self.processed.fy)),
+                                      processed_wrench_base=self.processed.array().tolist(),
+                                      unfiltered_force_base=self.processor.force_base.tolist(),
+                                      force_read_start_sec=self.reader.start,
+                                      force_read_end_sec=self.reader.end,
+                                      raw_wrench_sensor=self.raw.array().tolist())
         if (report or {}).get('api_anomaly'):
             self._stop_fault('BRAKING_API_FAILURE', 'braking API failed or rejected the command')
         if self.robot is not None:
             try:
                 self._event('FIRST_THRESHOLD_STOP_REQUEST' if contact else
-                            'USER_STOP' if reason == 'USER_ABORT' else 'BUDGET_STOP',
-                            self.threshold_time if contact else self.braking_time,
-                            pose=self.distance_trigger['pose'] if reason == 'NO_CONTACT_DISTANCE' and self.distance_trigger else None)
+                            'USER_STOP' if reason == 'USER_ABORT' else 'SAFETY_STOP',
+                            self.threshold_time if contact else self.braking_time)
             except Exception as exc:
                 self.fault = self.fault or f'event logging failed: {exc}'
 
     def _approach_guard(self, stamp):
+        from app.single_point_config import check_segment
+        check_segment(self.robot.pose[:3], self.robot.pose[:3], self.s)
         delta = self.robot.pose[:2]-self.p0[:2]
         along = float(delta @ self.direction)
         lateral = float(np.linalg.norm(delta-along*self.direction))
@@ -260,15 +332,16 @@ class SinglePointTrial:
         self.previous_pose = self.robot.pose.copy()
         if np.linalg.norm(self.robot.tcp_speed[:3]) > self.s['speed_max_mps']*1.2:
             raise RobotError('actual approach speed exceeds independent limit')
-        if self.path_distance+self.speed/self.s['control_rate_hz'] >= self.s['max_search_distance_m']:
-            return 'NO_CONTACT_DISTANCE'
         if stamp-self.approach_start >= self.s['max_approach_time_sec']:
-            return 'NO_CONTACT_TIME'
+            return 'EXPERIMENT_TIME_LIMIT'
         return None
 
     def approach(self):
         if not self.preparation_complete:
             raise RobotError('startup preparation incomplete; approach refused')
+        self.experiment_checks_active = True
+        if self.experiment_checks_activated_sec is None:
+            self.experiment_checks_activated_sec = self.clock()
         self.state = 'APPROACH'
         self.approach_start = self.clock()
         self.previous_pose = self.p0.copy()
@@ -282,10 +355,10 @@ class SinglePointTrial:
             stamp = self._observe()
             # Position of P_ref never appears in these termination conditions.
             limit_reason = self._approach_guard(stamp)
-            if np.hypot(self.processed.fx, self.processed.fy) >= self.s['contact_threshold_N']:
-                self._request_stop('CONTACT_THRESHOLD', contact=True)
-            elif limit_reason:
+            if limit_reason:
                 self._request_stop(limit_reason)
+            elif np.hypot(self.processed.fx, self.processed.fy) >= self.s['contact_threshold_N']:
+                self._request_stop('CONTACT_THRESHOLD', contact=True)
             else:
                 self.previous_actual = dict(timestamp=self.robot.timestamp, velocity=self.robot.tcp_speed.tolist())
                 self._kick()
@@ -343,9 +416,12 @@ class SinglePointTrial:
                 stamp = self._observe(diagnostic=True)
             except Exception as exc:
                 self.fault = self.fault or f'{type(exc).__name__}: {exc}'
-                # A sensor failure must not prevent TCP braking telemetry.
-                self.force_failed = True
+                # TCP/processing errors are observation failures, not evidence
+                # of a failed force sensor. Continue fresh TCP stop monitoring.
                 self.force_valid = False
+                record_failed = record_failed or self.stopped_time is not None
+                self._stop_fault('POST_STOP_RECORDING_INCOMPLETE' if self.stopped_time is not None else
+                                 'STOP_TELEMETRY_INCOMPLETE', f'settling observation failed: {type(exc).__name__}: {exc}')
                 try:
                     self.robot = self.controller.read_diagnostic_state()
                 except Exception as tcp_exc:
@@ -381,7 +457,8 @@ class SinglePointTrial:
                 self.fault = self.fault or 'force sensor failed during settling'
                 record_failed = record_failed or self.stopped_time is not None
                 self._stop_fault('POST_STOP_RECORDING_INCOMPLETE' if self.stopped_time is not None else
-                                 'STOP_TELEMETRY_INCOMPLETE', 'force sensor failed during settling; TCP monitoring continued')
+                                 'STOP_TELEMETRY_INCOMPLETE',
+                                 f'force data unavailable during settling: {self.force_failure_detail}; TCP monitoring continued')
             if stopped and self.stopped_time is None:
                 # poll_stop can perform a fresh mode-exit read. Record a TCP
                 # observation after that operation as the confirmed stop pose.
@@ -442,8 +519,8 @@ class SinglePointTrial:
         try:
             self.approach()
         except BaseException as exc:
-            if isinstance(exc, SinglePointSearchLimit):
-                reason = 'NO_CONTACT_DISTANCE'
+            if isinstance(exc, SinglePointSafetyLimit):
+                reason = 'EXPERIMENT_TIME_LIMIT'
             elif isinstance(exc, KeyboardInterrupt):
                 self.fault = f'{type(exc).__name__}: {exc}'
                 reason = 'USER_ABORT'
@@ -460,23 +537,25 @@ class SinglePointTrial:
 
     def summary(self):
         return dict(status='contact' if self.threshold_time is not None and self.stopped_time is not None and
-                    self.post_record_complete and not self.fault else 'no_contact' if self.reason.startswith('NO_CONTACT') and
-                    self.stopped_time is not None and self.post_record_complete and not self.fault else 'aborted',
+                    self.post_record_complete and not self.fault else 'aborted',
             state=self.state, reason=self.reason, fault=self.fault, p0_name=self.name, p0=self.p0.tolist(),
+            contact_triggered=self.threshold_time is not None, safety_events=deepcopy(self.safety_events),
+            force_read_error=self.force_failure_detail,
+            experiment_checks_active=self.experiment_checks_active,
+            experiment_checks_activated_sec=self.experiment_checks_activated_sec,
             P_ref=self.calibration['P_ref'], direction_xy=self.direction.tolist(), nominal_speed_mps=self.speed,
             contact_threshold_N=self.s['contact_threshold_N'], threshold_trigger_sec=self.threshold_time,
             force_trigger_sample_sec=self.trigger_force_time,
             braking_request_sec=self.braking_time, actual_standstill_sec=self.stopped_time,
             actual_before_threshold=self.actual_before, actual_at_threshold=self.actual_at_threshold,
             actual_stop_pose=self.stop_pose,
-            actual_stop_tcp_speed=self.stop_speed, no_contact_distance_trigger=self.distance_trigger,
+            actual_stop_tcp_speed=self.stop_speed, force_at_threshold=self.trigger_force,
             stop_phase=self.stop_phase, stop_failure_kind=self.stop_failure_kind,
             stop_failures=deepcopy(self.stop_failures), timeout_phase=self.timeout_phase,
             stop_confirmation_deadline_sec=self.stop_confirmation_deadline,
             post_stop_record_start_sec=self.post_record_start, post_stop_record_end_sec=self.post_record_end,
             post_stop_record_completed_sec=self.post_record_finished,
             post_stop_record_deadline_sec=self.post_record_deadline, post_stop_record_completed=self.post_record_complete,
-            max_search_distance_m=self.s['max_search_distance_m'],
             max_approach_time_sec=self.s['max_approach_time_sec'],
             peak_filtered_fxy_N=self.peak_filtered, peak_unfiltered_fxy_N=self.peak_unfiltered,
             actual_search_path_m=self.path_distance,

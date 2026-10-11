@@ -108,7 +108,9 @@ def stop_after_exception(controller, termination):
                                     source="continuous.stop_failure", terminal=False)
 
 
-def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader):
+def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
+        prepare_execution=None, configure_experiment=None,
+        check_control_mode=None, visualize_run=None, simulation_factory=None):
     if getattr(args, 'preview', False):
         if args.execute:
             raise ValueError('--preview and --execute are mutually exclusive')
@@ -140,6 +142,8 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
     try:
         termination.observe(phase='CONFIG_PREFLIGHT')
         config = deepcopy(load_config(args.config))
+        if configure_experiment is not None:
+            configure_experiment(config)
         if getattr(args, 'basic_contact', False):
             config['preprocessing']['granular_baseline'] = dict(capture_on_start=False, sample_count=100)
             config['preprocessing']['granular_baseline_output'] = [0.] * 6
@@ -159,13 +163,14 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
         if args.execute:
             if getattr(args, 'enable_reacquire', False):
                 raise RobotError('--enable-reacquire is offline only')
-            robot_config, start = prepare_real(config, args.config)
+            robot_config, start = (prepare_execution or prepare_real)(config, args.config)
             geometry = config['continuous_search_geometry']
-            print(f"Search geometric distance to sandbox boundary: {geometry['geometric_distance_m']*1000:.4f} mm\n"
+            region_name = 'workspace' if config.get('fixed_target_experiment') else 'sandbox'
+            print(f"Search geometric distance to {region_name} boundary: {geometry['geometric_distance_m']*1000:.4f} mm\n"
                   f"Search stopping margin: {geometry['stopping_margin_m']*1000:.4f} mm\n"
                   f"Effective TARGET_SEARCH distance: {geometry['usable_distance_m']*1000:.4f} mm", flush=True)
             if 'continuous_calibration_sources' in config:
-                print("Using saved scan / sandbox calibration:\n"+
+                print(f"Using saved scan / {region_name} calibration:\n"+
                       json.dumps(calibration_summary(config),ensure_ascii=False,indent=2),flush=True)
         elif getattr(args, 'enable_reacquire', False):
             config['continuous_tracking']['reacquire_enabled'] = True
@@ -211,10 +216,10 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             from simulation.simulator import load_simulation_config
             from simulation.continuous_session import SimulationSession
             scene = load_simulation_config(args.scene)
-            if getattr(args, 'basic_contact', False):
+            if getattr(args, 'basic_contact', False) or config.get('fixed_target_experiment'):
                 scene['force_model']['granular_drag_force'] = 0.
                 scene['preprocessing']['granular_baseline_output'] = [0.] * 6
-            session = SimulationSession(config, scene)
+            session = (simulation_factory or SimulationSession)(config, scene)
             config = session.config
             policy, controller, reader = session.policy, session.robot, session.sensor
             preprocessor = session.preprocessor
@@ -244,28 +249,14 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
             robot_connect_started = True
             termination.observe(phase='ROBOT_CONNECT')
             controller.connect(allow_start_away_from_fixed_pose=True)
+            if check_control_mode is not None:
+                check_control_mode(config['robot']['robot_ip'])
         else:
             robot = controller.read_state()
         startup_return_done = False
         with OperatorKeyboard() as keyboard:
             if args.execute:
-                def prepare_descent(above):
-                    # Reuse MOVE_ABOVE_START's safe height. Never zero at scan
-                    # depth, including a startup already positioned at P0.
-                    termination.observe(phase='SCAN_BIAS_ABOVE_P0')
-                    state = controller.read_state()
-                    check_startup_stationary(config, state, controller, anchor=above)
-                    preprocessor.set_tool_orientation(state.pose[3:])
-                    keyboard.on_wait = lambda: hold_startup_confirmation(config, above, controller)
-                    if baseline.get('capture_on_start', True):
-                        if not confirm_enter('P0 正上方抬升位置：确认探针脱离目标及颗粒、静止空载；即将采集扫描零偏。',
-                                             read_line=keyboard.read_line):
-                            raise KeyboardInterrupt('bias not confirmed')
-                        capture_stationary_bias(config, reader, preprocessor, controller,
-                            baseline['sample_count'], poll=keyboard.poll, logger=logger)
-                        logger.write_json('scan_bias_at_start.json', dict(
-                            reference='above_P0_before_vertical_insertion', tcp_pose=state.pose.tolist(),
-                            zero_bias_sensor=preprocessor.zero_bias_sensor.tolist(), sample_count=baseline['sample_count']))
+                def select_speed():
                     selection = choose_tracking_speed(base_tangential_speed, float(config['robot']['max_tcp_speed']),
                                                       read_text=keyboard.read_text)
                     # Only the desired tangential component changes; retain all
@@ -282,11 +273,35 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     timing.update(selection)
                     logger.write_config_snapshot(config)
                     logger.write_json('tracking_speed_selection.json', selection)
-                    scan_prompt = ('基础接触实验：即将垂直下降至 P0 扫描高度；目标须固定、P0 须无接触，不采集颗粒基线。'
+                def prepare_descent(above):
+                    # Reuse MOVE_ABOVE_START's safe height. Never zero at scan
+                    # depth, including a startup already positioned at P0.
+                    termination.observe(phase='SCAN_BIAS_ABOVE_P0')
+                    state = controller.read_state()
+                    check_startup_stationary(config, state, controller, anchor=above)
+                    preprocessor.set_tool_orientation(state.pose[3:])
+                    keyboard.on_wait = lambda: hold_startup_confirmation(config, above, controller)
+                    if baseline.get('capture_on_start', True):
+                        bias_prompt = ('P0 正上方抬升位置：确认探针脱离固定目标、静止空载；即将采集扫描零偏。'
+                                       if config.get('fixed_target_experiment') else
+                                       'P0 正上方抬升位置：确认探针脱离目标及颗粒、静止空载；即将采集扫描零偏。')
+                        if not confirm_enter(bias_prompt,
+                                             read_line=keyboard.read_line):
+                            raise KeyboardInterrupt('bias not confirmed')
+                        capture_stationary_bias(config, reader, preprocessor, controller,
+                            baseline['sample_count'], poll=keyboard.poll, logger=logger)
+                        logger.write_json('scan_bias_at_start.json', dict(
+                            reference='above_P0_before_vertical_insertion', tcp_pose=state.pose.tolist(),
+                            zero_bias_sensor=preprocessor.zero_bias_sensor.tolist(), sample_count=baseline['sample_count']))
+                    if not config.get('fixed_target_experiment'):
+                        select_speed()
+                    scan_prompt = ('固定目标连续跟踪：即将下降至 P_ref 的统一 Z 高度；首次接触后继续跟踪，不采集颗粒基线。'
+                                   if config.get('fixed_target_experiment') else
+                                   '基础接触实验：即将垂直下降至 P0 扫描高度；目标须固定、P0 须无接触，不采集颗粒基线。'
                                    if getattr(args, 'basic_contact', False) else
                                    '即将垂直向下插入至 P0 扫描深度，停稳并处理颗粒背景力后，从 P0 沿保存方向开始扫描。')
-                    if not confirm_enter(scan_prompt,
-                                         read_line=keyboard.read_line):
+                    if not config.get('fixed_target_experiment') and not confirm_enter(
+                            scan_prompt, read_line=keyboard.read_line):
                         raise KeyboardInterrupt('scan not confirmed')
                     hold_startup_confirmation(config, above, controller)
                     termination.observe(phase='SCAN_INSERTION')
@@ -324,6 +339,12 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                     sample_count=granular.get('sample_count', baseline['sample_count']) if granular.get('capture_on_start', True) else 0,
                     condition='target-free background; no target force may be calibrated away'))
                 logger.write_config_snapshot(config)
+                if config.get('fixed_target_experiment'):
+                    select_speed()
+                    if not confirm_enter('已到达实验起点并停稳；按 Enter 沿 P0 → P_ref 的初始方向开始连续跟踪实验。',
+                                         read_line=keyboard.read_line):
+                        raise KeyboardInterrupt('search not confirmed')
+                    hold_startup_confirmation(config, start, controller)
                 if getattr(args, 'basic_contact', False):
                     print('基础接触实验：无颗粒基线；开始扫描前记录至少 1 秒静止 TCP / 力数据。', flush=True)
                     stationary_preroll(config, controller, reader, preprocessor, logger, keyboard.poll)
@@ -694,7 +715,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader)
                 if isinstance(logger, ContinuousLogWriter) and not logger.closed:
                     raise OSError('后台日志尚未关闭；暂不生成可能不完整的回放，请在写盘结束后离线生成')
                 from visualization.run_plots import generate_run_visualization
-                for path in generate_run_visualization(logger.run_dir):
+                for path in (visualize_run or generate_run_visualization)(logger.run_dir):
                     print(f'实验可视化：{path}', flush=True)
             except Exception as exc:
                 print(f'轨迹图生成失败，可离线回放重试：{type(exc).__name__}: {exc}', flush=True)

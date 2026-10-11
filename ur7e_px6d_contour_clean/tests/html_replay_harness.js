@@ -43,6 +43,20 @@ const wheel=(id,dy,shiftKey=false)=>api.wheelView(id,{clientX:350,clientY:110,de
 check(api.rate===.25,'default speed');
 check(data.samples.length===data.sample_count,'every raw sample available');
 const originalData=copy(api.data),originalViews=copy(api.views);
+if(data.fixed_target&&data.target){
+  check(!elements['target-options'].hidden&&elements['show-target'].checked,'target overlay defaults on');
+  const overlayView=copy(api.views.xy),overlayTime=api.time,oldCanvas=api.cache.xy.canvas;
+  const expected=copy(data.target);
+  elements['show-target'].checked=false;elements['show-target'].onchange();
+  check(!api.targetVisibility.shown&&api.geometry.xy.targetOutline===null,'target outline hides');
+  check(api.cache.xy.canvas!==oldCanvas,'target toggle redraws cached XY background');
+  check(copy(api.data)===originalData&&copy(api.views.xy)===overlayView&&api.time===overlayTime,'overlay toggle preserves measured samples viewport and clock');
+  elements['show-target'].checked=true;elements['show-target'].onchange();
+  check(api.targetVisibility.shown&&copy(api.geometry.xy.targetOutline)===expected,'target outline returns');
+  api.seek(data.duration);api.render();
+  check(copy(api.geometry.xy.targetOutline)===expected,'target stays fixed during playback');
+  api.seek(0);api.render();
+}
 check(api.eventVisibility.kinds.size===2&&api.eventVisibility.kinds.has('lost')&&api.eventVisibility.kinds.has('recovered'),'default event categories');
 check(api.cache.force.labels.every(v=>['CONTACT_LOST','REACQUIRED'].includes(v.event.kind)),'defaults applied to graph labels');
 const eventButtons=elements['xy-events'].children.length;

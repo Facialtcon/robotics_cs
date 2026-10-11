@@ -122,7 +122,8 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
     away = (np.linalg.norm(current.pose[:3]-start[:3]) > startup_position_tolerance(config) or
             _orientation_distance(current.pose[3:], start[3:]) > config['safe_return']['return_orientation_tolerance'])
     print(f'当前 TCP: {current.pose.tolist()}\n扫描 P0: {start.tolist()}')
-    print(f'初始方向 P0 -> P1: {config["policy"]["search_direction_xy"]}')
+    reference_name = 'P_ref' if config.get('fixed_target_experiment') else 'P1'
+    print(f'初始方向 P0 -> {reference_name}: {config["policy"]["search_direction_xy"]}')
     print_return_plan(config, current.pose, start, segments, scan=True)
     alignment = config.get('continuous_probe_alignment')
     def tilt(pose):
@@ -161,6 +162,8 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
               '探针已脱离目标及颗粒、静止空载，基座水平，抬升后有足够旋转空间；'
               '核对路径，即将抬升、调正探针并自动返回扫描 P0（此时不采零）。' if alignment else
               '核对完整返回路径和姿态；即将自动返回扫描 P0。')
+    if config.get('fixed_target_experiment'):
+        prompt = '机器人静止，基座水平，抬升后有足够旋转空间；即将抬升、调正探针并移至 P0 上方，采空气零偏后下降。'
     if not confirm_enter(prompt, read_line=confirm):
         raise KeyboardInterrupt('startup return not confirmed')
     fresh = controller.wait_for_standstill(**startup)

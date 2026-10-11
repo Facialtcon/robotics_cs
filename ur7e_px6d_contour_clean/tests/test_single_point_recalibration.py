@@ -21,7 +21,9 @@ from tests.test_single_point_ui import DashboardSocket, menu_run, temporary_args
 
 @pytest.fixture
 def settings(config):
-    return load_settings(entry.ROOT/'single_point_experiment.yaml', config)
+    values = load_settings(entry.ROOT/'single_point_experiment.yaml', config)
+    values.update(workspace_enabled=False, workspace_limits=None, workspace_xy_polygon=None)
+    return values
 
 
 def reviewed_data(config, settings):
@@ -30,7 +32,7 @@ def reviewed_data(config, settings):
         raw = group['tcp_pose'][:2] + [.9, .1, -.3, .6]
         data = save_group(data, name, raw)
         data['groups'][name]['path_review'] = dict(note='old full path review',
-            max_distance_m=settings['max_search_distance_m'], reviewed_at='legacy timestamp')
+            max_distance_m=.1, reviewed_at='legacy timestamp')
     return data
 
 
@@ -251,6 +253,8 @@ def test_actual_mode_is_displayed_before_invalid_calibration_blocks_automatic_st
 
 
 def test_remote_must_be_rechecked_after_path_confirmation(tmp_path, monkeypatch, config, settings, capsys):
+    from tests.test_single_point import bounded
+    bounded(settings)
     data = reviewed_data(config, settings)
     args = temporary_args(tmp_path, data)
     devices = Devices(config, [.39, 0, .2, np.pi, 0, 0])

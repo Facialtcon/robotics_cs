@@ -481,3 +481,70 @@ HTML 内嵌全部位置/力/实际速度样本及指令发送时间，不截断�
 本次没有改动恢复角度、速度、阈值或预算，没有用旧输入做反事实轨迹预测。
 
 本次主要改动文件：`robot/rtde_controller.py`、`sensor/force_preprocess.py`、`experiment_logging/data_logger.py`、`continuous_writer.py`、新增 `contact_capture.py`、`app/continuous_runtime.py`、离散入口的指令日志接入、`simulation/simulated_robot.py`、`tools/visualize_continuous_run.py`、新增 `tools/visualize_contact_experiment.py`、扩展 `visualization/run_plots.py` / `run_animation.py`、新增 `visualization/contact_report.py`，以及对应离线测试。
+
+## 固定目标连续跟踪实验
+
+新入口是 `run_fixed_target_tracking.py`，主工程指原 `run_continuous_tracking.py` 的连续系统。
+它直接调用 `app.continuous_runtime.run`、`ContinuousTrackingPolicy`、`URRTDEController`、
+`PX6DReader`、`WrenchPreprocessor`、`startup_scan` / `SafeReturnExecutor` 和现有日志/HTML 回放。
+没有新增连续控制公式、状态机、接触或丢边规则，没有采用单点实验的两倍行程或路径核验预算。
+原连续入口和单点入口仍按原方式使用。
+
+所有真机控制及硬件参数读取原 `config.yaml`。启动显示本次继承参数、工作区域、初始方向和原有制动余量；
+速度选择继续使用原倍率选择函数，只改变本次名义切向速度，最终值保存在配置快照和速度选择日志中。
+实验专属配置 `fixed_target_experiment.yaml` 只有 P0/P_ref 标定文件路径和独立工作区域。
+默认读取已有 `single_point_calibration.yaml` 中的 A/B/C 等组，只复用标定点和 TCP 身份；
+不读取 `single_point_experiment.yaml`，忽略旧 `path_review`，不要求任何核验文字。
+P0 的 XY 与 P_ref 的 Z 组成实验起点，P0→P_ref 的 XY 单位向量仅是初始搜索方向；
+P_ref 的姿态不参与控制，P_ref 不是终点。探针姿态由原自动调正函数从已示教 P0 姿态导出。
+
+真机运行前，在 `fixed_target_experiment.yaml` 填写经现场确认的 Base XYZ 工作区域
+`workspace.limits`（单位 m：`x_min/x_max/y_min/y_max/z_min/z_max`），确认后设置 `workspace.verified: true`。
+当前没有固定目标现场边界数据，因此发布的文件保留 `limits: null`、`verified: false`；
+此状态在设备连接之前拒绝真机实验。不能把原颗粒箱边界当作新区域，也不能用目标四角点当作运动边界。
+区域须涵盖起点、抬升采零高度和实际启动路径；调用原工作空间/返回路径检查及 XY 凸多边形检查。
+首次搜索的边界距离和制动余量直接采用原连续系统的计算方式，不使用 P_ref 距离倍率。
+
+```bash
+# 默认离线；3 秒仅为这条命令显式选择的合成演示时长
+/home/user-linux/robotics_cs/.venv312/bin/python run_fixed_target_tracking.py --dry-run --duration 3
+
+# 离线检查 P0/P_ref 与已填的独立工作区域，无设备连接
+/home/user-linux/robotics_cs/.venv312/bin/python run_fixed_target_tracking.py --check-calibration --p0 A
+
+# 现场边界已确认后运行；未指定 --p0 时可选择已标定组
+/home/user-linux/robotics_cs/.venv312/bin/python run_fixed_target_tracking.py --execute --p0 A
+
+# 独立只读标定四角点，只创建 RTDE Receive，不创建 RTDE Control、不发送运动命令
+/home/user-linux/robotics_cs/.venv312/bin/python run_fixed_target_tracking.py --calibrate-target
+```
+
+真机顺序：选择 P0 → 连接 PX6D/机器人 → Dashboard 只读检查 Remote → 原安全路径准备 →
+抬升、调正探针、到 P0 上方 → 确认静止空载后采空气零偏 → 自动下降到统一 Z 并停稳 →
+原方式选择贴边速度 → 按 Enter 开始搜索 → 首次接触制动、确认 → 连续跟踪 → 原丢边/恢复 →
+Q/Esc/Ctrl+C 或原保护停车 → 实际停稳确认、保存日志、生成 HTML。
+确认只保留启动运动、空气零偏、最终搜索三个阶段；无需颗粒 baseline、额外文字或重复路径确认。
+与原连续程序相同，终止后原地停车，不增加自动返回运动；启动定位/返回路径继续由原 `SafeReturnExecutor` 执行。
+真机 `--duration` 仍不引入运行时预算。传感器/RTDE 异常、原始力/力矩硬保护、机器人安全状态和人工停止沿用原实现。
+
+`--calibrate-target` 按周界顺序人工示教 P1→P2→P3→P4（顺/逆时针均可），
+只保存 Base XY 到 `target_geometry_calibration.yaml`，不保存 Z/姿态、不做正方形拟合或探针半径补偿。
+覆盖目标标定时先保留备份；不会修改已有 P0/P_ref、颗粒箱标定或历史实验。
+此文件仅在机器人、传感器和日志关闭后的可视化阶段读取，并复制到本次日志目录。
+历史回放读取该目录中的副本，后续重新标定不会改变历史显示。
+策略和控制器不读取目标轮廓，也不会用它修正轨迹、力、法向、恢复或停止条件。
+
+原 HTML 的 TCP 俯视图新增“显示真实目标轮廓”开关，有有效四角点时默认开启，显示静止半透明区域。
+关闭开关仅删除叠加层，保留原轨迹、实际运动方向、力/速度曲线、事件、播放/暂停/倍率和局部缩放。
+TCP 及速度继续使用记录到的 RTDE 实测数据，XY 等比例；不吸附、不修改、不计算轨迹误差、边界夹角或接触边。
+无有效轮廓也能按原格式回放。离线演示使用原模拟器的独立合成正方形及合成力，不读取现场 P0/目标轮廓，回放明确标记模拟数据。
+该场景的模拟执行加速度直接读取 `robot.speed_acceleration`，没有另一套控制数值；原模拟器延迟模型保留。
+合成刚性目标也可能触发原过载卸力预算停车；演示不代表现场接触性能，不放宽原保护以延长模拟跟踪。
+
+全部测试禁止真实网络、RTDE 和串口连接（`tests/conftest.py`）；固定实验测试覆盖继承参数、
+调正/空气零偏、首次接触后的连续跟踪、逐帧策略一致性、丢边恢复、通信异常停车、独立边界拒绝、
+四角点控制隔离、只读示教、HTML 开关与原播放器交互。运行：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/user-linux/robotics_cs/.venv312/bin/python -m pytest -q
+```

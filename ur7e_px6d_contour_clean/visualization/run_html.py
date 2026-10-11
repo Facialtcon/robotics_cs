@@ -113,7 +113,16 @@ def write_html_replay(trace, output_dir):
             if result.get('actual_standstill_sec') is not None else None)
         first_contact['peak_filtered_fxy_N'] = result.get('peak_filtered_fxy_N')
     wrench = []
+    direction_analysis = None
     if single_point:
+        analysis_path = trace.run_dir/'contact_force_direction_analysis.json'
+        if analysis_path.exists():
+            try:
+                direction_analysis = json.loads(analysis_path.read_text(encoding='utf-8'))
+                if not isinstance(direction_analysis, dict) or direction_analysis.get('frame') != 'Base':
+                    direction_analysis = None
+            except (OSError, ValueError):
+                pass  # Optional analysis cannot prevent old/partial runs replaying.
         with (trace.run_dir/'samples.csv').open(newline='', encoding='utf-8') as handle:
             for row in csv.DictReader(handle):
                 stamp = float(row['monotonic_sec'])-float(trace.monotonic[0])
@@ -130,7 +139,8 @@ def write_html_replay(trace, output_dir):
         lost_threshold=trace.config.get('continuous_tracking', {}).get('contact_lost_threshold'),
         deadband=deadband_definition(trace),
         synthetic=trace.config.get('experiment', {}).get('kind') == 'synthetic_demo',
-        single_point=single_point, wrench=wrench,
+        single_point=single_point, wrench=wrench, contact_force_direction_analysis=direction_analysis,
+        fixed_target=bool(trace.config.get('fixed_target_experiment')),
     )
     encoded = json.dumps(_clean(payload), ensure_ascii=False, separators=(',', ':'), allow_nan=False)
     # The JSON script element must not be closable by a recorded metadata string.

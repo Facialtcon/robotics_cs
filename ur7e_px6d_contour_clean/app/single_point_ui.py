@@ -87,15 +87,33 @@ def require_remote_mode(robot_ip):
 
 
 def show_trial_result(result):
-    labels = dict(contact='接触阈值触发，已完成停车记录', no_contact='距离或时间预算内未找到接触', aborted='实验失败/已中止')
-    if result['status'] == 'no_contact' and result.get('reason') == 'NO_CONTACT_DISTANCE':
-        print('未找到接触：搜索距离耗尽。')
-    else:
-        print(f'实验结果：{labels.get(result["status"], result["status"])}')
+    labels = dict(contact='接触阈值触发，已完成停车记录', aborted='异常停止/实验已中止')
+    contact_triggered = result.get('contact_triggered', result.get('reason') == 'CONTACT_THRESHOLD')
+    if contact_triggered and result['status'] == 'aborted':
+        labels['aborted'] = '接触阈值已触发；后续安全检查或记录异常'
+    print(f'实验结果：{labels.get(result["status"], result["status"])}')
+    if contact_triggered:
+        force = result.get('force_at_threshold') or {}
+        if force.get('fxy_N') is not None and result.get('contact_threshold_N') is not None:
+            print(f'接触触发：Fxy = {force["fxy_N"]:.3f} N ≥ {result["contact_threshold_N"]:.1f} N；已请求制动。')
+    if result.get('reason') == 'EXPERIMENT_TIME_LIMIT':
+        print('异常停止：超过最大允许实验运行时间，未完成接触实验。')
     if result.get('reason'):
         print(f'停止原因：{result["reason"]}')
     if result.get('fault'):
         print(f'具体原因：{result["fault"]}')
+    safety_labels = {
+        'processed force safety threshold exceeded': 'Base 补偿后合力',
+        'processed torque safety threshold exceeded': 'Base 补偿后力矩',
+        'absolute raw force safety threshold exceeded': '传感器原始合力',
+        'absolute raw torque safety threshold exceeded': '传感器原始力矩',
+    }
+    phases = dict(BRAKING_CONFIRMATION='制动过程中', POST_STOP_RECORDING='停稳后记录期间', APPROACH='接近过程中')
+    for event in result.get('safety_events', []):
+        phase = event.get('peak_phase', event['phase'])
+        print(f'安全超限（{phases.get(phase, phase)}）：'
+              f'{safety_labels.get(event["reason"], event["reason"])}峰值 '
+              f'{event["peak_value"]:.3f} {event["unit"]} ≥ 安全限值 {event["limit"]:.3f} {event["unit"]}。')
     failures = dict(BRAKING_API_FAILURE='制动指令失败或被 SDK 拒绝',
                     STOP_TELEMETRY_INCOMPLETE='制动过程数据记录未完成',
                     STANDSTILL_NOT_CONFIRMED='未能确认实际停稳',

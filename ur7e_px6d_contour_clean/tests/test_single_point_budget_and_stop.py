@@ -1,13 +1,12 @@
 """Per-group budgets and fresh measured stops; all SDK/force inputs are fake."""
 from argparse import Namespace
-from copy import deepcopy
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import yaml
 
-from app.single_point_config import load_settings, prepare, resolve_search_budget, validate_settings
+from app.single_point_config import load_settings, prepare, validate_settings
 from app.single_point_runtime import FreshForceReader, SinglePointTrial
 from app.single_point_ui import show_trial_result
 from calibration.single_point import save_group, set_reference
@@ -22,7 +21,9 @@ import run_single_point_contact as entry
 
 @pytest.fixture
 def settings(config):
-    return load_settings(entry.ROOT/'single_point_experiment.yaml', config)
+    values = load_settings(entry.ROOT/'single_point_experiment.yaml', config)
+    values.update(workspace_enabled=False, workspace_limits=None, workspace_xy_polygon=None)
+    return values
 
 
 def long_calibration(config):
@@ -31,137 +32,142 @@ def long_calibration(config):
     return save_group(data, 'A', [.5411802690012457, .4299559965236667, .9, .1, .2, .3])
 
 
-def test_independent_budgets_survive_parameter_inheritance(tmp_path, config, settings):
-    settings.update(max_search_distance_m=.38, max_approach_time_sec=90., stop_timeout_sec=1.2,
-                    post_stop_record_sec=.6, search_margin_m=.005, search_distance_multiplier=1.5)
+def test_independent_safety_settings_survive_parameter_inheritance(tmp_path, config, settings):
+    settings.update(max_approach_time_sec=90., stop_timeout_sec=1.2,
+                    post_stop_record_sec=.6, workspace_enabled=True, workspace_verified=True,
+                    workspace_limits=dict(x_min=.3, x_max=.9, y_min=-.4, y_max=.6, z_min=-.1, z_max=.4))
     path = tmp_path/'settings.yaml'
     path.write_text(yaml.safe_dump(settings))
     config['continuous_tracking'].update(search_max_distance=.1, search_max_time_sec=5., confirmation_timeout_sec=.2)
     loaded = load_settings(path, config)
-    for key in ('max_search_distance_m', 'max_approach_time_sec', 'stop_timeout_sec',
-                'post_stop_record_sec', 'search_margin_m', 'search_distance_multiplier'):
+    for key in ('max_approach_time_sec', 'stop_timeout_sec', 'post_stop_record_sec',
+                'workspace_enabled', 'workspace_verified', 'workspace_limits'):
         assert loaded[key] == settings[key]
     assert loaded['speed_default_mps'] == config['continuous_tracking']['search_speed']
 
 
-@pytest.mark.parametrize('mode', ['fixed', 'reference_distance'])
-def test_345mm_reference_with_100mm_budget_refuses_before_device_connection(monkeypatch, config, settings, mode):
-    settings.update(search_distance_mode=mode, max_search_distance_m=.1)
+@pytest.mark.parametrize('boundary', ['disabled', 'missing', 'unverified', 'zero', 'nan', 'missing_axis'])
+def test_real_start_refuses_invalid_boundary_before_opening_devices(monkeypatch, config, settings, boundary):
+    settings.update(workspace_enabled=True, workspace_verified=True, workspace_limits=dict(
+        x_min=.3, x_max=.9, y_min=-.4, y_max=.6, z_min=-.1, z_max=.4))
+    if boundary == 'disabled': settings['workspace_enabled'] = False
+    if boundary == 'missing': settings['workspace_limits'] = None
+    if boundary == 'unverified': settings['workspace_verified'] = False
+    if boundary == 'zero': settings['workspace_limits']['x_max'] = settings['workspace_limits']['x_min']
+    if boundary == 'nan': settings['workspace_limits']['x_max'] = float('nan')
+    if boundary == 'missing_axis': del settings['workspace_limits']['y_min']
     from app import single_point_ui as ui
     monkeypatch.setattr(ui, 'read_control_mode', lambda ip: ControlMode('remote', 'fake true'))
-    def forbidden(*a, **kw): raise AssertionError('insufficient budget must not open devices')
-    with pytest.raises(ValueError, match='搜索预算不足.*345.244.*100.000'):
+    def forbidden(*a, **kw): raise AssertionError('invalid boundary must not open devices')
+    with pytest.raises(ValueError, match='workspace'):
         entry.run_trial(Namespace(execute=True), config, settings, long_calibration(config), 'A',
                         controller_factory=forbidden, reader_factory=forbidden)
 
 
-def test_geometry_budget_is_bounded_per_group_and_does_not_mutate_source(config, settings):
-    data = long_calibration(config)
-    data = save_group(data, 'B', [.66, .11456427664583589, -.9, -.1, .3, .7])
-    settings['search_margin_m'] = .005
-    original = deepcopy(settings)
-    first = resolve_search_budget(settings, data, 'A')
-    second = resolve_search_budget(settings, data, 'B')
-    assert first['reference_distance_m'] == pytest.approx(.345244, abs=1e-6)
-    assert first['max_search_distance_m'] == pytest.approx(2*first['reference_distance_m']+.005)
-    assert second['max_search_distance_m'] < first['max_search_distance_m'] <= .8
-    assert settings == original
-    settings['max_search_distance_m'] = .3
-    with pytest.raises(ValueError, match='搜索预算不足'):
-        resolve_search_budget(settings, data, 'A')
-
-
-def test_doubled_default_and_legacy_config_compatibility(config, settings):
-    data = long_calibration(config)
-    assert settings['search_distance_multiplier'] == 2.
-    assert settings['max_search_distance_m'] == .8
-    expanded = resolve_search_budget(settings, data, 'A')
-    old_settings = deepcopy(settings)
-    del old_settings['search_distance_multiplier']
-    old_settings['max_search_distance_m'] = .4
-    original = resolve_search_budget(old_settings, data, 'A')
-    assert expanded['max_search_distance_m'] == pytest.approx(2*original['max_search_distance_m'])
-    settings['max_search_distance_m'] = .6
-    with pytest.raises(ValueError, match='搜索预算不足'):
-        resolve_search_budget(settings, data, 'A')
-
-
-@pytest.mark.parametrize('multiplier', [0., -1., float('inf'), float('nan'), True])
-def test_search_multiplier_must_be_finite_positive(settings, multiplier):
-    settings['search_distance_multiplier'] = multiplier
-    with pytest.raises(ValueError, match='search_distance_multiplier'):
+@pytest.mark.parametrize('time_limit', [0., -1., float('inf'), float('nan'), True])
+def test_experiment_time_limit_is_finite_positive(settings, time_limit):
+    settings['max_approach_time_sec'] = time_limit
+    with pytest.raises(ValueError, match='max_approach_time_sec'):
         validate_settings(settings)
 
 
-@pytest.mark.parametrize('margin', [-.001, .021, float('inf'), float('nan'), True])
-def test_extra_margin_is_finite_and_capped(settings, margin):
-    settings['search_margin_m'] = margin
-    with pytest.raises(ValueError, match='search_margin_m'):
-        validate_settings(settings)
-
-
-def test_time_budget_is_checked_for_selected_speed_before_approach(config, settings):
-    with pytest.raises(ValueError, match='搜索时间预算不足'):
-        resolve_search_budget(settings, long_calibration(config), 'A', speed=.0005)
+@pytest.mark.parametrize('contact', [.40, 10.])
+def test_search_passes_reference_and_only_force_completes_contact(config, settings, contact, capsys):
+    data = long_calibration(config)
+    settings['max_approach_time_sec'] = 24.
+    effective, _, pose, direction = prepare(config, settings, data, 'A', execute=False)
+    controller = OfflineController(pose, settings)
+    processor = WrenchPreprocessor.from_config(effective['preprocessing'], tool_orientation=pose[3:])
+    raw = OfflineForceReader(controller, pose, direction, processor, contact_distance=contact)
+    reader = FreshForceReader(raw, settings, config['policy'], clock=controller.clock)
+    log = MemoryLog()
+    trial = SinglePointTrial(effective, settings, data, 'A', .018, controller, reader, processor, log,
+                             clock=controller.clock, sleep=controller.sleep, preparation_complete=True)
+    result = trial.run()
+    assert result['actual_search_path_m'] > .345244
+    assert result['post_stop_record_completed'] and result['fault'] == ''
+    if contact == .40:
+        assert result['status'] == 'contact' and result['reason'] == 'CONTACT_THRESHOLD'
+        assert result['force_at_threshold']['fxy_N'] >= settings['contact_threshold_N']
+        assert result['actual_before_threshold']['timestamp'] < result['threshold_trigger_sec']
+    else:
+        assert result['status'] == 'aborted' and result['reason'] == 'EXPERIMENT_TIME_LIMIT'
+        assert result['threshold_trigger_sec'] is None and result['force_at_threshold'] is None
+        show_trial_result(result)
+        output = capsys.readouterr().out
+        assert '异常停止' in output and '超过最大允许实验运行时间' in output
+    assert result['actual_stop_tcp_speed'] is not None
+    assert any(row['kind'] == 'braking' for row in log.commands)
 
 
 @pytest.mark.parametrize('guard', ['workspace', 'obstacle'])
-def test_full_345mm_search_keeps_workspace_and_obstacle_checks(config, settings, guard):
-    settings['search_distance_multiplier'] = 1.
-    settings.update(workspace_enabled=True, workspace_limits=dict(
-        x_min=.4, x_max=.8, y_min=0, y_max=.5, z_min=-.1, z_max=.1))
-    if guard == 'workspace':
-        settings['workspace_limits']['x_max'] = .65
-    else:
-        settings['forbidden_boxes'] = [dict(x_min=.6, x_max=.62, y_min=.24, y_max=.31,
-                                          z_min=-.03, z_max=.01)]
-    with pytest.raises(ValueError, match='workspace|intersects'):
-        prepare(config, settings, long_calibration(config), 'A', execute=True)
-
-
-def test_doubled_search_checks_obstacles_beyond_reference(config, settings):
-    data = long_calibration(config)
-    point = np.array(data['groups']['A']['tcp_pose'][:2]) + .5*np.array(data['groups']['A']['direction_xy'])
-    settings.update(workspace_enabled=True, workspace_limits=dict(
-        x_min=.4, x_max=1., y_min=-.5, y_max=.5, z_min=-.1, z_max=.1),
-        forbidden_boxes=[dict(x_min=point[0]-.005, x_max=point[0]+.005,
-                              y_min=point[1]-.005, y_max=point[1]+.005, z_min=-.03, z_max=.01)])
-    original = deepcopy(settings)
-    original['search_distance_multiplier'] = 1.
-    prepare(config, original, data, 'A', execute=True)
-    with pytest.raises(ValueError, match='intersects'):
-        prepare(config, settings, data, 'A', execute=True)
-
-
-@pytest.mark.parametrize('contact', [.33, 10.])
-def test_correct_budget_searches_past_100mm_and_brakes_for_force_or_distance(config, settings, contact, capsys):
-    data = long_calibration(config)
-    effective, _, pose, direction = prepare(config, settings, data, 'A', execute=False)
-    resolved = effective['single_point_experiment']
-    controller = OfflineController(pose, resolved)
-    processor = WrenchPreprocessor.from_config(effective['preprocessing'], tool_orientation=pose[3:])
-    raw = OfflineForceReader(controller, pose, direction, processor, contact_distance=contact)
-    reader = FreshForceReader(raw, resolved, config['policy'], clock=controller.clock)
-    log = MemoryLog()
-    trial = SinglePointTrial(effective, resolved, data, 'A', .018, controller, reader, processor, log,
-                             clock=controller.clock, sleep=controller.sleep, preparation_complete=True)
+def test_live_boundary_is_checked_beyond_reference(config, settings, guard):
+    from tests.test_single_point import rig
+    settings.update(workspace_enabled=True, workspace_verified=True, workspace_limits=dict(
+        x_min=.3, x_max=.43, y_min=-.1, y_max=.1, z_min=.1, z_max=.3))
+    if guard == 'obstacle':
+        settings['workspace_limits']['x_max'] = .6
+        settings['forbidden_boxes'] = [dict(x_min=.43, x_max=.44, y_min=-.01,
+                                          y_max=.01, z_min=.19, z_max=.21)]
+    trial, controller, log = rig(config, settings, contact=10.)
     result = trial.run()
-    assert result['status'] == ('contact' if contact == .33 else 'no_contact')
-    assert result['actual_search_path_m'] > .3 and result['post_stop_record_completed']
-    assert result['fault'] == '' and result['actual_stop_tcp_speed'] is not None
-    assert result['post_stop_record_end_sec']-result['post_stop_record_start_sec'] >= .5
+    assert result['status'] == 'aborted' and result['reason'] == 'DEVICE_OR_SAFETY_ERROR'
+    assert ('workspace' if guard == 'workspace' else 'intersects') in result['fault']
+    assert result['actual_search_path_m'] > .01
+    assert result['threshold_trigger_sec'] is None and result['actual_stop_pose'] is not None
+    assert result['actual_stop_pose'][0] < .43
+    braking = next(i for i, row in enumerate(log.commands) if row['kind'] == 'braking')
+    assert all(row['kind'] != 'motion' for row in log.commands[braking:])
+
+
+@pytest.mark.parametrize('failure', ['height', 'orientation', 'lateral', 'reverse',
+                                   'overspeed', 'rtde_error', 'stale_tcp'])
+def test_actual_motion_and_rtde_faults_always_abort(config, settings, failure):
+    from tests.test_single_point import rig
+    trial, controller, log = rig(config, settings, contact=10.)
+    normal = controller.read_state
+    def bad_state():
+        state = normal()
+        if controller.stop_report is None and controller.clock() >= .05:
+            if failure == 'height': state.pose[2] += .01
+            if failure == 'orientation': state.pose[3] += .1
+            if failure == 'lateral': state.pose[1] += .01
+            if failure == 'reverse': state.pose[0] = trial.p0[0]-.01
+            if failure == 'overspeed': state.tcp_speed[0] = .1
+            if failure == 'rtde_error': raise RobotError('fake RTDE communication failure')
+            if failure == 'stale_tcp': state.timestamp -= 1.
+        return state
+    controller.read_state = bad_state
+    result = trial.run()
+    assert result['status'] == 'aborted' and result['reason'] == 'DEVICE_OR_SAFETY_ERROR'
+    assert result['threshold_trigger_sec'] is None and result['actual_standstill_sec'] is not None
+    assert any(row['kind'] == 'motion' for row in log.commands)
     assert any(row['kind'] == 'braking' for row in log.commands)
-    if contact == 10.:
-        assert result['reason'] == 'NO_CONTACT_DISTANCE'
-        trigger = result['no_contact_distance_trigger']
-        # The existing before-send guard brakes before the next step crosses the budget.
-        assert np.linalg.norm(np.array(trigger['pose'][:2])-pose[:2]) >= (
-            resolved['max_search_distance_m']-.018/resolved['control_rate_hz'])
-        assert resolved['max_search_distance_m'] == pytest.approx(.690488, abs=1e-6)
-        event = next(event for event in log.events if event.event_type == 'BUDGET_STOP')
-        np.testing.assert_array_equal(event.pose, trigger['pose'])
-        show_trial_result(result)
-        assert '未找到接触：搜索距离耗尽。' in capsys.readouterr().out
+
+
+def test_time_limit_takes_priority_over_simultaneous_force_crossing(config, settings):
+    from core.models import Wrench
+    from tests.test_single_point import rig
+    settings['max_approach_time_sec'] = .1
+    trial, controller, log = rig(config, settings, contact=10.)
+    normal_process = trial.processor.process
+    def crossing(raw):
+        value = normal_process(raw)
+        return Wrench(2., 0., 0., 0., 0., 0.) if controller.clock() >= .1 else value
+    trial.processor.process = crossing
+    result = trial.run()
+    assert result['status'] == 'aborted' and result['reason'] == 'EXPERIMENT_TIME_LIMIT'
+    assert result['threshold_trigger_sec'] is None
+    assert not any(event.event_type == 'FIRST_THRESHOLD_STOP_REQUEST' for event in log.events)
+
+
+def test_normal_display_has_only_direction_speed_and_force_no_travel_budget(config, settings, capsys):
+    entry.show_group(long_calibration(config), 'A', settings, .018, config)
+    output = capsys.readouterr().out
+    for text in ('实验组：P0-A', '接近方向：', '接近速度：18.000 mm/s', '接触阈值：1.0 N', '正常停止：力达到 1.0 N'):
+        assert text in output
+    for text in ('行程', '倍率', '候选', '搜索距离', 'P_ref'):
+        assert text not in output
 
 
 def make_rtde_stop(monkeypatch, config, settings, *, failure=None):
@@ -202,7 +208,7 @@ def make_rtde_stop(monkeypatch, config, settings, *, failure=None):
         normal = devices.control.speedL
         def rejected(*a): normal(*a); return False
         devices.control.speedL = rejected
-    trial._request_stop('NO_CONTACT_DISTANCE')
+    trial._request_stop('EXPERIMENT_TIME_LIMIT')
     return trial, owner, clock
 
 
@@ -210,7 +216,7 @@ def test_stop_confirmation_07s_then_record_05s_have_separate_deadlines(monkeypat
     trial, owner, _ = make_rtde_stop(monkeypatch, config, settings)
     trial.settle()
     result = trial.summary()
-    assert result['status'] == 'no_contact' and result['fault'] == ''
+    assert result['status'] == 'aborted' and result['fault'] == ''
     assert result['actual_standstill_sec']-result['braking_request_sec'] == pytest.approx(.7, abs=.011)
     assert result['post_stop_record_end_sec']-result['post_stop_record_start_sec'] >= .5
     assert result['post_stop_record_end_sec']-result['braking_request_sec'] > 1.
@@ -281,17 +287,15 @@ def test_post_stop_logging_failure_preserves_stop_evidence(monkeypatch, config, 
     assert result['timeout_phase'] is None
 
 
-def test_fresh_execution_read_is_the_distance_trigger_pose(config, settings):
-    from tests.test_single_point import rig
-    trial, controller, _ = rig(config, settings)
-    trial._observe()
-    actual = controller.read_state()
-    actual.pose[0] = trial.p0[0]+settings['max_search_distance_m']
-    from app.single_point_runtime import SinglePointSearchLimit
-    with pytest.raises(SinglePointSearchLimit):
-        trial._before_send(actual)
-    trial._request_stop('NO_CONTACT_DISTANCE')
-    np.testing.assert_array_equal(trial.distance_trigger['pose'], actual.pose)
+def test_fresh_execution_read_enforces_workspace_before_sdk_send(config, settings):
+    from tests.test_single_point import bounded, rig
+    bounded(settings)
+    trial, controller, log = rig(config, settings)
+    trial.authorize_approach()
+    controller.model.pose[0] = .4985
+    with pytest.raises(ValueError, match='workspace'):
+        controller.command_planar_velocity(trial.direction, trial.speed, .01)
+    assert not any(row['kind'] == 'motion' for row in controller.command_records)
 
 
 def test_braking_logging_gap_is_not_post_stop_recording_failure(monkeypatch, config, settings):

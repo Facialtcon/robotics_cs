@@ -8,11 +8,14 @@ from core.models import Wrench
 from simulation.simulated_robot import SimulatedRobot
 
 
-def demo_calibration(project):
+def demo_calibration(project, *, settings=None):
     pose = [0.4, 0., .2, np.pi, 0., 0.]
+    if settings is not None and settings.get('workspace_enabled') and settings.get('workspace_xy_polygon') is not None:
+        # Place synthetic points inside the configured sandbox; retain its guard.
+        pose[:2] = np.asarray(settings['workspace_xy_polygon'], dtype=float).mean(axis=0).tolist()
     data = set_reference({}, pose, project['robot']['robot_ip'], project['tcp']['offset'])
-    for name, xy in [('A', [.39, 0.]), ('B', [.4, -.01]), ('C', [.41, 0.])]:
-        start = deepcopy(pose); start[:2] = xy
+    for name, offset in [('A', [-.01, 0.]), ('B', [0., -.01]), ('C', [.01, 0.])]:
+        start = deepcopy(pose); start[:2] = (np.asarray(pose[:2])+offset).tolist()
         data = save_group(data, name, start)
     return data
 

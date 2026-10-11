@@ -9,21 +9,24 @@ import time
 import numpy as np
 
 from app.operator_input import OperatorKeyboard, confirm_enter
-from app.single_point_config import load_settings, prepare, resolve_search_budget, validate_speed
+from app.single_point_config import load_settings, prepare, validate_speed
 from app.single_point_runtime import EXTRA_FIELDS, FreshForceReader, SinglePointTrial
-from app.single_point_startup import plan_return, prepare_startup
+from app.contact_force_direction import snapshot_edge, analyze_contact
+from app.single_point_startup import plan_return, prepare_startup, SinglePointRetreatMonitor
 from app.single_point_ui import (xyz_mm, pose_text, direction_angle, show_calibration_table,
                                 show_motion_path, report_control_mode, require_remote_mode, show_trial_result)
 from calibration.single_point import (LIMITATION, load_calibration, save_group, set_reference,
                                       validate_group, write_calibration, experiment_start_pose,
                                       DEFAULT_MIN_APPROACH_DISTANCE_M, group_calibration_issue, validate_calibration)
+from calibration.target_edge import make_edge, save_edge, DEFAULT_MIN_EDGE_DISTANCE_M
+from experiment_logging.paths import wall_time_fields
 from config.loader import load_config, runtime_robot_config
 from experiment_logging.continuous_writer import ContinuousLogWriter
 from experiment_logging.data_logger import ExperimentLogger
 from robot.rtde_controller import URRTDEController, RobotError
 from robot.rtde_controller import _orientation_distance
 from robot.tcp_identity import read_tcp_offset_readonly, tcp_offsets_match
-from safety.safe_return import SafeReturnExecutor, PX6DForceMonitor
+from safety.safe_return import SafeReturnExecutor
 from sensor.force_preprocess import WrenchPreprocessor
 from sensor.px6d_reader import PX6DReader
 
@@ -37,22 +40,41 @@ def make_reader(project):
 
 def show_group(data, name, settings, speed, project):
     group = data['groups'][name]
-    print(LIMITATION)
-    target = experiment_start_pose(data, name, project['calibration']['probe_axis_tcp'])
-    print(f'选择实验组：P0-{name}；标定 XY：X={group["tcp_pose"][0]*1000:.3f} mm，Y={group["tcp_pose"][1]*1000:.3f} mm')
-    print(f'固定参考点 P_ref：{xyz_mm(data["P_ref"])}')
-    print(f'本次实验起点：{pose_text(target)}')
+    print(f'实验组：P0-{name}')
     print(f'接近方向：{direction_angle(group["direction_xy"]):.2f}°（相对 Base +X，逆时针为正）')
-    print(f'名义速度：{speed*1000:.3f} mm/s；接触力阈值：{settings["contact_threshold_N"]:.3f} N；'
-          f'最大搜索距离：{settings["max_search_distance_m"]*1000:.3f} mm')
-    if 'candidate_search_distance_m' in settings:
-        print(f'P0 到 P_ref：{settings["reference_distance_m"]*1000:.3f} mm；'
-              f'行程倍率：{float(settings["search_distance_multiplier"]):.3f}；'
-              f'候选行程：{settings["candidate_search_distance_m"]*1000:.3f} mm；'
-              f'现场确认余量：{settings["search_margin_m"]*1000:.3f} mm；'
-              f'独立硬上限：{settings["configured_max_search_distance_m"]*1000:.3f} mm；'
-              f'接近时间上限：{settings["max_approach_time_sec"]:.3f} s')
-    print('正常停止条件：Fxy 首次达到力阈值；P_ref 的 XY 不是运动终点。')
+    print(f'接近速度：{speed*1000:.3f} mm/s')
+    print(f'接触阈值：{settings["contact_threshold_N"]:.1f} N')
+    print(f'正常停止：力达到 {settings["contact_threshold_N"]:.1f} N')
+
+
+def record_trial_termination(logger, result):
+    """Supply single-point evidence explicitly to the unchanged shared logger."""
+    from experiment_logging.termination import TerminationReason
+    recorder = logger.termination
+    if recorder is None or recorder.record is not None:
+        return
+    events = result.get('safety_events', [])
+    if result.get('status') == 'contact':
+        code = TerminationReason.SUCCESS
+    elif events:
+        code = TerminationReason.STOP_FORCE_LIMIT
+    elif result.get('force_read_error'):
+        code = TerminationReason.STOP_SENSOR_ERROR
+    elif result.get('stop_failure_kind'):
+        code = TerminationReason.STOP_MOTION_ERROR
+    elif result.get('reason') == 'EXPERIMENT_TIME_LIMIT':
+        code = TerminationReason.STOP_TIME_LIMIT
+    elif result.get('reason') == 'USER_ABORT':
+        code = TerminationReason.STOP_USER_REQUEST
+    else:
+        return  # Preserve shared classification for other device/config faults.
+    context = dict(single_point_result=result)
+    if events:
+        first = events[0]
+        context.update(raw=first['raw_wrench_sensor'], processed=first['processed_wrench_base'],
+                       tcp_pose=first['tcp_pose'], phase=first['phase'], timestamp=first['first_sec'])
+    recorder.set_stop_reason(code, detail=result.get('fault') or result.get('reason', ''),
+                             source='single_point.final_result', state=result.get('state', 'STOP'), **context)
 
 
 def capture_pose(project, *, point_name='标定点', confirm=confirm_enter, controller_factory=URRTDEController):
@@ -115,6 +137,53 @@ def save_calibration_checked(path, updated, point_name):
         print(f'XY坐标：X={point[0]*1000:.3f} mm，Y={point[1]*1000:.3f} mm')
     print(f'保存位置：{path}\n回读校验：通过', flush=True)
     return reloaded
+
+
+def calibrate_target_edge(args, project, *, capture=None):
+    capture = capture_pose if capture is None else capture
+    path = Path(getattr(args, 'target_edge_calibration', ROOT/'target_edge_calibration.yaml')).resolve()
+    if path in {Path(getattr(args, 'calibration', ROOT/'single_point_calibration.yaml')).resolve(),
+                (ROOT/'single_point_calibration.yaml').resolve()}:
+        raise ValueError('目标直边必须使用独立文件，禁止覆盖 P_ref/P0 标定')
+    print('\n========== 标定目标直边 ==========')
+    print('请将示教器切换 Local 模式，手动将 TCP 放到同一条实际直边的 A、B 两个位置。')
+    print('两点尽量使用一致的探针接触方式；探针直径 3 mm，TCP 中心不一定是真实接触点，不进行半径补偿。')
+    print('仅通过 RTDE Receive 读取实际坐标，检查停稳及只读 TCP 配置；不会控制运动。')
+    minimum = float(getattr(args, 'min_edge_calibration_distance_m', DEFAULT_MIN_EDGE_DISTANCE_M))
+    if not np.isfinite(minimum) or minimum <= 0:
+        raise ValueError('目标直边最小点间距离必须为有限正数')
+    print(f'A、B 最小 XY 间距：{minimum*1000:.3f} mm。')
+    a, tcp_a = capture(project, point_name='目标直边 A')
+    a_time = wall_time_fields()
+    print(f'A点已暂存：{xyz_mm(a)}；请手动移动到同一直边的 B 点。')
+    b, tcp_b = capture(project, point_name='目标直边 B')
+    b_time = wall_time_fields()
+    if not tcp_offsets_match(tcp_a, tcp_b, project['tcp']['offset_tolerance']):
+        raise ValueError('A、B采集时TCP配置不同，原目标直边文件保持不变')
+    candidate = make_edge(a, b, project['robot']['robot_ip'], tcp_a,
+                          minimum=minimum, a_time=a_time, b_time=b_time)
+    print(f'正在保存目标直边标定并回读校验：{path}', flush=True)
+    saved, backup = save_edge(path, candidate)
+    if backup is not None:
+        print(f'原目标直边标定备份：{backup}')
+    print('\n========== 目标直边标定成功 ==========')
+    for name in ('A', 'B'):
+        pose = saved[name]['tcp_pose']
+        print(f'{name}点：X={pose[0]*1000:.3f} mm，Y={pose[1]*1000:.3f} mm')
+    print(f'边界方向：{saved["direction_deg"]:.2f}°\n边界长度：{saved["length_xy_m"]*1000:.3f} mm')
+    print(f'保存成功。\n保存位置：{path}\n回读校验：通过')
+    return saved
+
+
+def show_force_direction_analysis(analysis):
+    print('\n========== 接触力方向分析 ==========')
+    if analysis['status'] != 'available':
+        print(f'未计算：{analysis["reason"]}')
+        return
+    for label, key in [('标定边界方向', 'boundary_direction_deg'), ('接触力方向', 'force_direction_deg'),
+                       ('力与边界夹角', 'angle_to_edge_deg'), ('垂直方向偏差', 'perpendicular_error_deg')]:
+        print(f'{label}：{analysis[key]:.2f}°')
+    print(f'理想垂直夹角：90°\n触发时Fxy：{analysis["fxy_N"]:.3f} N')
 
 
 def reference_recalibration_choice(data):
@@ -188,14 +257,20 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
     speed = validate_speed(settings['speed_default_mps'] if speed is None else speed, settings)
     effective, robot_config, pose, direction = prepare(project, settings, calibration, name, execute=execute, speed=speed)
     settings = effective['single_point_experiment']
-    show_group(calibration, name, settings, speed, project)
+    if execute:
+        print(f'实验组：P0-{name}；当前为准备阶段，尚未启动接近实验。')
+    else:
+        show_group(calibration, name, settings, speed, project)
     if execute:
         if settings.get('require_watchdog', True):
             URRTDEController.verified_watchdog_contract()  # inspect installed SDK; no connection
         if not confirm_enter('确认选择该 P0；读取实际位姿并检查设备，随后展示自动准备路径'):
             return None
+    edge_snapshot = snapshot_edge(getattr(args, 'target_edge_calibration', ROOT/'target_edge_calibration.yaml'), project)
+    if edge_snapshot['status'] != 'available':
+        print(edge_snapshot['reason'])
     controller = reader = logger = trial = None
-    result = None
+    result = analysis = None
     try:
         if execute:
             controller = controller_factory(robot_config)
@@ -223,6 +298,7 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
         logger = ContinuousLogWriter(base_logger, capacity=256, max_pending_sec=2.)
         logger.write_json('single_point_calibration_snapshot.json', calibration)
         logger.write_json('single_point_experiment_snapshot.json', settings)
+        logger.write_json('target_edge_calibration_snapshot.json', edge_snapshot)
         with keyboard_factory() as keyboard:
             if execute:
                 prepare_startup(effective, settings, pose, controller, fresh, processor, logger, keyboard,
@@ -232,10 +308,6 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
                 choice = keyboard.read_text(f'输入名义接近速度 mm/s（Enter 使用 {speed*1000:g}）：')
                 if choice.strip():
                     speed = validate_speed(float(choice)/1000, settings)
-                settings = resolve_search_budget(settings, calibration, name, speed=speed)
-                effective['single_point_experiment'] = settings
-                fresh.settings = settings
-                logger.write_json('single_point_experiment_snapshot.json', settings)
                 show_group(calibration, name, settings, speed, project)
             else:
                 processor.set_zero_bias([fresh.read_wrench()])
@@ -245,15 +317,16 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
             trial = SinglePointTrial(effective, settings, calibration, name, speed, controller, fresh,
                 processor, logger, poll=keyboard.poll if execute else lambda: None, clock=clock, sleep=sleep,
                 preparation_complete=True)
+            if execute:
+                print('当前仅记录静止数据；最终 Enter 确认后才启用实验力判定并开始接近。')
             trial.record_precontact()
             if execute:
                 keyboard.on_wait = trial.hold_once
                 if not confirm_enter('静止数据已记录至少 1 秒；确认沿所示方向接近，'
-                                     f'行程上限 {settings["max_search_distance_m"]*1000:.3f} mm，'
-                                     f'现场确认余量 {settings["search_margin_m"]*1000:.3f} mm；Fxy 达阈值立即制动',
+                                     'Fxy 达阈值立即制动；安全边界触发时异常停止',
                                      read_line=keyboard.read_line):
                     raise KeyboardInterrupt('approach cancelled')
-                trial.hold_once()  # fresh stationary/force check after final Enter
+                trial.authorize_approach()  # fresh start checks only after final Enter
             result = trial.run()
     except BaseException as exc:
         # Never let sensor, keyboard or logging exceptions skip braking.
@@ -290,6 +363,9 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
                 if errors:
                     result.update(status='aborted', cleanup_errors=errors)
                 logger.write_json('single_point_result.json', result)
+                analysis = analyze_contact(edge_snapshot, result)
+                logger.write_json('contact_force_direction_analysis.json', analysis)
+                record_trial_termination(logger, result)
                 logger.write_summary(result.get('state', 'STOP'), result.get('reason', result.get('fault', '')), 0,
                                      single_point_result=result)
             finally:
@@ -308,10 +384,12 @@ def run_trial(args, project, settings, calibration, name, *, speed=None,
         if errors and logger is None:
             raise RobotError('; '.join(errors))
     show_trial_result(result)
+    show_force_direction_analysis(analysis if analysis is not None else analyze_contact(edge_snapshot, result))
     return result
 
 
 def return_to_group(args, project, settings, data, name):
+    print('当前为自动返回 P0，未启动接近实验；接触阈值不参与返回判定。')
     print('自动返回阶段：请在示教器切换 Remote 模式；程序只查询模式，不会自动切换。')
     report_control_mode(project['robot']['robot_ip'])
     effective, robot_config, pose, _ = prepare(project, settings, data, name, execute=True, approach=False)
@@ -320,12 +398,17 @@ def return_to_group(args, project, settings, data, name):
     if not confirm_enter('连接设备读取当前位姿并展示返回路径；此确认不授权运动'):
         return
     controller, reader, logger = URRTDEController(robot_config), make_reader(effective), None
+    monitor = None
     try:
         controller.connect()
         current = controller.wait_for_standstill().pose.copy()
         return_config, segments = plan_return(effective, settings, current, pose)
         show_motion_path(current, pose, segments)
         print('以上路径检查只覆盖探针半径和已填障碍盒；必须现场检查整套探针、工具、目标和夹具的扫掠空间。')
+        print('准备及返回 P0 不使用实验或返回的低力/力矩阈值；保留原有硬限值 '
+              f'{effective["policy"]["absolute_raw_force_threshold"]:.3f} N / '
+              f'{effective["policy"]["absolute_raw_torque_threshold"]:.3f} N·m；'
+              '不会在接触位置采零。')
         with OperatorKeyboard() as keyboard:
             keyboard.on_wait = lambda: controller.read_diagnostic_state()
             if not confirm_enter('确认上述完整路径及抬升高度安全；自动返回所选 P0', read_line=keyboard.read_line):
@@ -336,10 +419,22 @@ def return_to_group(args, project, settings, data, name):
                 raise RobotError('机器人位姿已变动，必须重新展示并核验路径')
             reader.connect()
             processor = WrenchPreprocessor.from_config(return_config['preprocessing'], tool_orientation=current[3:])
-            monitor = PX6DForceMonitor(return_config, reader, processor, raw_only=True)
-            monitor.sample(read_state=controller.read_diagnostic_state)
             logger = ExperimentLogger(args.output, return_config, mode='real', strategy='single_point',
                                       config_source=args.config, workspace_logging=False)
+            fresh = FreshForceReader(reader, settings, return_config['policy'])
+            monitor = SinglePointRetreatMonitor(return_config, fresh, processor, controller,
+                                                current, segments[0][1])
+            try:
+                monitor.sample(read_state=controller.read_diagnostic_state)
+            finally:
+                (logger.run_dir/'return_force_preflight.json').write_text(
+                    json.dumps(monitor.snapshot(), ensure_ascii=False, indent=2), encoding='utf-8')
+            print(f'返回前实测原始力：{np.linalg.norm(monitor.raw.force):.3f} N；'
+                  f'力矩：{np.linalg.norm(monitor.raw.torque):.3f} N·m。')
+            if monitor.retreat_guard_wrench_base is not None:
+                print('抬升保护使用含力臂的 Base 力矩：'
+                      f'{np.linalg.norm(monitor.retreat_guard_wrench_base.torque):.3f} N·m；'
+                      f'原有硬限值 {return_config["policy"]["absolute_raw_torque_threshold"]:.3f} N·m。')
             (logger.run_dir/'return_plan.json').write_text(json.dumps(dict(p0=name, initial=current.tolist(),
                 segments=[dict(phase=k, pose=p.tolist(), speed=v) for k,p,v in segments],
                 path_confirmed=True), ensure_ascii=False, indent=2), encoding='utf-8')
@@ -354,9 +449,17 @@ def return_to_group(args, project, settings, data, name):
         try:
             controller.close()
         finally:
-            reader.close()
-            if logger is not None:
-                logger.log_commands(list(controller.command_records)); logger.close()
+            try:
+                reader.close()
+            finally:
+                if logger is not None:
+                    try:
+                        if monitor is not None:
+                            (logger.run_dir/'return_force_status.json').write_text(
+                                json.dumps(monitor.snapshot(), ensure_ascii=False, indent=2), encoding='utf-8')
+                        logger.log_commands(list(controller.command_records))
+                    finally:
+                        logger.close()
 
 
 def select_group(data):
@@ -373,17 +476,23 @@ def select_group(data):
 def menu(args, project, settings):
     while True:
         print('\n========== 单点接触实验 ==========\n1. 标定固定接触参考点\n2. 新增P0\n3. 查看所有P0\n'
-              '4. 修改或删除P0\n5. 开始单点接触实验\n6. 返回指定P0\n7. 查询Local/Remote模式\n0. 返回')
+              '4. 修改或删除P0\n5. 开始单点接触实验\n6. 返回指定P0\n7. 查询Local/Remote模式\n8. 标定目标直边\n0. 返回')
         try:
             choice = input('选择：').strip()
         except (KeyboardInterrupt, EOFError):
             print('操作已取消，已退出菜单；未修改标定文件。')
             return 0
         if choice == '0': return 0
-        label = 'P_ref' if choice == '1' else 'P0'
+        label = '目标直边' if choice == '8' else 'P_ref' if choice == '1' else 'P0'
         try:
             if choice == '7':
                 report_control_mode(project['robot']['robot_ip']); continue
+            if choice == '8':
+                if not args.execute:
+                    print('离线菜单不连接设备；只读目标直边标定必须显式使用 --execute。')
+                else:
+                    calibrate_target_edge(args, project)
+                continue
             data = load_calibration(args.calibration)
             if choice == '3':
                 show_calibration_table(data, settings); continue
@@ -408,12 +517,13 @@ def menu(args, project, settings):
             elif choice == '6':
                 return_to_group(args, project, settings, data, select_group(data))
             else:
-                print('无效菜单选项，请输入 0–7。')
+                print('无效菜单选项，请输入 0–8。')
         except (KeyboardInterrupt, EOFError) as exc:
-            print(f'标定取消：{label}；原因：{exc}' if choice in ('1', '2', '4') else f'操作已取消；原因：{exc}')
+            print(f'标定取消：{label}；原因：{exc}' if choice in ('1', '2', '4', '8') else f'操作已取消；原因：{exc}')
         except Exception as exc:
-            prefix = f'标定失败：{label}' if choice in ('1', '2', '4') else '操作失败'
-            print(f'{prefix}；具体原因：{exc}\n标定文件：{Path(args.calibration).resolve()}')
+            prefix = f'标定失败：{label}' if choice in ('1', '2', '4', '8') else '操作失败'
+            path = getattr(args, 'target_edge_calibration', ROOT/'target_edge_calibration.yaml') if choice == '8' else args.calibration
+            print(f'{prefix}；具体原因：{exc}\n标定文件：{Path(path).resolve()}')
 
 
 def main(argv=None):
@@ -424,6 +534,10 @@ def main(argv=None):
     parser.add_argument('--config', type=Path, default=ROOT/'config.yaml')
     parser.add_argument('--settings', type=Path, default=ROOT/'single_point_experiment.yaml')
     parser.add_argument('--calibration', type=Path, default=ROOT/'single_point_calibration.yaml')
+    parser.add_argument('--target-edge-calibration', type=Path, default=ROOT/'target_edge_calibration.yaml',
+                        help='independent optional target edge calibration (SI)')
+    parser.add_argument('--min-edge-calibration-distance-m', type=float, default=DEFAULT_MIN_EDGE_DISTANCE_M,
+                        help='minimum XY spacing for taught edge points, default 0.005 m')
     parser.add_argument('--group', help='saved P0 name, e.g. A')
     parser.add_argument('--speed', type=float, help='nominal speed in m/s; hardware prompt allows adjustment')
     parser.add_argument('--show-config', action='store_true', help='print resolved original and experiment parameters offline')
@@ -445,7 +559,7 @@ def main(argv=None):
     try:
         if args.simulate and not args.group:
             from simulation.single_point import demo_calibration
-            data = demo_calibration(project)
+            data = demo_calibration(project, settings=settings)
             result = run_trial(args, project, settings, data, 'A', speed=args.speed)
         elif args.group:
             data = load_calibration(args.calibration)
@@ -458,7 +572,7 @@ def main(argv=None):
     except Exception as exc:
         print(f'操作失败；具体原因：{exc}\n标定文件：{args.calibration.resolve()}')
         return 1
-    return 0 if result is None or result['status'] in ('contact', 'no_contact') else 1
+    return 0 if result is None or result['status'] == 'contact' else 1
 
 
 if __name__ == '__main__':

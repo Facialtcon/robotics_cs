@@ -39,15 +39,23 @@ def site_configuration_digest(config, config_path=ROOT / "config.yaml"):
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def prepare_real(config, config_path):
+def prepare_real(config, config_path, *, scene_calibration=None):
     """Read the project's saved scan and sandbox calibrations before devices exist."""
     validate_execution_configuration(config)
     validate_config(config)
     c = config['continuous_tracking']
-    scan_path = resolve_calibration_path(config_path, config['calibration']['file'])
-    sandbox_path = workspace_calibration_path(config, config_path)
-    calibration = load_scan_calibration(scan_path, require_tcp_offset=True)
-    sandbox = load_workspace_calibration(sandbox_path)
+    if scene_calibration is None:
+        scan_path = resolve_calibration_path(config_path, config['calibration']['file'])
+        sandbox_path = workspace_calibration_path(config, config_path)
+        calibration = load_scan_calibration(scan_path, require_tcp_offset=True)
+        sandbox = load_workspace_calibration(sandbox_path)
+        sources = dict(scan=str(scan_path.resolve()), workspace=str(sandbox_path.resolve()))
+    else:
+        # A scene supplies normalized start/direction and an independent motion
+        # region. All alignment, controller envelopes and checks below are shared.
+        calibration = copy.deepcopy(scene_calibration['scan'])
+        sandbox = copy.deepcopy(scene_calibration['workspace'])
+        sources = dict(scene_calibration['sources'])
     if calibration['robot_ip'] != config['robot']['robot_ip']:
         raise RobotError('scan calibration robot_ip does not match config')
     if not tcp_offsets_match(calibration['active_tcp_offset'], config['tcp']['offset'],
@@ -90,7 +98,9 @@ def prepare_real(config, config_path):
     if metadata.get('configured_tcp_offset') is not None and not tcp_offsets_match(
             metadata['configured_tcp_offset'], config['tcp']['offset'], float(config['tcp']['offset_tolerance'])):
         raise RobotError('workspace calibration TCP does not match configured TCP')
-    digest = site_configuration_digest(config, config_path)
+    digest = (site_configuration_digest(config, config_path) if scene_calibration is None else
+              hashlib.sha256(json.dumps(dict(config=config, scene=scene_calibration),
+                                        sort_keys=True).encode()).hexdigest())
     verification = c.get('site_verification')
     # Reuse the existing project's calibration instead of requiring a second
     # boolean attestation. If explicitly supplied, a record must still be valid.
@@ -170,7 +180,7 @@ def prepare_real(config, config_path):
     check_continuous_xy({**robot_config, 'continuous_boundary_margin': search_margin}, calibration['start_tcp_pose'][:2])
     config['continuous_calibration'] = calibration
     config['continuous_workspace_calibration'] = sandbox
-    config['continuous_calibration_sources'] = dict(scan=str(scan_path.resolve()), workspace=str(sandbox_path.resolve()))
+    config['continuous_calibration_sources'] = sources
     config['continuous_execution_envelope'] = dict(raw_xy_polygon=polygon.tolist(), xy_limits=dict(bounds), margin_m=margin,
         search_margin_m=search_margin, search_geometry=config['continuous_search_geometry'],
         nominal_speed_limits_mps=speed_limits,
