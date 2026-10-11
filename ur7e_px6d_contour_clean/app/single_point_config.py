@@ -6,7 +6,8 @@ import math
 import numpy as np
 import yaml
 
-from calibration.single_point import validate_group, vector
+from calibration.single_point import (DEFAULT_MIN_APPROACH_DISTANCE_M, calibration_distance_m,
+                                      validate_group, vector)
 from config.loader import runtime_robot_config
 
 # Copy values from the selected original config at load time, so the two entry
@@ -15,15 +16,12 @@ PROJECT_PARAMETERS = {
     'speed_max_mps': ('robot', 'max_tcp_speed'),
     'speed_default_mps': ('continuous_tracking', 'search_speed'),
     'contact_threshold_N': ('policy', 'contact_threshold'),
-    'max_search_distance_m': ('continuous_tracking', 'search_max_distance'),
-    'max_approach_time_sec': ('continuous_tracking', 'search_max_time_sec'),
     'control_rate_hz': ('policy', 'control_rate_hz'),
     'max_force_age_sec': ('sensor', 'timeout_sec'),
     'max_robot_age_sec': ('continuous_tracking', 'max_observation_age_sec'),
     'max_cycle_sec': ('continuous_tracking', 'cycle_timeout_sec'),
     'settle_speed_mps': ('continuous_tracking', 'settle_speed_mps'),
     'settle_hold_sec': ('continuous_tracking', 'settle_hold_sec'),
-    'stop_timeout_sec': ('continuous_tracking', 'confirmation_timeout_sec'),
     'start_position_tolerance_m': ('continuous_tracking', 'startup_position_tolerance'),
     'fixed_z_tolerance_m': ('robot', 'fixed_z_tolerance'),
     'orientation_tolerance_rad': ('robot', 'orientation_tolerance_rad'),
@@ -58,13 +56,24 @@ def validate_speed(speed, settings):
 
 
 def validate_settings(settings):
+    settings.setdefault('min_approach_calibration_distance_m', DEFAULT_MIN_APPROACH_DISTANCE_M)
+    settings.setdefault('search_distance_mode', 'fixed')
+    settings.setdefault('search_distance_multiplier', 1.)
+    settings.setdefault('search_margin_m', 0.)
+    settings.setdefault('max_search_margin_m', .02)
+    if settings['search_distance_mode'] not in ('fixed', 'reference_distance'):
+        raise ValueError('search_distance_mode must be fixed or reference_distance')
+    margin, limit = settings['search_margin_m'], settings['max_search_margin_m']
+    if (isinstance(margin, bool) or isinstance(limit, bool) or
+        not np.isfinite([margin, limit]).all() or not 0 <= margin <= limit or limit < 0):
+        raise ValueError('search_margin_m must be finite, nonnegative and within max_search_margin_m')
     positive = ('speed_min_mps', 'speed_max_mps', 'speed_default_mps', 'contact_threshold_N',
-        'unloaded_max_fxy_N', 'max_search_distance_m', 'max_approach_time_sec',
+        'unloaded_max_fxy_N', 'max_search_distance_m', 'search_distance_multiplier', 'max_approach_time_sec',
         'precontact_record_sec', 'post_stop_record_sec', 'control_rate_hz', 'max_force_age_sec',
         'max_robot_age_sec', 'max_cycle_sec', 'settle_speed_mps', 'settle_hold_sec', 'stop_timeout_sec',
         'start_position_tolerance_m', 'fixed_z_tolerance_m', 'orientation_tolerance_rad',
         'probe_tilt_max_deg', 'probe_diameter_m', 'path_clearance_m', 'braking_margin_m',
-        'watchdog_frequency_hz', 'return_speed_mps')
+        'watchdog_frequency_hz', 'return_speed_mps', 'min_approach_calibration_distance_m')
     for key in positive:
         value = settings[key]
         if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) <= 0:
@@ -87,6 +96,32 @@ def validate_settings(settings):
     if settings.get('require_watchdog', True) and settings['max_cycle_sec'] >= 1/settings['watchdog_frequency_hz']:
         raise ValueError('cycle budget must be shorter than watchdog deadline')
     return settings
+
+
+def resolve_search_budget(settings, calibration, name, *, speed=None, require_coverage=True):
+    """Freeze a bounded per-group budget; P_ref remains a geometric reference."""
+    result = deepcopy(settings)
+    validate_settings(result)
+    distance = calibration_distance_m(calibration['P_ref'], calibration['groups'][name]['tcp_pose'])
+    candidate = distance * float(result['search_distance_multiplier']) + result['search_margin_m']
+    cap = float(result.get('configured_max_search_distance_m', result['max_search_distance_m']))
+    if not math.isfinite(cap) or cap <= 0:
+        raise ValueError('configured_max_search_distance_m must be finite and positive')
+    if candidate > cap and (require_coverage or result['search_distance_mode'] == 'reference_distance'):
+        raise ValueError(f'搜索预算不足：P0 到 P_ref 的 XY 距离 {distance*1000:.3f} mm，'
+                         f'行程倍率 {float(result["search_distance_multiplier"]):.3f}，'
+                         f'余量 {result["search_margin_m"]*1000:.3f} mm，候选行程 {candidate*1000:.3f} mm，'
+                         f'独立上限仅 {cap*1000:.3f} mm。请现场检查完整路径后调整单点实验预算；未授权运动。')
+    actual = candidate if result['search_distance_mode'] == 'reference_distance' else cap
+    speed = validate_speed(result['speed_default_mps'] if speed is None else speed, result)
+    minimum_time = actual / speed
+    if require_coverage and minimum_time >= result['max_approach_time_sec']:
+        raise ValueError(f'搜索时间预算不足：按 {speed*1000:.3f} mm/s 覆盖 {actual*1000:.3f} mm '
+                         f'至少需要 {minimum_time:.3f} s，当前上限 {result["max_approach_time_sec"]:.3f} s；未授权接近。')
+    result.update(max_search_distance_m=actual, configured_max_search_distance_m=cap,
+                  reference_distance_m=distance, candidate_search_distance_m=candidate,
+                  minimum_search_time_sec=minimum_time)
+    return result
 
 
 def load_settings(path, project=None):
@@ -131,9 +166,11 @@ def check_segment(start, end, settings):
             raise ValueError('path intersects a forbidden fixture/obstacle; adjust P0/direction')
 
 
-def prepare(project, settings, calibration, name, *, execute):
+def prepare(project, settings, calibration, name, *, execute, speed=None, approach=True):
     validate_settings(settings)
-    pose, direction = validate_group(calibration, name, settings, project, require_review=execute)
+    pose, direction = validate_group(calibration, name, settings, project)
+    if approach:
+        settings = resolve_search_budget(settings, calibration, name, speed=speed, require_coverage=execute)
     effective = deepcopy(project)
     # No granular medium. Change only this run snapshot, never config.yaml.
     effective['preprocessing']['granular_baseline_output'] = [0.] * 6
@@ -150,8 +187,6 @@ def prepare(project, settings, calibration, name, *, execute):
     effective['single_point_calibration'] = deepcopy(calibration)
     effective['experiment'] = dict(kind='single_point_contact' if execute else 'synthetic_demo',
                                    title='Multi-Directional Single-Point Contact Experiment', p0=name)
-    if execute and not settings['site_validation_note'].strip():
-        raise ValueError('on-site validation of selected speed, threshold, stopping clearance and workspace is required')
     if settings['contact_threshold_N'] >= project['policy']['safety_force_threshold']:
         raise ValueError('contact threshold must be below the existing hard processed-force limit')
     if settings['workspace_limits'] is not None or not settings.get('workspace_enabled', True):
@@ -159,7 +194,8 @@ def prepare(project, settings, calibration, name, *, execute):
                                      limits=deepcopy(settings['workspace_limits'] or project['workspace']['limits']))
         end = pose[:3].copy()
         end[:2] += direction * (settings['max_search_distance_m']+settings['braking_margin_m'])
-        check_segment(pose[:3], end, settings)
+        if approach:
+            check_segment(pose[:3], end, settings)
     elif execute:
         raise ValueError('independent workspace is required')
     robot_config = runtime_robot_config(effective)

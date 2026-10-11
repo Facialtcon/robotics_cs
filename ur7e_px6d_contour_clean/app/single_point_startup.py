@@ -65,7 +65,7 @@ def prepare_startup(project, settings, target, controller, reader, processor, lo
     monitor.sample(read_state=controller.read_diagnostic_state)
     logger.write_json('startup_plan.json', dict(initial=current.tolist(), target=target.tolist(),
         segments=[dict(phase=k, pose=p.tolist(), speed=v) for k, p, v in segments],
-        path_confirmed=True, site_review=settings['site_validation_note']))
+        path_confirmed=True))
     require_remote_mode(project['robot']['robot_ip'])
     controller.activate_control(confirmed=True)
     controller.enable_watchdog(settings['watchdog_frequency_hz'])

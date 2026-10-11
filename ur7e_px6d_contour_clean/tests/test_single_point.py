@@ -28,7 +28,8 @@ def settings():
     # Small independent test scenarios; production defaults are checked below.
     values = load_settings(ROOT/'single_point_experiment.yaml')
     values.update(inherit_project_parameters=False, speed_max_mps=.002, speed_default_mps=.0005,
-        speed_presets_mps=[.0002, .0005, .001], max_search_distance_m=.02, max_approach_time_sec=60.,
+        speed_presets_mps=[.0002, .0005, .001], search_distance_mode='fixed', search_distance_multiplier=1.,
+        max_search_distance_m=.02, max_approach_time_sec=60.,
         max_force_age_sec=.06, max_cycle_sec=.08, settle_hold_sec=.1, stop_timeout_sec=2.,
         start_position_tolerance_m=.0002, fixed_z_tolerance_m=.0002, watchdog_frequency_hz=10.,
         require_watchdog=True, workspace_enabled=True, workspace_limits=None, return_lift_distance_m=None,
@@ -129,12 +130,13 @@ def bounded(settings):
     return settings
 
 
-def test_calibration_path_review_and_identity(config, settings):
+@pytest.mark.parametrize('review', [None, {}, dict(note='', reviewed_at=None, max_distance_m=None)])
+def test_legacy_path_review_does_not_gate_valid_calibration_and_identity(config, settings, review):
     data = demo_calibration(config)
-    with pytest.raises(ValueError, match='reviewed'): validate_group(data, 'A', settings, config)
-    group = data['groups']['A']
-    data = save_group(data, 'A', group['tcp_pose'], path_note='whole probe and fixture checked', reviewed_distance_m=.02)
+    data['groups']['A']['path_review'] = review
+    before = deepcopy(data)
     validate_group(data, 'A', settings, config)
+    assert data == before
     bad = deepcopy(data); bad['groups']['A']['active_tcp_offset'] = [0]*6
     with pytest.raises(ValueError, match='TCP'): validate_group(bad, 'A', settings, config)
 
@@ -145,7 +147,7 @@ def test_p0_arbitrary_z_and_orientation_are_valid_and_preserved(config, settings
     data = save_group(demo_calibration(config), 'A', raw_pose)
     path = tmp_path/'cal.yaml'; write_calibration(path, data)
     loaded = load_calibration(path)
-    target, direction = validate_group(loaded, 'A', settings, config, require_review=False)
+    target, direction = validate_group(loaded, 'A', settings, config)
     assert loaded['groups']['A']['tcp_pose'] == raw_pose
     assert target[2] == data['P_ref'][2]
     np.testing.assert_allclose(direction, [1, 0])
@@ -196,11 +198,9 @@ def test_whole_ray_checks_fixture_and_braking_clearance(settings):
     with pytest.raises(ValueError, match='workspace'): check_segment([.39, 0, .2], [.499, 0, .2], settings)
 
 
-def test_no_implicit_workspace_or_site_validation(config, settings):
+def test_workspace_required_without_any_site_validation_note(config, settings):
     data = demo_calibration(config)
-    data = save_group(data, 'A', data['groups']['A']['tcp_pose'], path_note='checked', reviewed_distance_m=.02)
-    with pytest.raises(ValueError, match='on-site'): prepare(config, settings, data, 'A', execute=True)
-    settings['site_validation_note'] = 'checked'
+    assert 'site_validation_note' not in settings
     with pytest.raises(ValueError, match='workspace'): prepare(config, settings, data, 'A', execute=True)
     bounded(settings)
     before = deepcopy(config)
@@ -210,6 +210,20 @@ def test_no_implicit_workspace_or_site_validation(config, settings):
     assert robot_config['continuous_require_watchdog'] is True
     assert not robot_config.get('continuous_real_execution')
     assert 'continuous_speed_limits' not in robot_config
+
+
+@pytest.mark.parametrize('note', [None, '', 'legacy note'])
+def test_real_preparation_accepts_missing_or_legacy_site_note(config, settings, note):
+    bounded(settings)
+    if note is not None:
+        settings['site_validation_note'] = note
+    data = demo_calibration(config)
+    data['groups']['A']['path_review'] = {}
+    before = deepcopy(data)
+    _, _, pose, direction = prepare(config, settings, data, 'A', execute=True)
+    np.testing.assert_array_equal(pose[:2], [.39, 0])
+    np.testing.assert_array_equal(direction, [1, 0])
+    assert data == before
 
 
 @pytest.mark.parametrize('speed', [0, -1, .003, float('inf'), float('nan')])
@@ -450,10 +464,10 @@ def test_failed_or_unconfirmed_preparation_never_approaches(tmp_path, monkeypatc
     import run_single_point_contact as entry
     from tests.doubles import Devices, Keyboard
     bounded(settings)
-    settings.update(site_validation_note='fake reviewed site', return_lift_distance_m=.03)
+    settings.update(return_lift_distance_m=.03)
     config['preprocessing']['baseline']['sample_count'] = 3
     data = demo_calibration(config)
-    data = save_group(data, 'A', [.39, 0, .9, .1, .2, .3], path_note='review at reference Z', reviewed_distance_m=.02)
+    data = save_group(data, 'A', [.39, 0, .9, .1, .2, .3])
     devices = Devices(config, [.38, -.02, .17, .2, .3, .4])
     confirmations = []
     def confirm(prompt, **kw):
@@ -508,10 +522,10 @@ def test_full_hardware_mode_with_injected_devices_only(tmp_path, monkeypatch, co
     from argparse import Namespace
     import run_single_point_contact as entry
     from tests.doubles import Devices, Keyboard
-    bounded(settings); settings['site_validation_note'] = 'fake site validation for tests'
+    bounded(settings)
     settings['return_lift_distance_m'] = .03
     data = set_reference({}, [.4, 0, .2, .2, -.3, .7], config['robot']['robot_ip'], config['tcp']['offset'])
-    data = save_group(data, 'A', [.39, 0, .9, .1, .2, .3], path_note='fake path check at reference Z', reviewed_distance_m=.02)
+    data = save_group(data, 'A', [.39, 0, .9, .1, .2, .3])
     initial = [.38, -.02, .17, .2, .3, .4]
     devices = Devices(config, initial)
     confirmations = []
@@ -555,6 +569,8 @@ def test_full_hardware_mode_with_injected_devices_only(tmp_path, monkeypatch, co
     assert len(confirmations) == 4
     run = next((tmp_path/'real'/'single_point').glob('run_*'))
     assert (run/'air_zero.json').exists()
+    plan = json.loads((run/'startup_plan.json').read_text())
+    assert plan['path_confirmed'] is True and 'site_review' not in plan
     zero = json.loads((run/'air_zero.json').read_text())
     assert zero['location'] == 'above_selected_P0' and zero['actual_tcp_pose'][2] == pytest.approx(.23)
     with (run/'samples.csv').open() as f: rows = list(csv.DictReader(f))

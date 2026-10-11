@@ -1,13 +1,21 @@
 # Shared values below mirror config.yaml and are refreshed from --config at load.
 # Only parameters without an equivalent in the original runner remain independent.
 inherit_project_parameters: true
+# Independent calibration-only XY separation; SI units, default 5 mm.
+min_approach_calibration_distance_m: 0.005
 speed_min_mps: 0.0001
 speed_max_mps: 0.030
 speed_default_mps: 0.018
 speed_presets_mps: [0.006, 0.012, 0.018]
 contact_threshold_N: 1.0
 unloaded_max_fxy_N: 0.2
-max_search_distance_m: 0.10
+# Independent single-point budgets; never overwritten by continuous tracking.
+# Freeze each group's travel at 2 * distance(P0.xy, P_ref.xy) + confirmed margin.
+search_distance_mode: reference_distance
+search_distance_multiplier: 2.0
+max_search_distance_m: 0.80  # finite hard cap; insufficient candidates refuse startup
+search_margin_m: 0.0        # optional on-site margin, confirmed by the existing final Enter
+max_search_margin_m: 0.020  # maximum permitted extra travel (20 mm)
 max_approach_time_sec: 110.0
 precontact_record_sec: 1.0
 post_stop_record_sec: 0.5
@@ -35,9 +43,7 @@ workspace_limits: {x_min: 0.0, x_max: 0.0, y_min: 0.0, y_max: 0.0, z_min: 0.0, z
 # Boxes for fixtures/other obstacles; omit the intended contacted object.
 # Each box: {x_min: ..., x_max: ..., y_min: ..., y_max: ..., z_min: ..., z_max: ...}
 forbidden_boxes: []
-# Must name the on-site selected-speed, threshold, braking and path checks.
-site_validation_note: ''
-# Copy the original lift and speeds; menu 6 still requires a complete path review.
+# Copy the original lift and speeds; menu 6 retains path checks and Enter confirmation.
 return_lift_distance_m: 0.030
 return_speed_mps: 0.027
 return_vertical_speed_mps: 0.018

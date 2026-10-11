@@ -35,9 +35,10 @@ def temporary_args(tmp_path, data, *, execute=True):
 
 def test_menu_three_shows_multiple_groups_without_raw_json_and_does_not_write(tmp_path, monkeypatch, config, settings, capsys):
     data = demo_calibration(config)
-    data = save_group(data, 'A', [.390123456789012, 0, .8, .2, .3, .4],
-                      path_note='verified full path', reviewed_distance_m=settings['max_search_distance_m'])
-    data = save_group(data, 'B', [.4, -.01, -.6, 0, 0, 0], path_note='insufficient path', reviewed_distance_m=.001)
+    data = save_group(data, 'A', [.390123456789012, 0, .8, .2, .3, .4])
+    data = save_group(data, 'B', [.4, -.01, -.6, 0, 0, 0])
+    data['groups']['A']['path_review'] = dict(note='legacy note', max_distance_m=.1, reviewed_at='old')
+    data['groups']['B']['path_review'] = {}
     args = temporary_args(tmp_path, data, execute=False)
     before = args.calibration.read_bytes()
     assert menu_run(monkeypatch, args, config, settings, ['3', '0']) == 0
@@ -46,7 +47,8 @@ def test_menu_three_shows_multiple_groups_without_raw_json_and_does_not_write(tm
     assert 'X=400.000 mm' in output and 'Z=200.000 mm' in output
     assert 'P0-A' in output and 'P0-B' in output and 'P0-C' in output
     assert '390.123' in output and '90.00°' in output and '180.00°' in output
-    assert '已保存' in output and '已完成' in output and '未完成' in output
+    assert '标定状态' in output and '有效' in output
+    assert all(value not in output for value in ('路径核验', '未完成', '保存状态', 'legacy note'))
     assert 'tcp_pose' not in output and 'schema_version' not in output and '{' not in output
     assert '0.390123456789012' not in output
     assert args.calibration.read_bytes() == before and load_calibration(args.calibration) == data
@@ -79,14 +81,15 @@ def test_readonly_capture_in_local_or_unknown_mode_never_creates_control(monkeyp
     def confirm(prompt):
         prompts.append(prompt)
         assert devices.receive_count == devices.control_count == 0
-        assert 'Local' in capsys.readouterr().out
+        output = capsys.readouterr().out
+        assert 'Local' in output
+        assert ('未处于Remote' if remote is False else '状态：未知') in output
         return True
     pose, tcp = entry.capture_pose(config, point_name='P0-A', confirm=confirm, controller_factory=devices.controller)
     output = capsys.readouterr().out
     assert all(f'[{i}/9]' in output for i in range(3, 7))
     assert '390.123 mm' in output and '-9.877 mm' in output and '712.346 mm' in output
     assert '0.390123456789012' not in output
-    assert ('Local / Remote 未启用' if remote is False else '未知（未确认 Remote）') in output
     np.testing.assert_array_equal(pose, raw)
     assert tcp == config['tcp']['offset']
     assert devices.receive_count == 1 and devices.control_count == 0 and devices.control.calls == []
@@ -110,7 +113,7 @@ def test_calibration_success_saves_reads_back_and_keeps_existing_groups(tmp_path
         return read(path)
     monkeypatch.setattr(entry, 'write_calibration', writing)
     monkeypatch.setattr(entry, 'load_calibration', reading)
-    answers = ['1', '0'] if choice == '1' else ['2', 'D', '', '0']
+    answers = ['1', '0'] if choice == '1' else ['2', 'D', '0']
     assert menu_run(monkeypatch, args, config, settings, answers) == 0
     output = capsys.readouterr().out
     assert f'标定成功：{name}' in output and '文件回读校验通过' in output
@@ -125,7 +128,8 @@ def test_calibration_success_saves_reads_back_and_keeps_existing_groups(tmp_path
         assert loaded['reference_tcp_pose'] == original['reference_tcp_pose']
         assert all(loaded['groups'][key] == value for key, value in original['groups'].items())
         assert loaded['groups']['D']['tcp_pose'] == raw
-        assert '未完成；坐标已保存' in output
+        assert 'path_review' not in loaded['groups']['D']
+        assert '路径核验' not in output
 
 
 @pytest.mark.parametrize('choice', ['1', '2'])
@@ -161,6 +165,7 @@ def test_actual_write_failure_and_readback_mismatch_are_not_success(tmp_path, mo
     monkeypatch.setattr(entry, 'load_calibration', lambda path: original)
     with pytest.raises(ValueError, match='回读校验不一致'):
         entry.save_calibration_checked(args.calibration, updated, 'P0-D')
+    assert args.calibration.read_bytes() == before
     assert '标定成功' not in capsys.readouterr().out
 
 
@@ -168,9 +173,9 @@ def test_reference_recalibration_never_overwrites_existing_groups(tmp_path, monk
     data = demo_calibration(config)
     args = temporary_args(tmp_path, data)
     before = args.calibration.read_bytes()
-    assert menu_run(monkeypatch, args, config, settings, ['1', '0']) == 0
+    assert menu_run(monkeypatch, args, config, settings, ['1', '0', '0']) == 0
     output = capsys.readouterr().out
-    assert '标定失败：P_ref' in output and '拒绝覆盖固定参考点' in output
+    assert '重新标定 P_ref' in output and '标定取消：P_ref' in output
     assert args.calibration.read_bytes() == before
 
 
@@ -185,23 +190,27 @@ def test_readonly_capture_tcp_mismatch_reports_specific_reason_and_closes_receiv
     assert '[6/9]' not in capsys.readouterr().out
 
 
-def test_cancel_before_read_does_not_connect(config):
+def test_cancel_before_read_does_not_connect(config, monkeypatch):
     devices = Devices(config, [.4, .01, .2, .1, .2, .3])
+    monkeypatch.setattr(ui, 'read_control_mode', lambda ip: ControlMode('local', '模拟回复 false'))
     with pytest.raises(KeyboardInterrupt, match='取消只读标定'):
         entry.capture_pose(config, confirm=lambda prompt: False, controller_factory=devices.controller)
     assert devices.receive_count == devices.control_count == 0 and devices.control.calls == []
 
 
-def test_cancel_path_review_preserves_data_and_returns_to_table(tmp_path, monkeypatch, config, settings, capsys):
+def test_p0_calibration_does_not_request_text_or_extra_confirmation(tmp_path, monkeypatch, config, settings, capsys):
     args = temporary_args(tmp_path, demo_calibration(config))
-    before = args.calibration.read_bytes()
+    before = load_calibration(args.calibration)
     monkeypatch.setattr(entry, 'capture_pose', lambda project, **kw: (np.array([.4, .01, .8, .1, .2, .3]), config['tcp']['offset']))
-    monkeypatch.setattr(entry, 'confirm_enter', lambda *a, **kw: False)
-    assert menu_run(monkeypatch, args, config, settings, ['2', 'D', 'path note', '3', '0']) == 0
+    def forbidden(*a, **kw): raise AssertionError('P0 capture must not add another confirmation')
+    monkeypatch.setattr(entry, 'confirm_enter', forbidden)
+    assert menu_run(monkeypatch, args, config, settings, ['2', 'D', '3', '0']) == 0
     output = capsys.readouterr().out
-    assert '标定取消：P0-D' in output and '未保存本次新标定' in output
-    assert '已标定 P0 数量：3' in output and '标定成功' not in output
-    assert args.calibration.read_bytes() == before
+    assert '标定成功：P0-D' in output and '已标定 P0 数量：4' in output
+    assert '路径核验' not in output and '核验依据' not in output
+    after = load_calibration(args.calibration)
+    assert after['groups']['D']['tcp_pose'] == [.4, .01, .8, .1, .2, .3]
+    assert all(after['groups'][name] == group for name, group in before['groups'].items())
 
 
 class DashboardSocket:
@@ -241,9 +250,6 @@ def test_dashboard_invalid_greeting_does_not_send_commands():
 @pytest.mark.parametrize('mode', ['local', 'unknown'])
 def test_automatic_preparation_reports_remote_requirement_and_blocks_unconfirmed_mode(tmp_path, monkeypatch, config, settings, capsys, mode):
     data = demo_calibration(config)
-    data = save_group(data, 'A', data['groups']['A']['tcp_pose'], path_note='fake path',
-                      reviewed_distance_m=settings['max_search_distance_m'])
-    settings['site_validation_note'] = 'fake on-site validation'
     args = temporary_args(tmp_path, data)
     devices = Devices(config, [.39, 0, .2, np.pi, 0, 0])
     monkeypatch.setattr(entry, 'confirm_enter', lambda *a, **kw: True)
@@ -262,26 +268,26 @@ def test_automatic_preparation_reports_remote_requirement_and_blocks_unconfirmed
 @pytest.mark.parametrize('mode', ['local', 'unknown', 'remote'])
 def test_return_to_group_checks_mode_after_path_confirmation_before_control(tmp_path, monkeypatch, config, settings, capsys, mode):
     data = demo_calibration(config)
-    data = save_group(data, 'A', data['groups']['A']['tcp_pose'], path_note='fake approach review',
-                      reviewed_distance_m=settings['max_search_distance_m'])
-    settings['site_validation_note'] = 'fake site validation'
     args = temporary_args(tmp_path, data)
     before = args.calibration.read_bytes()
     devices = Devices(config, [.38, -.02, .17, .2, .3, .4])
     monkeypatch.setattr(entry, 'URRTDEController', devices.controller)
     from tests.doubles import Sensor
     monkeypatch.setattr(entry, 'make_reader', lambda config: Sensor())
-    class ReviewedKeyboard(Keyboard):
-        def read_text(self, prompt): return 'fake complete return review'
-    monkeypatch.setattr(entry, 'OperatorKeyboard', ReviewedKeyboard)
+    class NoTextKeyboard(Keyboard):
+        def read_text(self, prompt): raise AssertionError('return must not ask for written evidence')
+    monkeypatch.setattr(entry, 'OperatorKeyboard', NoTextKeyboard)
     order = []
     def confirm(prompt, **kw):
         assert devices.control_count == 0
         order.append('path confirmation' if '完整路径' in prompt else 'read confirmation')
         return True
     def query(ip):
-        assert order == ['read confirmation', 'path confirmation']
         assert devices.control_count == 0 and devices.control.calls == []
+        if not order:
+            order.append('initial mode check')
+            return ControlMode(mode, '模拟查询结果')
+        assert order == ['initial mode check', 'read confirmation', 'path confirmation']
         order.append('read-only mode check')
         return ControlMode(mode, '模拟查询结果')
     monkeypatch.setattr(entry, 'confirm_enter', confirm)
@@ -289,13 +295,80 @@ def test_return_to_group_checks_mode_after_path_confirmation_before_control(tmp_
     if mode == 'remote':
         entry.return_to_group(args, config, settings, data, 'A')
         assert devices.control_count == 1 and any(call[0] == 'moveL' for call in devices.control.calls)
+        plan = json.loads(next((tmp_path/'real'/'single_point').glob('run_*'))
+                          .joinpath('return_plan.json').read_text())
+        assert plan['path_confirmed'] is True and 'site_review' not in plan
     else:
         with pytest.raises(RobotError, match='未确认 Remote'):
             entry.return_to_group(args, config, settings, data, 'A')
         assert devices.control_count == 0 and devices.control.calls == []
     output = capsys.readouterr().out
-    assert '请在示教器切换 Remote' in output and '只读控制模式检查' in output
+    assert '请在示教器切换 Remote' in output and '机器人控制模式' in output
+    assert '核验依据' not in output
     assert args.calibration.read_bytes() == before
+
+
+@pytest.mark.parametrize('failure', ['read_cancel', 'path_cancel', 'path_drift', 'workspace',
+                                   'obstacle', 'force_limit', 'sensor_failure'])
+def test_return_keeps_actual_guards_and_enter_confirmation_without_text(
+        tmp_path, monkeypatch, config, settings, failure, capsys):
+    from core.models import Wrench
+    from safety.safe_return import ReturnAborted
+    from sensor.px6d_reader import PX6DTimeout
+    from tests.doubles import Sensor
+    data = demo_calibration(config)
+    data['groups']['A']['path_review'] = {}
+    args = temporary_args(tmp_path, data)
+    before = args.calibration.read_bytes()
+    settings.update(workspace_enabled=True, workspace_limits=dict(
+        x_min=.3, x_max=.5, y_min=-.1, y_max=.1, z_min=.1, z_max=.3))
+    initial = [.6 if failure == 'workspace' else .38, -.02, .17, .2, .3, .4]
+    devices = Devices(config, initial)
+    if failure == 'obstacle':
+        settings['forbidden_boxes'] = [dict(x_min=.37, x_max=.39, y_min=-.03,
+                                          y_max=-.01, z_min=.18, z_max=.22)]
+    class NoTextKeyboard(Keyboard):
+        def read_text(self, prompt): raise AssertionError('no written evidence is allowed')
+    class GuardSensor(Sensor):
+        def read_wrench(self):
+            if failure == 'sensor_failure':
+                raise PX6DTimeout('fake sensor stream failure')
+            return Wrench(10000. if failure == 'force_limit' else 0., 0., 0., 0., 0., 0.)
+    confirmations = []
+    def confirm(prompt, **kw):
+        assert devices.control_count == 0 and not devices.control.calls
+        confirmations.append(prompt)
+        if '完整路径' in prompt:
+            assert '完整运动路径' in capsys.readouterr().out
+            if failure == 'path_drift':
+                devices.receive.pose[0] += .01
+            return failure != 'path_cancel'
+        return failure != 'read_cancel'
+    monkeypatch.setattr(entry, 'confirm_enter', confirm)
+    monkeypatch.setattr(entry, 'URRTDEController', devices.controller)
+    monkeypatch.setattr(entry, 'make_reader', lambda cfg: GuardSensor())
+    monkeypatch.setattr(entry, 'OperatorKeyboard', NoTextKeyboard)
+    monkeypatch.setattr(ui, 'read_control_mode', lambda ip: ControlMode('remote', 'fake true'))
+    if failure.endswith('cancel'):
+        entry.return_to_group(args, config, settings, data, 'A')
+    else:
+        expected = dict(path_drift='位姿已变动', workspace='workspace', obstacle='intersects',
+                        force_limit='force.*limit', sensor_failure='sensor stream failure')[failure]
+        with pytest.raises((RobotError, ValueError, ReturnAborted, PX6DTimeout), match=expected):
+            entry.return_to_group(args, config, settings, data, 'A')
+    assert devices.control_count == 0 and not devices.control.calls
+    assert len(confirmations) == (1 if failure in ('read_cancel', 'workspace', 'obstacle') else 2)
+    assert args.calibration.read_bytes() == before
+
+
+def test_recapturing_p0_preserves_legacy_metadata_and_clears_invalid_marker(config):
+    data = demo_calibration(config)
+    data['groups']['A'].update(path_review=dict(note='historical record'), requires_recalibration=True)
+    before = deepcopy(data)
+    updated = save_group(data, 'A', [.38, .01, .9, .3, -.5, .7])
+    assert updated['groups']['A']['path_review'] == data['groups']['A']['path_review']
+    assert 'requires_recalibration' not in updated['groups']['A']
+    assert data == before
 
 
 def test_normal_group_and_path_coordinates_are_mm_without_raw_precision(config, settings, capsys):

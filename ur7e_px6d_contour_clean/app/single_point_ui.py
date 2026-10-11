@@ -3,6 +3,8 @@ import unicodedata
 
 import numpy as np
 
+from calibration.single_point import (DEFAULT_MIN_APPROACH_DISTANCE_M, calibration_distance_m,
+                                      group_calibration_issue)
 from robot.control_mode import read_control_mode
 from robot.rtde_controller import RobotError
 
@@ -18,12 +20,6 @@ def pose_text(pose):
 
 def direction_angle(direction):
     return float(np.degrees(np.arctan2(direction[1], direction[0])))
-
-
-def path_reviewed(group, settings):
-    review = group.get('path_review', {})
-    return bool(review.get('note') and review.get('reviewed_at') and
-                float(review.get('max_distance_m') or 0) >= settings['max_search_distance_m'])
 
 
 def _table(headers, rows):
@@ -49,10 +45,13 @@ def show_calibration_table(data, settings):
         return
     rows = []
     for name, group in groups.items():
+        issue = group_calibration_issue(data, name, settings.get('min_approach_calibration_distance_m',
+                                                               DEFAULT_MIN_APPROACH_DISTANCE_M))
         rows.append([f'P0-{name}', f'{group["tcp_pose"][0]*1000:.3f}', f'{group["tcp_pose"][1]*1000:.3f}',
-            f'{direction_angle(group["direction_xy"]):.2f}°', '已保存',
-            '已完成' if path_reviewed(group, settings) else '未完成'])
-    _table(['名称', 'X (mm)', 'Y (mm)', '方向角（Base +X）', '保存状态', '路径核验'], rows)
+            f'{calibration_distance_m(reference, group["tcp_pose"])*1000:.3f}',
+            '—' if issue else f'{direction_angle(group["direction_xy"]):.2f}°',
+            ('距离过近，需要重标定' if '距离过近' in issue else '需要重标定') if issue else '有效'])
+    _table(['名称', 'X (mm)', 'Y (mm)', 'XY距离 (mm)', '接近方向角（Base +X）', '标定状态'], rows)
     print('方向角以 Base +X 为 0°，逆时针为正；P0 仅使用 XY，扫描高度统一为 P_ref.z。')
 
 
@@ -67,26 +66,48 @@ def show_motion_path(current, target, segments):
 
 
 def report_control_mode(robot_ip):
+    print('\n========== 机器人控制模式 ==========\n正在通过 Dashboard 29999 只读查询…', flush=True)
     status = read_control_mode(robot_ip)
-    labels = dict(local='Local / Remote 未启用', remote='Remote', unknown='未知（未确认 Remote）')
-    print(f'只读控制模式检查：{labels.get(status.mode, "未知")}；{status.detail}', flush=True)
+    if status.mode == 'remote':
+        print('机器人连接成功\n当前模式：Remote（远程控制）\n可以准备执行电脑控制实验。实际运动仍需单独确认。', flush=True)
+    elif status.mode == 'local':
+        print('机器人连接成功\n当前状态：未处于Remote\n可能为Local模式或未启用Remote功能。\n'
+              '可进行人工示教与只读标定。自动运动前需要切换Remote。', flush=True)
+    else:
+        print(f'模式查询失败\n状态：未知\n具体原因：{status.detail}', flush=True)
     return status
 
 
 def require_remote_mode(robot_ip):
     status = report_control_mode(robot_ip)
     if status.mode != 'remote':
-        raise RobotError('未确认 Remote，未授权自动运动；请在示教器切换 Remote 后重新核验路径。' + status.detail)
+        raise RobotError('当前未确认 Remote 模式。请在示教器中切换 Remote，'
+                         '然后重新进行运动路径核验与确认。' + status.detail)
     return status
 
 
 def show_trial_result(result):
     labels = dict(contact='接触阈值触发，已完成停车记录', no_contact='距离或时间预算内未找到接触', aborted='实验失败/已中止')
-    print(f'实验结果：{labels.get(result["status"], result["status"])}')
+    if result['status'] == 'no_contact' and result.get('reason') == 'NO_CONTACT_DISTANCE':
+        print('未找到接触：搜索距离耗尽。')
+    else:
+        print(f'实验结果：{labels.get(result["status"], result["status"])}')
     if result.get('reason'):
         print(f'停止原因：{result["reason"]}')
     if result.get('fault'):
         print(f'具体原因：{result["fault"]}')
+    failures = dict(BRAKING_API_FAILURE='制动指令失败或被 SDK 拒绝',
+                    STOP_TELEMETRY_INCOMPLETE='制动过程数据记录未完成',
+                    STANDSTILL_NOT_CONFIRMED='未能确认实际停稳',
+                    STANDSTILL_REVOKED='停稳后再次发生运动',
+                    POST_STOP_RECORDING_INCOMPLETE='停车数据记录未完成')
+    if result.get('stop_failure_kind'):
+        print('停车阶段结果：' + failures.get(result['stop_failure_kind'], result['stop_failure_kind']))
+    if result.get('actual_standstill_sec') is not None:
+        print('实际停稳已确认；停稳后记录：' + ('完成' if result.get('post_stop_record_completed') else '未完成'))
+    if result.get('timeout_phase'):
+        phases = dict(BRAKING_CONFIRMATION='制动与实际停稳确认', POST_STOP_RECORDING='停稳后的数据记录')
+        print('超时阶段：' + phases.get(result['timeout_phase'], result['timeout_phase']))
     for error in result.get('cleanup_errors', []):
         print(f'设备关闭失败：{error}')
     if result.get('actual_stop_pose'):
