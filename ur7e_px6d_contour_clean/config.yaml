@@ -261,8 +261,8 @@ continuous_tracking:
   unload_force_window_sec: 0.25   # s; mean/trend evidence, no background subtraction
   unload_evaluation_sec: 1.5      # s; allows 0.2 mm at 0.5 mm/s + filter/acceleration settling
   unload_min_displacement_m: 0.0002 # m; existing position tolerance scale, validate against site noise
-  unload_max_displacement_m: 0.001 # m; finite 1 mm excursion, no endless retreat
-  unload_max_time_sec: 3.0        # s; total episode budget, never reset by intermittent improvement
+  unload_max_displacement_m: 0.002 # m; finite 2 mm excursion, checked against the execution workspace
+  unload_max_time_sec: 6.0        # s; total episode budget, never reset by intermittent improvement
   unload_resume_ramp_sec: 0.5     # s; smooth recovery, existing acceleration cap also applies
   # Covers the 1 s confirmation wait, 0.15 s low-force hold and sample latency.
   # Validate against these budgets; never refresh the timestamp while waiting.

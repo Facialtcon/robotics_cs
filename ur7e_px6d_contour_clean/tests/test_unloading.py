@@ -9,7 +9,7 @@ from policy.continuous_tracking import ContinuousTrackingPolicy, State
 from sensor.force_direction import control_directions, normal_feedback_speed
 
 
-def exercise(config, force, *, moving=True, seconds=3.5):
+def exercise(config, force, *, moving=True, seconds=3.5, motion_scale=1.):
     c = deepcopy(config)
     c['continuous_real_execution'] = True
     policy = ContinuousTrackingPolicy(c)
@@ -22,7 +22,7 @@ def exercise(config, force, *, moving=True, seconds=3.5):
         rows.append((now, command, policy.telemetry(command)))
         if policy.state == State.STOP:
             break
-        speed[:2] = command.direction_xy*command.speed if moving else 0.
+        speed[:2] = command.direction_xy*command.speed*motion_scale if moving else 0.
         pose += speed*.01
     return policy, rows
 
@@ -57,9 +57,9 @@ def test_effective_unloading_recovers_tangent_smoothly_and_clears_current_limit(
 
 
 def test_improving_but_never_released_force_cannot_reset_total_budget(config):
-    policy, rows = exercise(config, lambda t: max(2.1, 3.-t*.35), seconds=4.)
+    policy, rows = exercise(config, lambda t: max(2.1, 3.-t*.35), seconds=7.)
     assert policy.stop_reason.value == 'STOP_UNLOAD_BUDGET'
-    assert rows[-1][0] <= 3.11
+    assert 3.11 < rows[-1][0] <= 6.11
     assert not rows[-1][1].move
 
 
@@ -93,3 +93,64 @@ def test_signed_normal_unload_and_handed_tangent_stay_consistent(config, sign, h
 def test_unload_hard_force_limit_retains_priority(config):
     policy, rows = exercise(config, lambda t: 3. if t < .5 else 61.)
     assert policy.stop_reason.value == 'STOP_FORCE_LIMIT' and not rows[-1][1].move
+
+
+def test_extended_budget_releases_high_first_contact_load_beyond_one_mm(config):
+    policy, rows = exercise(config, lambda t: max(1.5, 4.894-max(0., t-.3)*.8), seconds=5.)
+    assert config['continuous_tracking']['unload_max_displacement_m'] == .002
+    assert config['continuous_tracking']['unload_max_time_sec'] == 6.
+    assert config['continuous_tracking']['normal_speed_limit'] == .0005
+    assert policy.stop_reason is None and not policy.unload_active
+    assert .001 < policy.unload_displacement < .002
+    assert 3. < policy.unload_elapsed < 6.
+    events = [event.event_type for event in policy.events]
+    assert 'UNLOAD_FORCE_RELEASED' in events and 'TANGENT_RESUME_COMPLETED' in events
+    active = [row for _, _, row in rows if row['unload_active']]
+    assert all(abs(row['v_n']) <= .0005+1e-12 and abs(row['v_t']) < 1e-12 for row in active)
+    assert rows[-1][2]['unload_initial_force_N'] == pytest.approx(4.894)
+    assert rows[-1][2]['unload_last_force_N'] <= config['continuous_tracking']['unload_resume_force']
+    assert policy.unload_improvement > 2.
+
+
+@pytest.mark.parametrize('motion_scale,limit', [(1., 'displacement'), (.5, 'time')])
+def test_unload_new_budgets_remain_finite(config, motion_scale, limit):
+    policy, rows = exercise(config, lambda t: 4.-t*.15, seconds=7., motion_scale=motion_scale)
+    assert policy.stop_reason.value == 'STOP_UNLOAD_BUDGET'
+    if limit == 'displacement':
+        assert .002 <= policy.unload_displacement < .00201
+        assert 4. < policy.unload_elapsed < 6.
+    else:
+        assert 6. <= policy.unload_elapsed < 6.02
+        assert policy.unload_displacement < .002
+    assert not rows[-1][1].move
+
+
+def test_first_contact_braking_metrics_use_actual_tcp_and_freeze_at_low_speed(config):
+    policy = ContinuousTrackingPolicy(config)
+    pose = np.zeros(6)
+    for i, (force, distance, speed) in enumerate([
+        (1.210, 0., .018), (4., .0005, .010), (4.894, .00103, 0.)]):
+        pose[0] = distance
+        wrench = Wrench(force, 0., 0., 0., 0., 0.)
+        command = policy.update(i*.01, wrench, wrench,
+            RobotState(i*.01, pose.copy(), np.array([speed, 0., 0., 0., 0., 0.])), execution_settled=True)
+        assert not command.move
+    for i in range(3, 20):
+        command = policy.update(i*.01, wrench, wrench,
+            RobotState(i*.01, pose.copy(), np.zeros(6)), execution_settled=True)
+        if policy.state == State.CONTINUOUS_TRACKING:
+            break
+    metrics = policy.telemetry(command)
+    assert metrics['first_contact_braking_distance_m'] == pytest.approx(.00103)
+    assert metrics['first_contact_braking_elapsed_sec'] == pytest.approx(.02)
+    assert metrics['first_contact_trigger_force_N'] == pytest.approx(1.210)
+    assert metrics['first_contact_confirm_force_N'] == pytest.approx(4.894)
+
+
+def test_unload_raw_torque_backstop_retains_priority(config):
+    policy, rows = exercise(config, lambda t: 3., seconds=.5)
+    assert policy.unload_active
+    wrench = Wrench(3., 0., 0., 6., 0., 0.)
+    command = policy.update(.5, wrench, wrench, RobotState(.5, policy.tracking_pose.copy(), np.zeros(6)),
+                            execution_settled=True)
+    assert policy.stop_reason.value == 'STOP_FORCE_LIMIT' and not command.move

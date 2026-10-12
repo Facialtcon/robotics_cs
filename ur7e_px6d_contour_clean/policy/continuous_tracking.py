@@ -21,8 +21,8 @@ from sensor.force_preprocess import IndependentForceKalman
 # 0.5 s warning as proof of wrong physical sign. Total budgets never restart.
 UNLOAD_DEFAULTS = dict(unload_resume_force=2.0, unload_resume_hold_sec=.1,
     unload_force_window_sec=.25, unload_evaluation_sec=1.5,
-    unload_min_displacement_m=.0002, unload_max_displacement_m=.001,
-    unload_max_time_sec=3., unload_resume_ramp_sec=.5)
+    unload_min_displacement_m=.0002, unload_max_displacement_m=.002,
+    unload_max_time_sec=6., unload_resume_ramp_sec=.5)
 
 
 class State(str, Enum):
@@ -189,6 +189,9 @@ UNLOAD_FIELDS = ('tangent_limit_reason', 'unload_active', 'unload_elapsed_sec',
                 'unload_resume_scale', 'settle_hold_start_host_monotonic',
                 'tcp_displacement_from_contact_m', 'actual_v_n_mps', 'actual_v_t_mps')
 EXTRA_SAMPLE_FIELDS += UNLOAD_FIELDS
+EXTRA_SAMPLE_FIELDS += ('first_contact_braking_distance_m', 'first_contact_braking_elapsed_sec',
+                        'first_contact_trigger_force_N', 'first_contact_confirm_force_N',
+                        'unload_initial_force_N', 'unload_last_force_N')
 EXTRA_SAMPLE_FIELDS += ('reacquire_round', 'reacquire_active', 'reacquire_elapsed_sec',
                         'reacquire_max_angle_deg', 'reacquire_contact_threshold', 'reacquire_actual_heading_deg')
 
@@ -278,12 +281,20 @@ class ContinuousTrackingPolicy:
         self.unload_resume_scale = 1.
         self.tangent_limit_reason = 'READY'
         self._contact_low_speed_seen = False
+        self.first_contact_braking_distance = self.first_contact_braking_elapsed = 0.
+        self.first_contact_trigger_force = self.first_contact_confirm_force = None
+        self._first_threshold_time = self._unload_initial_force = self._unload_last_force = None
+
+    def first_contact_threshold_reached(self, processed):
+        return (self.state in (State.READY, State.TARGET_SEARCH) and
+                np.hypot(processed.fx, processed.fy) >= float(self.p['contact_threshold']))
 
     def _begin_unload(self, now, pose):
         self.unload_active = True
         self._unload_started, self._unload_pose = now, pose[:2].copy()
         self._unload_direction = -self.contact_direction.copy()
         self._unload_initial_force = self.fxy  # Already EMA-filtered; do not average in pre-contact low force.
+        self._unload_last_force = self.fxy
         self._unload_release_since = self._unload_resumed = None
         self.unload_displacement = self.unload_projected = self.unload_elapsed = self.unload_improvement = 0.
         self._event(now, pose, 'UNLOAD_STARTED')
@@ -299,6 +310,7 @@ class ContinuousTrackingPolicy:
             (centered @ centered)) if centered @ centered > 1e-12 else 0.
         if not self.unload_active:
             return
+        self._unload_last_force = self.fxy
         self.unload_elapsed = now-self._unload_started
         delta = pose[:2]-self._unload_pose
         self.unload_displacement = max(self.unload_displacement, float(np.linalg.norm(delta)))
@@ -352,6 +364,8 @@ class ContinuousTrackingPolicy:
                            target_direction_xy=self.contact_direction.copy(), tangent_xy=self.tangent.copy()))
 
     def request_stop(self, now, pose, reason, *, event='SAFETY_STOP', code=None):
+        if self.unload_active:
+            self._unload_last_force = self.fxy
         if self.state != State.STOP:
             self.stop_from_state = self.state
             self.state, self.reason, self.stop_reason = State.STOP, reason, code
@@ -843,6 +857,10 @@ class ContinuousTrackingPolicy:
             if self.contact_flag:
                 self.state = State.FIRST_CONTACT
                 self.first_threshold_pose = pose.copy()
+                self._first_threshold_time = now
+                self.first_contact_trigger_force = self.fxy
+                self.first_contact_confirm_force = None
+                self.first_contact_braking_distance = self.first_contact_braking_elapsed = 0.
                 self._reset_confirmation(now)
                 self._event(now, pose, 'FIRST_THRESHOLD_STOP_REQUEST')
             elif self.state == State.READY:
@@ -868,10 +886,16 @@ class ContinuousTrackingPolicy:
                 self.stop_requested = False
                 return self._command(pose, self.search_direction*float(self.c['search_speed']))
         if self.state == State.FIRST_CONTACT:
+            if not self._contact_low_speed_seen and self.first_threshold_pose is not None:
+                # Freeze at the first actual low-speed observation; subsequent
+                # confirmation/hold time is not physical braking time.
+                self.first_contact_braking_distance = float(np.linalg.norm(pose[:2]-self.first_threshold_pose[:2]))
+                self.first_contact_braking_elapsed = now-self._first_threshold_time
             self.tangent_limit_reason = ('FIRST_CONTACT_SETTLE_HOLD' if
                 np.linalg.norm(robot.tcp_speed[:3]) <= self.c['settle_speed_mps'] else 'FIRST_CONTACT_BRAKING')
             if self._confirm(now, robot, vector):
                 self.initial_contact = pose.copy()
+                self.first_contact_confirm_force = self.fxy
                 self.state = State.CONTINUOUS_TRACKING
                 self._event(now, pose, 'FIRST_CONTACT')
                 self._event(now, pose, 'TRACKING_ENTERED')
@@ -1051,4 +1075,10 @@ class ContinuousTrackingPolicy:
             self._settle_since if self._settle_since is not None else '',
             '' if self.first_threshold_pose is None else float(np.linalg.norm(self.tracking_pose[:2]-self.first_threshold_pose[:2])),
             float(self.tracking_velocity @ self.contact_direction), float(self.tracking_velocity @ self.tangent))))
+        result.update(first_contact_braking_distance_m=self.first_contact_braking_distance,
+            first_contact_braking_elapsed_sec=self.first_contact_braking_elapsed,
+            first_contact_trigger_force_N='' if self.first_contact_trigger_force is None else self.first_contact_trigger_force,
+            first_contact_confirm_force_N='' if self.first_contact_confirm_force is None else self.first_contact_confirm_force,
+            unload_initial_force_N='' if self._unload_initial_force is None else self._unload_initial_force,
+            unload_last_force_N='' if self._unload_last_force is None else self._unload_last_force)
         return result

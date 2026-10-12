@@ -347,6 +347,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
         with OperatorKeyboard() as keyboard:
             while policy.state != State.STOP or (args.execute and controller.stop_state != 'STOPPED'):
                 cycle_start = time.monotonic()
+                threshold_stop_sent = False
                 now = cycle_start if args.execute else controller.time
                 key = keyboard.poll()
                 if key in ("Q", "ESC"):
@@ -370,9 +371,19 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                     # acquisition intervals are kept; this is not hard sync.
                     tcp_start = time.monotonic()
                     robot = controller.read_state()
+                    tcp_end = time.monotonic()
+                    preprocessor.set_tool_orientation(robot.pose[3:])
+                    processed = preprocessor.process(raw)
+                    # Stop immediately on the original filtered Base-XY contact
+                    # threshold, before stop polling, diagnostics and policy work.
+                    # The policy still owns confirmation and all state transitions.
+                    if policy.first_contact_threshold_reached(processed):
+                        timing['command_send_time'] = time.monotonic()
+                        controller.request_stop(nonblocking=True)
+                        timing['command_return_time'] = time.monotonic()
+                        threshold_stop_sent = True
                     controller.poll_stop()
                     speed_diagnostics = dict(controller.speed_guard_diagnostics)
-                    tcp_end = time.monotonic()
                     now = tcp_end
                     validate_cycle_timing(policy.c, cycle_start, now, serial_start, previous_cycle_start, diagnostics=diagnostics)
                     timing.update(serial_read_start=serial_start, serial_read_end=serial_end,
@@ -391,9 +402,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                 timing['loop_start_interval_sec'] = ('' if previous_cycle_start is None else cycle_start-previous_cycle_start) if args.execute else dt
                 termination.observe(raw=raw, robot=robot, phase="WRENCH_PROCESSING")
                 if args.execute:
-                    preprocessor.set_tool_orientation(robot.pose[3:])
                     # processed.force is filtered_force_base; no policy-local rotation.
-                    processed = preprocessor.process(raw)
                     termination.observe(processed=processed, timestamp=now, phase="POLICY_UPDATE",
                         processed_force_frame=preprocessor.force_transform_status['output_frame'])
                     # Policy STOP is terminal for its algorithm, but the runtime
@@ -404,6 +413,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                         force_error = continuous_force_reason(raw, processed, config['policy'], diagnostics)
                         if force_error:
                             raise RobotError(force_error)
+                    unload_was_active = policy.unload_active
                     command = policy.update(now, raw, processed, robot,
                                             execution_settled=controller.standstill_confirmed)
                     if command.move and policy.state == State.TARGET_SEARCH:
@@ -418,6 +428,17 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                             command = policy.update(now, raw, processed, robot)
                     termination.observe(command=command, phase='COMMAND_EXECUTION')
                     controller.set_continuous_phase(policy.state.value, stop_confirmed=policy.stop_confirmed)
+                    if policy.unload_active and not unload_was_active:
+                        # Validate the full finite retreat before permitting its
+                        # first command. Existing convex-polygon clearance and
+                        # execution-pose guards also remain active every tick.
+                        direction = controller.guard.check_velocity(
+                            -policy.contact_direction, float(policy.c['normal_speed_limit']))
+                        endpoint = robot.pose.copy()
+                        endpoint[:2] += direction*float(policy.c['unload_max_displacement_m'])
+                        for pose in (robot.pose, endpoint):
+                            check_continuous_xy(controller.config, pose[:2])
+                            controller._check_execution_pose(pose)
                 if args.execute:
                     # Keep timing and writer observations as diagnostics.
                     # Zero commands (especially first contact) take priority over
@@ -425,7 +446,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                     # retains the execution owner's stop/resume interlock.
                     early_stop = not command.move and (not controller.standstill_confirmed or
                         policy.state in (State.STOP, State.FIRST_CONTACT, State.DIRECTION_RECONFIRM, State.CONTACT_LOST))
-                    if early_stop:
+                    if early_stop and not threshold_stop_sent:
                         timing['command_send_time'] = time.monotonic()
                         controller.request_stop(nonblocking=True)
                         timing['command_return_time'] = time.monotonic()
@@ -677,6 +698,16 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                             last_contact_pose=None if policy.last_contact_pose is None else policy.last_contact_pose.tolist(),
                             mode="real" if args.execute else "simulation", stop_observation=stop_snapshot_info,
                             first_threshold_pose=None if policy.first_threshold_pose is None else policy.first_threshold_pose.tolist(),
+                            first_contact_braking=dict(distance_m=policy.first_contact_braking_distance,
+                                elapsed_sec=policy.first_contact_braking_elapsed,
+                                trigger_force_N=policy.first_contact_trigger_force,
+                                confirmed_force_N=policy.first_contact_confirm_force),
+                            unloading=dict(actual_displacement_m=policy.unload_displacement,
+                                projected_displacement_m=policy.unload_projected,
+                                elapsed_sec=policy.unload_elapsed, initial_force_N=policy._unload_initial_force,
+                                last_unload_force_N=policy._unload_last_force,
+                                current_force_N=policy.fxy, current_force_mean_N=policy.unload_force_mean,
+                                force_improvement_N=policy.unload_improvement),
                             provenance=config.get('continuous_provenance'), software_warnings=software_warnings())))
                     for write, positional, keywords in final_writes:
                         try:

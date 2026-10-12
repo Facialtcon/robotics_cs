@@ -118,6 +118,13 @@ def test_first_contact_uses_same_braking_monitor(config, monkeypatch, tmp_path):
             assert record['start'] is not None, 'contact stop must precede post-policy logger checks'
         return original_health(logger)
     monkeypatch.setattr(runtime.ContinuousLogWriter, 'check_health', checked_health)
+    original_update = runtime.ContinuousTrackingPolicy.update
+    def checked_update(policy, now, raw, processed, robot, **kwargs):
+        if policy.first_contact_threshold_reached(processed):
+            assert record['start'] is not None, 'zero speed must precede contact policy processing'
+            assert devices.control.calls[-1] == ('speedL', [0.] * 6)
+        return original_update(policy, now, raw, processed, robot, **kwargs)
+    monkeypatch.setattr(runtime.ContinuousTrackingPolicy, 'update', checked_update)
     class ContactSensor(Sensor):
         scan_reads = 0
         def read_wrench(self):
@@ -134,9 +141,58 @@ def test_first_contact_uses_same_braking_monitor(config, monkeypatch, tmp_path):
     assert any(r['current_state'] == 'CONTINUOUS_TRACKING' for r in rows)
     assert len(record['mode_exits']) == 3  # initial activation, contact and final operator stop
     summary = json.loads((run_dir/'summary.json').read_text())
+    assert summary['first_contact_braking']['trigger_force_N'] >= config['policy']['contact_threshold']
+    assert summary['first_contact_braking']['confirmed_force_N'] >= config['policy']['contact_threshold']
+    assert 0 < summary['first_contact_braking']['elapsed_sec'] < .15
+    assert all('first_contact_braking_distance_m' in row for row in contact)
     stop = [r for r in summary['stop_observation']['stop_requests'] if r.get('braking_method') == 'speedL_zero'][-2]
     assert stop['request_host_monotonic'] <= stop['first_low_speed_host_monotonic'] <= stop['confirmed_host_monotonic']
     assert stop['confirmed_host_monotonic']-stop['settle_hold_start_host_monotonic'] >= .08
+
+
+@pytest.mark.parametrize('fits', [True, False])
+def test_full_unload_budget_checked_before_motion_with_original_polygon_guard(config, monkeypatch, tmp_path, fits):
+    target = prepare(config, monkeypatch, synthetic_force_sign=1)
+    devices = Devices(config, target)
+    boundary_checks = []
+    original_update = runtime.ContinuousTrackingPolicy.update
+    def update(policy, now, raw, processed, robot, **kwargs):
+        active = policy.unload_active
+        command = original_update(policy, now, raw, processed, robot, **kwargs)
+        if policy.unload_active and not active:
+            x, y = robot.pose[:2]
+            radius = .01 if fits else .0024
+            # The endpoint is inside the AABB in both cases; the narrow
+            # diamond fails its perpendicular edge clearance for 2 mm.
+            devices.owner.config['continuous_xy_polygon'] = [
+                [x-radius, y], [x, y-radius], [x+radius, y], [x, y+radius]]
+            boundary_checks.append(len(devices.control.calls))
+        return command
+    monkeypatch.setattr(runtime.ContinuousTrackingPolicy, 'update', update)
+    class HighContactSensor(Sensor):
+        scan_reads = 0
+        def read_wrench(self):
+            if devices.owner.control is not None and not devices.owner._return_mode:
+                self.scan_reads += 1
+            return Wrench(0. if self.scan_reads < 10 else 3., 0., 0., 0., 0., 0.)
+    settings = args(tmp_path); settings.duration = .6
+    result = runtime.run(settings, controller_factory=devices.controller, reader_factory=HighContactSensor)
+    assert boundary_checks
+    subsequent_moves = [call for call in devices.control.calls[boundary_checks[0]:]
+                        if call[0] == 'speedL' and np.any(call[1])]
+    run_dir, = (tmp_path/'real/continuous').glob('run_*')
+    summary = json.loads((run_dir/'summary.json').read_text())
+    termination = json.loads((run_dir/'termination.json').read_text())
+    assert summary['unloading']['initial_force_N'] >= config['continuous_tracking']['overload_tangent_zero_force']
+    if fits:
+        assert result == 0 and subsequent_moves
+        assert summary['unloading']['actual_displacement_m'] > 0.
+        assert termination['reason'] == 'STOP_USER_REQUEST'
+    else:
+        assert result == 1 and not subsequent_moves
+        assert 'calibrated sandbox boundary' in summary['reason']
+        assert termination['reason'] == 'STOP_MOTION_ERROR'
+        assert summary['stop_observation']['standstill_confirmed']
 
 
 def test_unaccepted_brake_and_persistent_motion_have_finite_timeout(config):
