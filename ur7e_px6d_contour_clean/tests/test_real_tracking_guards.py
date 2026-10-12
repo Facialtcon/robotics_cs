@@ -303,11 +303,11 @@ def test_unavailable_recovery_stops_within_existing_timeout(real, missing_memory
     assert not any(e.event_type == 'LOCAL_REACQUIRE' for e in policy.events)
 
 
-def test_contact_at_recovery_budget_edge_can_confirm(real):
+def test_contact_near_reference_can_confirm(real):
     config, *_ = real
     policy = tracking(config)
     lose(policy)
-    pose = np.array([.004, 0, 0, 0, 0, 0])
+    pose = np.r_[policy.reacquire_reference, np.zeros(4)]
     for i in range(119, 140): sample(policy, i*.01, pose=pose)
     assert policy.state == State.CONTINUOUS_TRACKING
 
@@ -326,37 +326,38 @@ def test_stale_recovery_memory_stops_instead_of_being_used(real):
     assert not any(e.event_type == 'LOCAL_REACQUIRE' for e in policy.events)
 
 
-def test_recovery_tracking_error_warns_but_spatial_limit_stops(real):
+def test_recovery_tracking_error_stops_and_records_execution_evidence(real):
     config, *_ = real
     policy = tracking(config)
     policy._last_recovery_origin = np.zeros(6)
     lose(policy)
     policy.reacquire_reference = np.array([.001, 0])
-    assert sample(policy, 1.19, 0.).move
-    assert policy.state == State.LOCAL_REACQUIRE
-    assert {'recovery_progress', 'recovery_tracking error'} <= policy.diagnostics.keys()
-    assert sample(policy, 1.20, 0., pose=np.array([.004, 0, 0, 0, 0, 0])).state == 'STOP'
-    assert 'displacement' in policy.reason
+    assert not sample(policy, 1.19, 0.).move
+    assert policy.state == State.STOP
+    assert policy.stop_reason.value == 'STOP_MOTION_ERROR'
+    evidence = policy.diagnostics['recovery_execution']
+    assert evidence['actual_xy'] == [0., 0.]
+    assert evidence['reference_xy'] == [.001, 0.]
+    assert evidence['tracking_error_m'] == pytest.approx(.001)
+    assert 'reference_angle_deg' in evidence and 'actual_angle_deg' in evidence
 
 
-@pytest.mark.parametrize('force', [0., 1.5])
-def test_recovery_time_budget_stops_without_measurable_progress(real, force):
+def test_recovery_stall_stops_without_measurable_progress(real):
     config, *_ = real
     policy = tracking(config)
     lose(policy)
-    deadline = policy._reacquire+policy.c['reacquire_max_time_sec']
-    # Fresh zero-speed feedback at the same pose must not wait forever once
-    # pose noise no longer falsely consumes the path budget. No budget reset
-    # is granted for contact arriving on the deadline.
+    deadline = policy._reacquire+policy.c['confirmation_timeout_sec']
+    # Execution stall uses the existing confirmation deadline, never the
+    # removed total recovery budget. Measured healthy progress renews it.
     now = policy._last_time
     while now+.01 < deadline:
         now += .01
         command = sample(policy, now, 0.)
         assert policy.state == State.LOCAL_REACQUIRE
-    command = sample(policy, deadline, force)
+    command = sample(policy, deadline+.01, 0.)
     assert policy.state == State.STOP and not command.move
-    assert policy.stop_reason.value == 'STOP_RECOVERY_EXHAUSTED'
-    assert policy.reason == 'local reacquire time budget exhausted'
+    assert policy.stop_reason.value == 'STOP_MOTION_ERROR'
+    assert policy.reason == 'local reacquire execution failure: no actual arc progress'
 
 
 def test_real_overload_uses_measured_budget_then_stops_without_motion(real):

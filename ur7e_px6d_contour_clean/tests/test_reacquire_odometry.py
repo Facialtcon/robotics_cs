@@ -39,10 +39,10 @@ def test_stationary_pose_variation_does_not_exhaust_travel_budget():
     policy = recovery()
     # The incident contains tens of micrometres of pose variation even with
     # zero measured speed. The former sum consumes 3.5 mm within 0.9 s here.
-    for i in range(1, 241):
+    for i in range(1, 96):
         command = tick(policy, observation(i*.01, (20e-6*(-1)**i, 0.)))
         assert policy.state == State.LOCAL_REACQUIRE
-    assert policy.reacquire_raw_pose_path_length > policy.c['reacquire_max_path']
+    assert policy.reacquire_raw_pose_path_length > .0035
     assert policy.reacquire_speed_path_length == 0.
     assert policy.reacquire_path_length == pytest.approx(20e-6)
     telemetry = policy.telemetry(command)
@@ -52,7 +52,7 @@ def test_stationary_pose_variation_does_not_exhaust_travel_budget():
 
 
 @pytest.mark.parametrize('trajectory', ['circle', 'back_and_forth'])
-def test_closed_or_reversing_motion_still_exhausts_total_path(trajectory):
+def test_motion_elsewhere_is_not_progress_around_recovery_arc(trajectory):
     radius, speed = 40e-6, .0005
     if trajectory == 'circle':
         initial = observation(0., (radius, 0.), (0., speed))
@@ -73,19 +73,19 @@ def test_closed_or_reversing_motion_still_exhausts_total_path(trajectory):
         if policy.state == State.STOP:
             break
     assert policy.state == State.STOP and not command.move
-    assert 'path' in policy.reason
-    assert policy.stop_reason.value == 'STOP_RECOVERY_EXHAUSTED'
+    assert 'no actual arc progress' in policy.reason
+    assert policy.stop_reason.value == 'STOP_MOTION_ERROR'
     assert policy.reacquire_max_displacement <= 2*radius+1e-12
     assert policy.reacquire_speed_path_length == pytest.approx(speed*now)
-    assert policy.reacquire_path_length >= .00349
-    assert now < policy.c['reacquire_max_time_sec']
+    assert policy.reacquire_actual_heading_deg < 3.
+    assert now <= policy.c['confirmation_timeout_sec']+.01
 
 
 def test_real_position_jump_still_stops_with_zero_velocity_feedback():
     policy = recovery()
     command = tick(policy, observation(.01, (.0036, 0.)))
     assert policy.state == State.STOP and not command.move
-    assert policy.reason == 'local reacquire displacement budget exhausted'
+    assert policy.reason == 'local reacquire execution failure: tracking error'
     assert policy.reacquire_speed_path_length == 0.
     assert policy.reacquire_path_length == pytest.approx(.0036)
 
@@ -97,10 +97,11 @@ def test_frozen_pose_does_not_hide_nonzero_actual_speed():
         if policy.state == State.STOP:
             break
     assert policy.state == State.STOP and not command.move
-    assert 'path' in policy.reason
+    assert 'no actual arc progress' in policy.reason
     assert policy.reacquire_max_displacement == 0.
     assert policy.reacquire_raw_pose_path_length == 0.
-    assert policy.reacquire_speed_path_length >= .00349
+    assert policy.reacquire_speed_path_length == pytest.approx(.0005*i*.01)
+    assert policy.reacquire_actual_heading_deg == 0.
 
 
 def test_radial_lower_bound_is_not_repeatedly_added_to_integral():

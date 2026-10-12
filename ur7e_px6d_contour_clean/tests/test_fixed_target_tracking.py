@@ -165,6 +165,7 @@ def test_shared_policy_identical_for_tracking_loss_and_recovery(config, settings
 
 
 def fake_run(config, settings, tmp_path, monkeypatch, *, failure=None):
+    recovery_failure = failure is not None and failure.endswith('_recovery')
     effective = deepcopy(config)
     effective['preprocessing']['baseline']['sample_count'] = 2  # explicit test acceleration
     effective['safe_return']['startup_bias_sample_count'] = 2
@@ -184,7 +185,7 @@ def fake_run(config, settings, tmp_path, monkeypatch, *, failure=None):
             self.started = time.monotonic()
             return self
         def poll(self):
-            return 'Q' if self.main and time.monotonic()-self.started > .7 else None
+            return 'Q' if self.main and time.monotonic()-self.started > (2. if recovery_failure else .7) else None
         def read_line(self, prompt):
             prompts.append(prompt)
             return ''
@@ -203,6 +204,19 @@ def fake_run(config, settings, tmp_path, monkeypatch, *, failure=None):
             magnitude = 0.
             if not devices.owner._return_mode:
                 self.scan_reads += 1
+                if recovery_failure and devices.owner.continuous_phase == 'LOCAL_REACQUIRE':
+                    if failure == 'sensor_recovery':
+                        from sensor.px6d_reader import PX6DError
+                        self.failed = True
+                        raise PX6DError('synthetic recovery sensor fault')
+                    if failure == 'rtde_recovery':
+                        devices.receive.connected = False
+                    if failure == 'workspace_recovery':
+                        devices.receive.pose[0] = .95
+                    if failure == 'force_recovery':
+                        return Wrench(100., 0., 0., 0., 0., 0.)
+                    if failure == 'torque_recovery':
+                        return Wrench(0., 0., 0., 6., 0., 0.)
                 if failure == 'sensor' and self.scan_reads == 12:
                     from sensor.px6d_reader import PX6DError
                     self.failed = True
@@ -210,6 +224,8 @@ def fake_run(config, settings, tmp_path, monkeypatch, *, failure=None):
                 if failure == 'rtde' and self.scan_reads == 12:
                     devices.receive.connected = False
                 magnitude = min(1.5, max(0., (self.scan_reads-8)*.1))
+                if recovery_failure and self.scan_reads >= 35:
+                    magnitude = 0.
             base = np.r_[-magnitude*approach, 0.]
             rotation = _rotvec_to_matrix(devices.receive.pose[3:]) @ transform
             return Wrench.from_sequence([*(rotation.T @ base), 0., 0., 0.])
@@ -266,6 +282,21 @@ def test_fixed_faults_stop_through_original_adapter(config, settings, tmp_path, 
     assert any(c[0] == 'speedStop' for c in devices.control.calls)
     termination = json.loads((log/'termination.json').read_text())
     assert termination['reason'] == ('STOP_SENSOR_ERROR' if failure == 'sensor' else 'STOP_MOTION_ERROR')
+
+
+@pytest.mark.parametrize('failure,reason', [('sensor_recovery', 'STOP_SENSOR_ERROR'),
+    ('rtde_recovery', 'STOP_MOTION_ERROR'), ('workspace_recovery', 'STOP_MOTION_ERROR'),
+    ('force_recovery', 'STOP_FORCE_LIMIT'), ('torque_recovery', 'STOP_FORCE_LIMIT')])
+def test_shared_runtime_protections_remain_active_during_recovery(config, settings, tmp_path, monkeypatch, failure, reason):
+    result, log, devices, _ = fake_run(config, settings, tmp_path, monkeypatch, failure=failure)
+    assert result == 1
+    with (log/'samples.csv').open() as stream:
+        assert any(row['current_state'] == 'LOCAL_REACQUIRE' for row in csv.DictReader(stream))
+    assert any(call[0] == 'speedStop' for call in devices.control.calls)
+    termination = json.loads((log/'termination.json').read_text())
+    assert termination['reason'] == reason
+    if failure == 'workspace_recovery':
+        assert 'boundary' in termination['detail']
 
 
 def test_target_teaching_reads_only_xy_and_preserves_old_file(config, tmp_path):

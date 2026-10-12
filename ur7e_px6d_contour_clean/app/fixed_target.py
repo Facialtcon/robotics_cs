@@ -107,3 +107,94 @@ def check_calibration(args):
             workspace=config['workspace'], execution_envelope=config['continuous_execution_envelope']),
             allow_unicode=True, sort_keys=False))
     return 0
+
+
+def _menu_text(prompt):
+    answer = input(prompt).strip()
+    if answer.lower() in ('0', 'q', 'esc'):
+        raise KeyboardInterrupt('返回主菜单')
+    return answer
+
+
+def _select_p0(data):
+    names = list(data['groups'])
+    if not names:
+        raise ValueError('暂无 P0，请先标定 P_ref 并新增 P0')
+    for i, name in enumerate(names, 1):
+        print(f'{i}. P0-{name}')
+    answer = _menu_text('选择 P0 序号或名称（0 返回）：')
+    if answer in names:
+        return answer
+    if answer.isdigit() and 1 <= int(answer) <= len(names):
+        return names[int(answer)-1]
+    raise ValueError('请选择已有 P0')
+
+
+def menu(args):
+    """Chinese operation entry; hardware and motion remain in existing functions."""
+    while True:
+        print('\n========== 固定目标连续跟踪实验 ==========\n'
+              '1. 开始真机实验\n2. 标定 P_ref\n3. 新增 / 修改 / 删除 P0\n'
+              '4. 查看已有标定\n5. 标定正方体四角点\n6. 检查标定与工作区域\n'
+              '7. 离线模拟\n0. 退出')
+        try:
+            choice = input('请选择：').strip()
+        except (KeyboardInterrupt, EOFError):
+            return 0
+        if choice == '0':
+            return 0
+        try:
+            if choice not in tuple('1234567'):
+                print('请输入 0–7。')
+                continue
+            operation = deepcopy(args)
+            if choice == '7':
+                operation.execute = False
+                run_fixed(operation)
+                continue
+            if choice == '6':
+                operation.p0 = None
+                check_calibration(operation)
+                continue
+            project = load_config(args.config)
+            if choice == '5':
+                from calibration.target_geometry import teach_target
+                teach_target(project, args.target_geometry)
+                continue
+            from calibration.single_point import load_calibration
+            data = (load_calibration(args.calibration) if args.calibration.exists() else
+                    dict(schema_version=1, P_ref=None, groups={}))
+            if choice == '1':
+                operation.p0 = _select_p0(data)
+                operation.execute = True
+                run_fixed(operation)
+                continue
+            # Reuse the single-point calibration UI, capture and checked writes.
+            # Its trial settings never enter run_fixed or the continuous policy.
+            import run_single_point_contact as single
+            settings = single.load_settings(ROOT/'single_point_experiment.yaml', project)
+            if choice == '4':
+                single.show_calibration_table(data, settings)
+            elif choice == '2':
+                single.calibrate_point(operation, project, settings, data, 'P_ref', reference=True)
+            else:
+                print('1. 新增 P0\n2. 修改 P0\n3. 删除 P0\n0. 返回')
+                action = _menu_text('请选择 P0 操作：')
+                if action == '1':
+                    name = _menu_text('P0 名称（如 A/B/C；0 返回）：')
+                    if not name or name in data['groups']:
+                        raise ValueError('名称为空或 P0 已存在，请使用修改操作')
+                    single.calibrate_point(operation, project, settings, data, name)
+                elif action in ('2', '3'):
+                    name = _select_p0(data)
+                    if action == '2':
+                        single.calibrate_point(operation, project, settings, data, name)
+                    elif single.confirm_enter(f'删除 P0-{name}'):
+                        del data['groups'][name]
+                        single.save_calibration_checked(args.calibration, data, f'删除 P0-{name}')
+                else:
+                    raise ValueError('请选择 0–3')
+        except (KeyboardInterrupt, EOFError) as exc:
+            print(f'操作已取消：{exc}')
+        except Exception as exc:
+            print(f'操作失败：{exc}')

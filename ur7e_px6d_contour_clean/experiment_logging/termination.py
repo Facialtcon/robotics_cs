@@ -30,6 +30,10 @@ def continuous_label(code, round_number=0, detail=''):
         return prefix+'开始'
     if code == 'REACQUIRED':
         return prefix+'成功，继续贴边' if round_number else '接触重新确认，继续贴边'
+    if code == 'RECOVERY_FULL_CIRCLE_NO_CONTACT' or detail == 'RECOVERY_FULL_CIRCLE_NO_CONTACT':
+        return prefix+'实际完成整圈，未确认重新接触'
+    if code == 'RECOVERY_EXECUTION_FAILURE' or detail.startswith('local reacquire execution failure:'):
+        return prefix+'运动执行异常，已请求停车'
     if 'local reacquire angle exhausted' in detail:
         return prefix+'达到角度上限，未确认重新接触'
     if detail.startswith('local reacquire ') and 'budget exhausted' in detail:
@@ -49,6 +53,7 @@ class TerminationReason(str, Enum):
     STOP_UNEXPECTED_CONTACT = "STOP_UNEXPECTED_CONTACT"
     STOP_NO_CONTACT = "STOP_NO_CONTACT"
     STOP_RECOVERY_EXHAUSTED = "STOP_RECOVERY_EXHAUSTED"
+    RECOVERY_FULL_CIRCLE_NO_CONTACT = "RECOVERY_FULL_CIRCLE_NO_CONTACT"
     STOP_NO_FORWARD_PROGRESS = "STOP_NO_FORWARD_PROGRESS"
     STOP_REPEATED_CONTACT = "STOP_REPEATED_CONTACT"
     STOP_FIT_FAILURE = "STOP_FIT_FAILURE"
@@ -369,6 +374,9 @@ class TerminationRecorder:
                     tangent=getattr(policy, '_memory_tangent', None),
                     angle_deg=getattr(policy, 'reacquire_heading_deg', None), max_angle_deg=c['reacquire_max_angle_deg'],
                     reference_xy=getattr(policy, 'reacquire_reference', None),
+                    actual_xy=None if getattr(policy, 'tracking_pose', None) is None else policy.tracking_pose[:2],
+                    actual_angle_deg=getattr(policy, 'reacquire_actual_heading_deg', None),
+                    tracking_error_m=getattr(policy, 'reacquire_tracking_error', None),
                     actual_path_m=getattr(policy, 'reacquire_path_length', None),
                     actual_speed_path_m=getattr(policy, 'reacquire_speed_path_length', None),
                     raw_pose_path_m=getattr(policy, 'reacquire_raw_pose_path_length', None),

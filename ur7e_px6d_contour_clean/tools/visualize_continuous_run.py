@@ -294,7 +294,7 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
     trajectory,=xy.plot([],[],color='tab:blue',lw=1,label='reliable contact TCP path')
     other_path,=xy.plot([],[],color='tab:orange',lw=1,label='search / lost / recovery TCP path')
     reference_path,=xy.plot([],[],'--',color='purple',lw=1,label='recovery position reference')
-    recovery_range=Circle((0,0),float(config['continuous_tracking'].get('reacquire_max_distance',.004))*1000,
+    recovery_range=Circle((0,0),float(config['continuous_tracking'].get('reacquire_max_distance') or 0.)*1000,
                            fill=False,ls=':',color='purple',label='recovery displacement limit')
     xy.add_patch(recovery_range);recovery_range.set_visible(False)
     probe,=xy.plot([],[],'ko',ms=4,zorder=10,label='TCP position symbol')

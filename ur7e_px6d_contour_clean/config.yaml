@@ -217,10 +217,10 @@ continuous_tracking:
   contact_lost_threshold: 0.5     # N, below existing stable contact threshold
   contact_lost_hold_sec: 0.15
   reacquire_speed: 0.0005         # m/s
-  reacquire_max_angle_deg: 90.0   # recovery path theta, NOT an identified object corner; other budgets still apply
+  reacquire_max_angle_deg: 360.0  # one circle; completion also requires actual TCP angular progress
   reacquire_angular_speed_deg_s: 30.0
-  reacquire_max_time_sec: 8.0
-  reacquire_max_distance: 0.004   # m displacement bound about actual stopped recovery origin
+  reacquire_max_time_sec: null    # legacy field; no local recovery time budget
+  reacquire_max_distance: null    # legacy field; no local recovery displacement budget
   max_runtime_sec: null            # real continuous runs until operator/hard fault/spatial exhaustion
   visualization_fps: 10
   # Revision: all new physical values MUST CONFIRM ON SITE.
@@ -269,10 +269,10 @@ continuous_tracking:
   memory_max_age_sec: 1.5          # s; maximum age of genuine contact memory at recovery start
   reacquire_enabled: true         # use the existing local arc after contact loss
   reacquire_radius: 0.002         # m; independent arc reference radius, no target truth
-  reacquire_max_path: 0.004        # m; accumulated ACTUAL TCP path during one search
+  reacquire_max_path: null         # legacy field; no local recovery path budget
   reacquire_position_gain: 5.0     # 1/s; actual TCP to position reference feedback
   reacquire_reference_freeze_error: 0.0001 # m; freeze reference progression above this
-  reacquire_max_tracking_error: 0.0005     # m; real warning, simulation stop
+  reacquire_max_tracking_error: 0.0005     # m; execution failure stops in real and simulation
   boundary_margin: 0.0005         # m; reserve for stopping/communication, MUST VALIDATE
   reacquire_min_progress: 0.002   # m; reject repeated loss without spatial progress
   watchdog_frequency_hz: 20.0    # Hz; robot-side timeout 50 ms; SDK 1.6.5 only verified

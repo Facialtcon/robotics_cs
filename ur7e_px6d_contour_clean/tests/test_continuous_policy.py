@@ -139,14 +139,15 @@ def test_reacquire_requires_stable_contact_then_stops_search(config):
     assert tick(policy, 1.30, (0, 1.5)).move
 
 
-def test_reacquire_timeout_and_distance_stop(config):
+def test_reacquire_stall_and_tracking_error_stop(config):
     policy = tracking(config)
     lose(policy)
     for i in range(118, 920):
         command = tick(policy, i*.01, (0, 0))
         if policy.state == State.STOP:
             break
-    assert command.state == "STOP" and 'time' in policy.reason
+    assert command.state == "STOP" and 'no actual arc progress' in policy.reason
+    assert policy.stop_reason.value == 'STOP_MOTION_ERROR'
     policy = tracking(config)
     lose(policy)
     assert tick(policy, 1.18, (0, 0), pose=[.004, 0, 0, 0, 0, 0]).state == "STOP"
@@ -189,7 +190,7 @@ def test_search_direction_budget_and_nonmonotonic_time(config):
 
 @pytest.mark.parametrize("key,value", [("force_direction_sign", 0), ("force_direction_sign", True),
     ("force_gain", float("nan")), ("force_direction_filter_alpha", 1), ("force_deadband", -1),
-    ("reacquire_max_angle_deg", 120), ("search_speed", .03), ("force_reference", 12)])
+    ("reacquire_max_angle_deg", 361), ("search_speed", .03), ("force_reference", 12)])
 def test_invalid_parameters_fail_closed(config, key, value):
     config["continuous_tracking"][key] = value
     with pytest.raises(ValueError):
