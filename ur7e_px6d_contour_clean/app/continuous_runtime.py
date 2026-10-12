@@ -110,7 +110,7 @@ def stop_after_exception(controller, termination):
 
 def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
         prepare_execution=None, configure_experiment=None,
-        check_control_mode=None, visualize_run=None, simulation_factory=None):
+        visualize_run=None):
     if getattr(args, 'preview', False):
         if args.execute:
             raise ValueError('--preview and --execute are mutually exclusive')
@@ -219,7 +219,7 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
             if getattr(args, 'basic_contact', False) or config.get('fixed_target_experiment'):
                 scene['force_model']['granular_drag_force'] = 0.
                 scene['preprocessing']['granular_baseline_output'] = [0.] * 6
-            session = (simulation_factory or SimulationSession)(config, scene)
+            session = SimulationSession(config, scene)
             config = session.config
             policy, controller, reader = session.policy, session.robot, session.sensor
             preprocessor = session.preprocessor
@@ -249,8 +249,6 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
             robot_connect_started = True
             termination.observe(phase='ROBOT_CONNECT')
             controller.connect(allow_start_away_from_fixed_pose=True)
-            if check_control_mode is not None:
-                check_control_mode(config['robot']['robot_ip'])
         else:
             robot = controller.read_state()
         startup_return_done = False
@@ -293,15 +291,13 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                         logger.write_json('scan_bias_at_start.json', dict(
                             reference='above_P0_before_vertical_insertion', tcp_pose=state.pose.tolist(),
                             zero_bias_sensor=preprocessor.zero_bias_sensor.tolist(), sample_count=baseline['sample_count']))
-                    if not config.get('fixed_target_experiment'):
-                        select_speed()
-                    scan_prompt = ('固定目标连续跟踪：即将下降至 P_ref 的统一 Z 高度；首次接触后继续跟踪，不采集颗粒基线。'
+                    select_speed()
+                    scan_prompt = ('固定目标连续跟踪：即将下降至 P_ref 的统一 Z 高度，从 P0 沿保存方向搜索；首次接触后继续跟踪。'
                                    if config.get('fixed_target_experiment') else
                                    '基础接触实验：即将垂直下降至 P0 扫描高度；目标须固定、P0 须无接触，不采集颗粒基线。'
                                    if getattr(args, 'basic_contact', False) else
                                    '即将垂直向下插入至 P0 扫描深度，停稳并处理颗粒背景力后，从 P0 沿保存方向开始扫描。')
-                    if not config.get('fixed_target_experiment') and not confirm_enter(
-                            scan_prompt, read_line=keyboard.read_line):
+                    if not confirm_enter(scan_prompt, read_line=keyboard.read_line):
                         raise KeyboardInterrupt('scan not confirmed')
                     hold_startup_confirmation(config, above, controller)
                     termination.observe(phase='SCAN_INSERTION')
@@ -339,12 +335,6 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                     sample_count=granular.get('sample_count', baseline['sample_count']) if granular.get('capture_on_start', True) else 0,
                     condition='target-free background; no target force may be calibrated away'))
                 logger.write_config_snapshot(config)
-                if config.get('fixed_target_experiment'):
-                    select_speed()
-                    if not confirm_enter('已到达实验起点并停稳；按 Enter 沿 P0 → P_ref 的初始方向开始连续跟踪实验。',
-                                         read_line=keyboard.read_line):
-                        raise KeyboardInterrupt('search not confirmed')
-                    hold_startup_confirmation(config, start, controller)
                 if getattr(args, 'basic_contact', False):
                     print('基础接触实验：无颗粒基线；开始扫描前记录至少 1 秒静止 TCP / 力数据。', flush=True)
                     stationary_preroll(config, controller, reader, preprocessor, logger, keyboard.poll)

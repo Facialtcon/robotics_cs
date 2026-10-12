@@ -83,7 +83,7 @@ class SimulationSample:
 
 class SimulationSession:
     """Each step observes t, commands once, and integrates to t + dt (no snapping)."""
-    def __init__(self, config, scene, *, execution_dynamics=None):
+    def __init__(self, config, scene):
         self.config = deepcopy(config)
         self.config['force_display'] = deepcopy(PHYSICAL_FORCE_METADATA)
         self.scene = validate_scene(scene)
@@ -104,8 +104,6 @@ class SimulationSession:
         # Geometry remains exclusively in the environment, not policy input.
         self.policy = ContinuousTrackingPolicy({k: self.config[k] for k in ('continuous_tracking', 'policy', 'robot', 'preprocessing')})
         dynamics = dict(acceleration_limit=.005, delay_steps=2)
-        if execution_dynamics is not None:
-            dynamics.update(execution_dynamics)
         self.config['continuous_simulation_execution'] = dynamics
         self.robot = SimulatedRobot(self.scene['start_point'], self.dt, self.scene['container'], **dynamics)
         self.target = create_target(self.scene)

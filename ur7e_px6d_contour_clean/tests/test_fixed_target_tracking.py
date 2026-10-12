@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from app import continuous_runtime as runtime
-from app.fixed_target import ROOT, configure_fixed, prepare_fixed, run_fixed, require_remote
+from app.fixed_target import ROOT, configure_fixed, prepare_fixed, run_fixed
 from calibration.probe_alignment import downward_probe_orientation, probe_tilt_deg
 from calibration.target_geometry import make_geometry, save_geometry, load_geometry, teach_target
 from core.models import Wrench, RobotState
@@ -28,18 +28,14 @@ from visualization.run_plots import load_trace
 
 @pytest.fixture
 def settings(tmp_path):
-    data = dict(calibration_file=str(ROOT/'single_point_calibration.yaml'),
-                workspace=dict(verified=True, limits=dict(x_min=.4, x_max=.9, y_min=-.1,
-                    y_max=.55, z_min=-.1, z_max=.15)))
-    path = tmp_path/'fixed.yaml'
-    path.write_text(yaml.safe_dump(data))
-    return data, path
+    path = tmp_path/'points.yaml'
+    shutil.copyfile(ROOT/'single_point_calibration.yaml', path)
+    return path
 
 
 def prepared(config, settings, name='A'):
     configure_fixed(config)
-    data, path = settings
-    return prepare_fixed(config, ROOT/'config.yaml', data, path, name)
+    return prepare_fixed(config, ROOT/'config.yaml', settings, name)
 
 
 @pytest.mark.parametrize('name', ['A', 'B', 'C'])
@@ -52,7 +48,7 @@ def test_inherits_controller_and_policy_with_reference_z(config, settings, name)
     direction = np.array(saved['P_ref'][:2])-start[:2]
     np.testing.assert_allclose(config['policy']['search_direction_xy'], direction/np.linalg.norm(direction))
     assert probe_tilt_deg(start[3:], config['calibration']['probe_axis_tcp']) < 1e-5
-    for section in ('robot', 'sensor', 'tcp', 'safe_return', 'logging'):
+    for section in ('robot', 'sensor', 'tcp', 'safe_return', 'logging', 'workspace'):
         assert config[section] == before[section]
     assert config['continuous_tracking'] == {**before['continuous_tracking'],
         'search_boundary_margin': config['continuous_tracking']['search_boundary_margin']}
@@ -73,31 +69,70 @@ def test_inherits_controller_and_policy_with_reference_z(config, settings, name)
         check_continuous_xy(robot, [.95, .4])
 
 
-@pytest.mark.parametrize('workspace', [None, {'verified': False, 'limits': None},
-    {'verified': True, 'limits': None}, {'verified': True, 'limits': dict(x_min=0, x_max=1)},
-    {'verified': True, 'limits': dict(x_min=1, x_max=0,y_min=0,y_max=1,z_min=0,z_max=1)}])
-def test_missing_invalid_or_unverified_region_rejected_offline(config, settings, workspace):
-    data, path = settings
-    data['workspace'] = workspace
-    with pytest.raises(RobotError):
-        prepare_fixed(config, ROOT/'config.yaml', data, path, 'A')
+@pytest.mark.parametrize('name', ['A', 'B', 'C'])
+def test_same_workspace_and_search_envelope_as_main(config, settings, monkeypatch, name):
+    from app import configuration, fixed_target
+    original = deepcopy(config)
+    workspace_path = configuration.workspace_calibration_path(config, ROOT/'config.yaml')
+    before = workspace_path.read_bytes()
+    loader = configuration.load_workspace_calibration
+    loaded = []
+    def record(path):
+        loaded.append(Path(path).resolve())
+        return loader(path)
+    monkeypatch.setattr(configuration, 'load_workspace_calibration', record)
+    monkeypatch.setattr(fixed_target, 'load_workspace_calibration', record)
+    robot, start = prepared(config, settings, name)
+    # Give the original preflight the identical taught start/direction. It still
+    # loads and calculates all workspace geometry through its normal path.
+    monkeypatch.setattr(configuration, 'load_scan_calibration',
+        lambda *a, **kw: deepcopy(config['continuous_saved_calibration']))
+    main_robot, main_start = configuration.prepare_real(original, ROOT/'config.yaml')
+    assert loaded == [workspace_path.resolve()] * 2
+    assert config['continuous_calibration_sources']['workspace'] == original['continuous_calibration_sources']['workspace']
+    assert config['continuous_workspace_calibration'] == original['continuous_workspace_calibration']
+    raw = yaml.safe_load(before)['raw_points']
+    np.testing.assert_array_equal(robot['continuous_xy_polygon'],
+        [[raw[f'P{i}'][axis] for axis in 'xy'] for i in range(4)])
+    assert config['continuous_execution_envelope'] == original['continuous_execution_envelope']
+    assert config['continuous_search_geometry'] == original['continuous_search_geometry']
+    assert robot == main_robot
+    np.testing.assert_array_equal(start, main_start)
+    assert config['workspace'] == original['workspace']
+    assert config['workspace']['enabled'] is False
+    assert config['continuous_tracking']['real_test_xy_limits'] is None
+    assert workspace_path.read_bytes() == before
 
 
-def test_particle_files_and_single_point_budgets_are_never_read(config, settings, monkeypatch):
+def test_original_polygon_rejects_point_inside_its_bounding_rectangle(config, settings):
+    robot, start = prepared(config, settings)
+    check_continuous_xy(robot, start[:2])
+    point = [.885, .56]  # Within the saved AABB, beyond its sloping right edge.
+    rectangle_only = {key: value for key, value in robot.items() if key != 'continuous_xy_polygon'}
+    check_continuous_xy(rectangle_only, point)
+    with pytest.raises(RobotError, match='calibrated sandbox boundary'):
+        check_continuous_xy(robot, point)
+
+
+@pytest.mark.parametrize('point', [[.885, .56], [.95, .4]])
+def test_start_outside_saved_polygon_is_rejected(config, settings, point):
+    calibration = yaml.safe_load(settings.read_text())
+    calibration['groups']['A']['tcp_pose'][:2] = point
+    settings.write_text(yaml.safe_dump(calibration))
+    with pytest.raises(RobotError, match='strictly inside'):
+        prepared(config, settings)
+
+
+def test_main_scan_calibration_and_single_point_budgets_are_never_read(config, settings, monkeypatch):
     from app import configuration
     def forbidden(*a, **kw):
-        raise AssertionError('particle calibration read')
+        raise AssertionError('main scan calibration read')
     monkeypatch.setattr(configuration, 'load_scan_calibration', forbidden)
-    monkeypatch.setattr(configuration, 'load_workspace_calibration', forbidden)
     monkeypatch.setattr(configuration, 'site_configuration_digest', forbidden)
     config['calibration']['file'] = 'missing.yaml'
-    config['continuous_tracking']['workspace_calibration_file'] = 'missing_box.yaml'
-    data, path = settings
-    calibration = yaml.safe_load((ROOT/'single_point_calibration.yaml').read_text())
+    calibration = yaml.safe_load(settings.read_text())
     calibration['groups']['A']['path_review'] = dict(note='', max_distance_m=1e-10)
-    other = path.parent/'points.yaml'
-    other.write_text(yaml.safe_dump(calibration))
-    data['calibration_file'] = str(other)
+    settings.write_text(yaml.safe_dump(calibration))
     _, start = prepared(config, settings)
     assert start[2] == calibration['P_ref'][2]
     assert config['continuous_search_geometry']['usable_distance_m'] > .1
@@ -130,7 +165,6 @@ def test_shared_policy_identical_for_tracking_loss_and_recovery(config, settings
 
 
 def fake_run(config, settings, tmp_path, monkeypatch, *, failure=None):
-    data, path = settings
     effective = deepcopy(config)
     effective['preprocessing']['baseline']['sample_count'] = 2  # explicit test acceleration
     effective['safe_return']['startup_bias_sample_count'] = 2
@@ -155,8 +189,9 @@ def fake_run(config, settings, tmp_path, monkeypatch, *, failure=None):
             prompts.append(prompt)
             return ''
         def read_text(self, prompt):
-            # Speed selection must occur after arrival, using the same chooser.
-            np.testing.assert_allclose(devices.receive.pose, start)
+            # Same point in startup as the main runner: raised air-zero position.
+            np.testing.assert_allclose(devices.receive.pose[:2], start[:2])
+            assert devices.receive.pose[2] == pytest.approx(start[2]+config['safe_return']['return_lift_distance'])
             return ''
     monkeypatch.setattr(runtime, 'OperatorKeyboard', FixedKeyboard)
     transform = np.asarray(config['preprocessing']['coordinate_transform']['rotation_sensor_to_tool'])
@@ -192,24 +227,21 @@ def fake_run(config, settings, tmp_path, monkeypatch, *, failure=None):
     # HTML replay exercises the same trace loader; avoid repeating costly PNGs.
     from visualization import run_plots
     monkeypatch.setattr(run_plots, 'generate_run_visualization', lambda p: [write_html_replay(load_trace(p), p)])
-    args = Namespace(config=ROOT/'config.yaml', experiment_config=path, p0='A', execute=True,
+    args = Namespace(config=ROOT/'config.yaml', calibration=settings, p0='A', execute=True,
         scene=ROOT/'simulation/scene_fixed_target.yaml', duration=None, output=tmp_path/'logs',
         target_geometry=geometry)
-    modes = []
-    result = run_fixed(args, controller_factory=devices.controller, reader_factory=lambda *a: sensor,
-                       mode_check=lambda ip: modes.append(ip))
+    result = run_fixed(args, controller_factory=devices.controller, reader_factory=lambda *a: sensor)
     log, = (args.output/'real/continuous').glob('run_*')
-    return result, log, devices, prompts, modes
+    return result, log, devices, prompts
 
 
 def test_fixed_real_path_mock_alignment_air_bias_contact_then_tracking(config, settings, tmp_path, monkeypatch):
-    result, log, devices, prompts, modes = fake_run(config, settings, tmp_path, monkeypatch)
+    result, log, devices, prompts = fake_run(config, settings, tmp_path, monkeypatch)
     assert result == 0
-    assert modes == [config['robot']['robot_ip']]
     with (log/'samples.csv').open() as stream:
         rows = list(csv.DictReader(stream))
     assert {'TARGET_SEARCH', 'FIRST_CONTACT', 'CONTINUOUS_TRACKING'} <= {r['current_state'] for r in rows}
-    assert len(prompts) == 3  # shared startup, air zero, final search; no extra verification
+    assert len(prompts) == 3  # same startup, air zero, descent/search confirmation as main
     assert all('颗粒' not in p for p in prompts)
     alignment = json.loads((log/'startup_alignment.json').read_text())
     assert alignment['actual_before_tilt_deg'] == pytest.approx(180.)
@@ -229,20 +261,11 @@ def test_fixed_real_path_mock_alignment_air_bias_contact_then_tracking(config, s
 
 @pytest.mark.parametrize('failure', ['sensor', 'rtde'])
 def test_fixed_faults_stop_through_original_adapter(config, settings, tmp_path, monkeypatch, failure):
-    result, log, devices, _, _ = fake_run(config, settings, tmp_path, monkeypatch, failure=failure)
+    result, log, devices, _ = fake_run(config, settings, tmp_path, monkeypatch, failure=failure)
     assert result == 1
     assert any(c[0] == 'speedStop' for c in devices.control.calls)
     termination = json.loads((log/'termination.json').read_text())
     assert termination['reason'] == ('STOP_SENSOR_ERROR' if failure == 'sensor' else 'STOP_MOTION_ERROR')
-
-
-def test_remote_mode_unknown_or_local_refuses_motion(monkeypatch):
-    from app import fixed_target
-    from robot.control_mode import ControlMode
-    for mode in ('unknown', 'local'):
-        monkeypatch.setattr(fixed_target, 'read_control_mode', lambda _: ControlMode(mode, 'mock'))
-        with pytest.raises(RobotError):
-            require_remote('mock')
 
 
 def test_target_teaching_reads_only_xy_and_preserves_old_file(config, tmp_path):
@@ -288,13 +311,10 @@ def test_html_overlay_uses_snapshot_and_exact_rtde_samples(tmp_path):
 def test_reference_posture_and_taught_p0_z_do_not_affect_execution(config, settings):
     before = deepcopy(config)
     _, a = prepared(before, settings)
-    data, path = settings
-    record = yaml.safe_load(Path(data['calibration_file']).read_text())
+    record = yaml.safe_load(settings.read_text())
     record['reference_tcp_pose'][3:] = [100., -300., 900.]
     record['groups']['A']['tcp_pose'][2] = 500.
-    changed = path.parent/'modified_points.yaml'
-    changed.write_text(yaml.safe_dump(record))
-    data['calibration_file'] = str(changed)
+    settings.write_text(yaml.safe_dump(record))
     _, b = prepared(config, settings)
     np.testing.assert_array_equal(a, b)
     np.testing.assert_array_equal(before['policy']['search_direction_xy'], config['policy']['search_direction_xy'])
@@ -304,13 +324,16 @@ def test_offline_entry_reuses_simulator_and_standard_html_without_hardware(tmp_p
     from run_fixed_target_tracking import main
     monkeypatch.setattr(runtime, 'OperatorKeyboard', Keyboard)
     output = tmp_path/'output'
-    assert main(['--dry-run', '--duration', '3', '--output', str(output)]) == 0
+    assert main(['--dry-run', '--duration', '.08', '--output', str(output)]) == 0
     run, = (output/'simulation/continuous').glob('run_*')
     with (run/'samples.csv').open() as stream:
         rows = list(csv.DictReader(stream))
-    assert any(row['current_state'] == 'CONTINUOUS_TRACKING' for row in rows)
+    assert any(row['current_state'] == 'TARGET_SEARCH' for row in rows)
     snapshot = yaml.safe_load((run/'config_snapshot.yaml').read_text())
-    assert snapshot['continuous_simulation_execution']['acceleration_limit'] == snapshot['robot']['speed_acceleration']
+    from simulation.continuous_session import SimulationSession
+    from simulation.simulator import load_simulation_config
+    shared = SimulationSession(config_from_disk(), load_simulation_config(ROOT/'simulation/scene_fixed_target.yaml'))
+    assert snapshot['continuous_simulation_execution'] == shared.config['continuous_simulation_execution']
     assert snapshot['continuous_simulation']['target_shape'] == 'rectangle'
     assert snapshot['continuous_simulation']['force_model']['granular_drag_force'] == 0.
     assert snapshot['experiment']['kind'] == 'synthetic_demo'
@@ -318,40 +341,45 @@ def test_offline_entry_reuses_simulator_and_standard_html_without_hardware(tmp_p
     assert not (output/'real').exists()
 
 
-def test_disabled_boundaries_reject_before_device_construction(config, tmp_path):
-    args = Namespace(config=ROOT/'config.yaml', experiment_config=ROOT/'fixed_target_experiment.yaml',
+def test_missing_workspace_rejects_before_device_construction(config, tmp_path, monkeypatch):
+    config['continuous_tracking']['workspace_calibration_file'] = str(tmp_path/'missing_workspace.yaml')
+    monkeypatch.setattr(runtime, 'load_config', lambda _: deepcopy(config))
+    args = Namespace(config=ROOT/'config.yaml', calibration=ROOT/'single_point_calibration.yaml',
         p0='A', execute=True, scene=ROOT/'simulation/scene_fixed_target.yaml', duration=None,
         output=tmp_path, target_geometry=tmp_path/'not_present.yaml')
     def forbidden(*a, **kw):
         raise AssertionError('device constructed before valid workspace')
-    assert run_fixed(args, controller_factory=forbidden, reader_factory=forbidden, mode_check=forbidden) == 1
+    assert run_fixed(args, controller_factory=forbidden, reader_factory=forbidden) == 1
 
 
-def test_new_settings_cannot_shadow_control_defaults(tmp_path):
-    from app.fixed_target import load_settings
-    path = tmp_path/'settings.yaml'
-    path.write_text(yaml.safe_dump(dict(force_reference=2., site_validation_note='anything')))
-    with pytest.raises(ValueError, match='unknown fixed-target settings'):
-        load_settings(path)
+def test_entry_accepts_saved_workspace_with_original_default_config():
+    from run_fixed_target_tracking import main
+    assert main(['--check-calibration', '--p0', 'A']) == 0
 
 
-def test_air_zero_lift_must_fit_existing_workspace_guard(config, settings):
-    data, _ = settings
-    data['workspace']['limits']['z_max'] = .0
-    with pytest.raises(RobotError, match='return trajectory outside workspace'):
-        prepared(config, settings)
+def config_from_disk():
+    from config.loader import load_config
+    return load_config(ROOT/'config.yaml')
 
 
-def test_long_synthetic_contact_keeps_original_unload_budget(tmp_path, monkeypatch):
+def test_no_experiment_config_file_or_cli_gate():
+    from run_fixed_target_tracking import main
+    assert not (ROOT/'fixed_target_experiment.yaml').exists()
+    with pytest.raises(SystemExit) as exc:
+        main(['--experiment-config', 'obsolete.yaml'])
+    assert exc.value.code == 2
+
+
+def test_long_synthetic_contact_keeps_original_force_guard(tmp_path, monkeypatch):
     from run_fixed_target_tracking import main
     monkeypatch.setattr(runtime, 'OperatorKeyboard', Keyboard)
     from visualization import run_plots
     monkeypatch.setattr(run_plots, 'generate_run_visualization', lambda _: [])
     output = tmp_path/'synthetic'
-    # Do not weaken the policy to keep an idealized stiff target moving longer.
+    # Same model dynamics and protection as the main runner; no scene-specific actuator tuning.
     assert main(['--dry-run', '--duration', '5', '--output', str(output)]) == 1
     run, = (output/'simulation/continuous').glob('run_*')
     reason = json.loads((run/'termination.json').read_text())['reason']
-    assert reason == 'STOP_UNLOAD_BUDGET'
+    assert reason == 'STOP_FORCE_LIMIT'
     with (run/'samples.csv').open() as stream:
-        assert any(row['current_state'] == 'CONTINUOUS_TRACKING' for row in csv.DictReader(stream))
+        assert any(row['current_state'] == 'FIRST_CONTACT' for row in csv.DictReader(stream))

@@ -1,9 +1,0 @@
-# Only scene-specific settings. All hardware/control/log values come from config.yaml.
-# Existing P0/P_ref records are reused; single-point budgets and path_review are ignored.
-calibration_file: single_point_calibration.yaml
-workspace:
-  # Set true only after checking the fixed-target area's motion region on site.
-  # No granular-box limits or invented example bounds are used for real motion.
-  verified: false
-  # Supply x_min/x_max/y_min/y_max/z_min/z_max in Base meters, including safe lift height.
-  limits: null

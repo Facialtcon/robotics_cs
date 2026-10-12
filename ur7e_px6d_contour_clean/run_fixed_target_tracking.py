@@ -9,9 +9,10 @@ from app.fixed_target import ROOT, run_fixed, check_calibration
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, default=ROOT/'config.yaml')
-    parser.add_argument('--experiment-config', type=Path, default=ROOT/'fixed_target_experiment.yaml')
+    parser.add_argument('--calibration', type=Path, default=ROOT/'single_point_calibration.yaml',
+                        help='existing saved P0/P_ref calibration')
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--execute', action='store_true', help='real hardware, requires an independently verified workspace')
+    mode.add_argument('--execute', action='store_true', help='real hardware, using the original config.yaml safety interfaces')
     mode.add_argument('--dry-run', action='store_true', help='offline synthetic square demonstration (default)')
     parser.add_argument('--p0', help='saved P0 group, e.g. A, B, C')
     parser.add_argument('--scene', type=Path, default=ROOT/'simulation/scene_fixed_target.yaml')
