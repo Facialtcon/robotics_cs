@@ -30,7 +30,8 @@ def read_run(run_dir, *, require_continuous=True):
         raise ValueError("sample timestamps must be finite and ordered")
     for key in ('direction_valid', 'command_vx', 'command_vy', 'reacquire_origin_x', 'reacquire_origin_y',
                 'reacquire_reference_x', 'reacquire_reference_y', 'reacquire_normal_x', 'reacquire_normal_y',
-                'reacquire_tangent_x', 'reacquire_tangent_y', 'reacquire_heading_deg', 'reacquire_round'):
+                'reacquire_tangent_x', 'reacquire_tangent_y', 'reacquire_heading_deg', 'reacquire_round',
+                'reacquire_circle', 'reacquire_radius_m', 'reacquire_actual_heading_deg'):
         data[key] = np.array([float(row.get(key) or ('0' if key=='direction_valid' else 'nan')) for row in rows])
     for key in ('tcp_vx','tcp_vy','tcp_vz','v_t','v_n','stop_requested','raw_fx','raw_fy',
                 'filtered_force_base_fx','filtered_force_base_fy',
@@ -83,6 +84,23 @@ def recovery_windows(data, events):
     return windows
 
 
+def recovery_circles(data, window):
+    """Subdivide one loss episode using recorded circle IDs, including old logs."""
+    times = data['monotonic_sec']
+    circles = data.get('reacquire_circle', np.full(len(times), np.nan))
+    selected = (times >= window['start_time']-1e-8) & (times <= window['end_time']+1e-8)
+    numbers = np.unique(circles[selected & np.isfinite(circles) & (circles > 0)])
+    if not len(numbers):
+        return [window]
+    result = []
+    for number in numbers:
+        indices = np.flatnonzero(selected & (circles == number))
+        result.append(dict(window, circle=int(number),
+            radius_m=float(data['reacquire_radius_m'][indices[0]]),
+            start_time=float(times[indices[0]]), end_time=float(times[indices[-1]])))
+    return result
+
+
 def recovery_reference(data, config, window):
     """Only reconstruct from this run's saved radius/angle/origin/n/t."""
     c = config.get('continuous_tracking', {})
@@ -102,7 +120,7 @@ def recovery_reference(data, config, window):
         return None
     from policy.continuous_tracking import arc_reference
     theta = np.linspace(0, np.deg2rad(float(c['reacquire_max_angle_deg'])), 181)[:, None]
-    return arc_reference(origin, normal, tangent, float(c['reacquire_radius']), theta)*1000
+    return arc_reference(origin, normal, tangent, float(window.get('radius_m', c['reacquire_radius'])), theta)*1000
 
 
 def contact_trajectory_figures(data, config, events):
@@ -146,24 +164,35 @@ def contact_trajectory_figures(data, config, events):
     def paths(axis, mask):
         for value in (-1, 0, *(w['round'] for w in windows)):
             selected = mask & (phase == value)
-            adjacent = selected[:-1] & selected[1:]
-            segments = np.stack((points[:-1][adjacent], points[1:][adjacent]), axis=1)
             label = ('接触减弱 / 停止确认' if value == -1 else
                      ('连续跟踪阶段' if value == 0 else f'第 {value} 次局部找回'))
             color = '.6' if value == -1 else colors(value % 10)
-            if len(segments):
-                axis.add_collection(LineCollection(segments, colors=[color], linewidths=1.5, label=label))
-                # A few arrows stay inside one uninterrupted phase.
-                index = len(segments)//2
-                middle = segments[index]
-                nearby = segments[max(0, index-10):index+11]
-                advance = np.sum(nearby[:, 1]-nearby[:, 0], axis=0)
-                if value != -1 and np.linalg.norm(advance) > 1e-5:
-                    direction = advance/np.linalg.norm(advance)
-                    length = np.clip(np.ptp(points[selected], axis=0).max()*.02, .12, 1.)
-                    axis.annotate('', xy=middle[1]+length*direction, xytext=middle[1]-length*direction,
-                                  arrowprops=dict(arrowstyle='->', color=color))
+            groups = [(selected, label, color)]
+            if value > 0 and 'reacquire_circle' in data:
+                circles = recovery_circles(data, windows[value-1])
+                if 'circle' in circles[0]:
+                    groups = [(selected & (data['reacquire_circle'] == circle['circle']),
+                        label+f" · 第 {circle['circle']} 圈（{circle['radius_m']*1000:g} mm）",
+                        colors((value+circle['circle']-1) % 10)) for circle in circles]
+            for selected, label, color in groups:
+                draw_segments(axis, selected, label, color, value)
         axis.update_datalim(points[mask]);axis.autoscale_view()
+
+    def draw_segments(axis, selected, label, color, value):
+        adjacent = selected[:-1] & selected[1:]
+        segments = np.stack((points[:-1][adjacent], points[1:][adjacent]), axis=1)
+        if len(segments):
+            axis.add_collection(LineCollection(segments, colors=[color], linewidths=1.5, label=label))
+            # A few arrows stay inside one uninterrupted phase.
+            index = len(segments)//2
+            middle = segments[index]
+            nearby = segments[max(0, index-10):index+11]
+            advance = np.sum(nearby[:, 1]-nearby[:, 0], axis=0)
+            if value != -1 and np.linalg.norm(advance) > 1e-5:
+                direction = advance/np.linalg.norm(advance)
+                length = np.clip(np.ptp(points[selected], axis=0).max()*.02, .12, 1.)
+                axis.annotate('', xy=middle[1]+length*direction, xytext=middle[1]-length*direction,
+                              arrowprops=dict(arrowstyle='->', color=color))
 
     def mark(axis, event, label, marker, color):
         xy = np.array([float(event['x']), float(event['y'])])*1000
@@ -184,8 +213,9 @@ def contact_trajectory_figures(data, config, events):
         lower = float(window['lost']['timestamp']) if window['lost'] else window['start_time']
         upper = window['end_time'] if window['success'] else times[-1]
         mask = included & (times >= lower-.3) & (times <= upper+1e-8)
-        reference = recovery_reference(data, config, window)
-        bound_points = points[mask] if reference is None else np.vstack((points[mask], reference))
+        references = [(circle, recovery_reference(data, config, circle))
+                      for circle in recovery_circles(data, window)]
+        bound_points = np.vstack([points[mask], *[r for _, r in references if r is not None]])
         low, high = bound_points.min(axis=0)-.35, bound_points.max(axis=0)+.35
         axis.add_patch(Rectangle(low, *(high-low), fill=False, edgecolor=color, linestyle='--'))
         axis.annotate(f'局部找回 {number}', high, xytext=(2, 4), textcoords='offset points',
@@ -193,9 +223,12 @@ def contact_trajectory_figures(data, config, events):
         zoom, zoom_axis = setup(f'第 {number} 次局部找回：实测 TCP / 保存配置的参考路径')
         zoom.set_size_inches(6, 6)
         paths(zoom_axis, mask)
-        if reference is not None:
-            zoom_axis.plot(*reference.T, '--', color='purple', lw=1,
-                label=f"保存配置参考圆弧（{config['continuous_tracking']['reacquire_max_angle_deg']:g}°）")
+        for circle, reference in references:
+            if reference is not None:
+                label = (f"第 {circle['circle']} 圈参考（{circle['radius_m']*1000:g} mm）" if 'circle' in circle else
+                         f"保存配置参考圆弧（{config['continuous_tracking']['reacquire_max_angle_deg']:g}°）")
+                zoom_axis.plot(*reference.T, '--', color=colors((number+circle.get('circle', 1)-1) % 10),
+                               lw=1, label=label)
         for target_axis in (axis, zoom_axis):
             if window['lost']:
                 mark(target_axis, window['lost'], '接触减弱持续达到判定条件', 'x', 'red')

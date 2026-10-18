@@ -117,6 +117,11 @@ def validate_config(config: dict) -> None:
         raise ValueError("reference + deadband must be below processed force safety limit")
     if float(c["reacquire_max_angle_deg"]) > 360:
         raise ValueError("local reacquire path angle must not exceed 360 degrees")
+    radii = c.get('reacquire_radii', [c['reacquire_radius']])
+    if (not isinstance(radii, list) or not radii or
+            any(isinstance(r, bool) or not isinstance(r, (int, float)) or not np.isfinite(r) or r <= 0 for r in radii) or
+            any(b <= a for a, b in zip(radii, radii[1:])) or radii[0] != c['reacquire_radius']):
+        raise ValueError('reacquire_radii must increase from reacquire_radius with finite positive radii')
     if not isinstance(c["reacquire_enabled"], bool):
         raise ValueError("reacquire_enabled must be boolean")
     if not 0 < float(c["direction_min_coherence"]) <= 1:
@@ -194,6 +199,7 @@ EXTRA_SAMPLE_FIELDS += ('first_contact_braking_distance_m', 'first_contact_braki
                         'unload_initial_force_N', 'unload_last_force_N')
 EXTRA_SAMPLE_FIELDS += ('reacquire_round', 'reacquire_active', 'reacquire_elapsed_sec',
                         'reacquire_max_angle_deg', 'reacquire_contact_threshold', 'reacquire_actual_heading_deg')
+EXTRA_SAMPLE_FIELDS += ('reacquire_circle', 'reacquire_radius_m', 'reacquire_completed_circles')
 
 
 class ContinuousTrackingPolicy:
@@ -253,6 +259,10 @@ class ContinuousTrackingPolicy:
         self._confirmation_vectors = deque()
         self._last_recovery_origin = None
         self._recovery_count = 0
+        self.reacquire_radii = tuple(self.c.get('reacquire_radii', [self.c['reacquire_radius']]))
+        self.reacquire_circle = 0
+        self.reacquire_radius = float(self.reacquire_radii[0])
+        self.reacquire_circle_history = []
         self._recovery_previous_pose = None
         self._recovery_previous_observation_time = None
         self._recovery_previous_speed = 0.
@@ -663,14 +673,15 @@ class ContinuousTrackingPolicy:
             return
         if (self._last_recovery_origin is not None
                 and np.linalg.norm(pose[:2]-self._last_recovery_origin[:2]) < float(self.c['reacquire_min_progress'])):
-            if self.real_execution:
-                self.diagnostics['recovery_progress'] = 'WARNING: repeated contact loss without spatial progress'
-            else:
-                self.request_stop(now, pose, 'repeated contact loss without spatial progress')
-                return
+            # A brief reacquisition may be followed by another loss nearby.
+            # Each arc still has its actual-progress and angle limits.
+            self.diagnostics['recovery_progress'] = 'WARNING: repeated contact loss without spatial progress'
         self.reacquire_origin = pose.copy()
         self._last_recovery_origin = pose.copy()
         self._memory_normal, self._memory_tangent = memory['normal'].copy(), memory['tangent'].copy()
+        self.reacquire_circle = 1
+        self.reacquire_radius = float(self.reacquire_radii[0])
+        self.reacquire_circle_history = []
         self._reacquire, self._theta = now, 0.
         self._recovery_actual_theta = self._recovery_previous_angle = self._recovery_progress_theta = 0.
         self._recovery_progress_time = now
@@ -707,7 +718,7 @@ class ContinuousTrackingPolicy:
             # to O alone cannot establish that the TCP traversed a full circle.
             offset = pose[:2]-self.reacquire_origin[:2]
             angle = np.arctan2(offset @ self._memory_normal,
-                              offset @ self._memory_tangent + float(self.c['reacquire_radius']))
+                              offset @ self._memory_tangent + self.reacquire_radius)
             delta = angle-self._recovery_previous_angle
             self._recovery_actual_theta += float(np.arctan2(np.sin(delta), np.cos(delta)))
             self._recovery_previous_angle = float(angle)
@@ -728,31 +739,72 @@ class ContinuousTrackingPolicy:
         self.reacquire_tracking_error = float(np.linalg.norm(self.reacquire_reference-pose[:2]))
         if self.reacquire_tracking_error > float(self.c['reacquire_max_tracking_error']):
             return self._recovery_motion_error(now, pose, 'tracking error')
-        if self.contact_flag and self._confirm_started is None:
-            self._reset_confirmation(now)
-            self._event(now, pose, 'REACQUIRE_STOP_REQUEST')
-        if self._confirm_started is not None:
-            # Reference freezes for the entire confirmation. Failure stops;
-            # there is no time-driven jump or second search strategy.
-            if self._confirm(now, robot, vector):
-                self.state = State.CONTINUOUS_TRACKING
-                self._lost = None
-                self.lost_timer = 0.
-                self._event(now, pose, 'REACQUIRED')
-                self._confirm_started = None
-            return self._command(pose)
+        if self.contact_flag:
+            # Recontact needs no stopped confirmation. Seed the existing
+            # estimator from this force, not the direction before the loss.
+            self._filtered, self._filtered_magnitude = vector.copy(), self.fxy
+            self.filtered_fxy = self.fxy
+            self.contact_direction, self.tangent, _ = control_directions(
+                vector, self.c['force_direction_sign'], self.follow_hand)
+            self._previous_measurement = self.force_direction.copy()
+            self._last_valid_measurement = self.force_direction.copy()
+            self._last_valid_measurement_time = now
+            self.measurement_jump_deg = self.estimate_residual_deg = self.measurement_rate_deg_s = 0.
+            self.direction_rate_filtered_deg_s = self.direction_delta_deg = 0.
+            self.direction_valid, self.direction_confidence, self.direction_limited = True, 1., False
+            self.direction_speed_scale = 1.
+            self.direction_reconfirm_attempts = 0
+            self._direction_attempt_pose = None
+            self._direction_resume_started = self._direction_resume_pose = self._direction_resume_tangent = None
+            self.direction_resume_progress_m = 0.
+            self._lost, self.lost_timer, self._low_force_pending = None, 0., False
+            self._confirm_started = None
+            self._force_since = self._settle_since = None
+            self._confirmation_vectors.clear()
+            self.contact_hold_elapsed = self.settle_hold_elapsed = 0.
+            self.stop_requested = self.stop_confirmed = False
+            self.state, self.reason, self.tangent_limit_reason = State.CONTINUOUS_TRACKING, '', ''
+            self._event(now, pose, 'REACQUIRED')
+            # Fall through to this sample's normal tracking calculation in
+            # update(). Preserve _velocity for the existing acceleration cap.
+            return None
         maximum = np.deg2rad(float(self.c['reacquire_max_angle_deg']))
         # Completion tolerance comes from the existing position-reference
         # tolerance; no new path/distance budget or completion parameter.
-        angular_tolerance = float(self.c['reacquire_reference_freeze_error'])/float(self.c['reacquire_radius'])
+        angular_tolerance = float(self.c['reacquire_reference_freeze_error'])/self.reacquire_radius
         if (self._theta >= maximum and self._recovery_actual_theta >= maximum-angular_tolerance
                 and self.reacquire_tracking_error <= float(self.c['reacquire_reference_freeze_error'])):
             full_circle = float(self.c['reacquire_max_angle_deg']) == 360.
-            self.request_stop(now, pose,
-                'RECOVERY_FULL_CIRCLE_NO_CONTACT' if full_circle else 'local reacquire angle exhausted',
-                code=TerminationReason.RECOVERY_FULL_CIRCLE_NO_CONTACT if full_circle else TerminationReason.STOP_RECOVERY_EXHAUSTED,
-                event='RECOVERY_FULL_CIRCLE_NO_CONTACT' if full_circle else 'BUDGET_STOP')
-            return self._command(pose)
+            self.reacquire_circle_history.append(dict(circle=self.reacquire_circle,
+                radius_m=self.reacquire_radius, actual_angle_deg=self.reacquire_actual_heading_deg,
+                completed_monotonic=now, actual_xy=pose[:2].tolist()))
+            self._event(now, pose, 'REACQUIRE_CIRCLE_COMPLETED')
+            if full_circle and self.reacquire_circle < len(self.reacquire_radii):
+                self.reacquire_circle += 1
+                self.reacquire_radius = float(self.reacquire_radii[self.reacquire_circle-1])
+                self._theta = self._recovery_actual_theta = self._recovery_progress_theta = 0.
+                self.reacquire_heading_deg = self.reacquire_actual_heading_deg = 0.
+                # The old reference ends at O; the new circle starts at the
+                # same O. Actual TCP may still be within the existing endpoint
+                # tolerance. Seed its angle on the NEW centre, without counting
+                # that residual offset as travel or reusing the preceding lap.
+                offset = pose[:2]-self.reacquire_origin[:2]
+                self._recovery_previous_angle = float(np.arctan2(offset @ self._memory_normal,
+                    offset @ self._memory_tangent+self.reacquire_radius))
+                self._recovery_progress_time = now
+                self._recovery_previous_pose = pose[:2].copy()
+                self._recovery_previous_observation_time = robot.timestamp
+                self._recovery_previous_speed = float(np.linalg.norm(robot.tcp_speed[:2]))
+                self.reacquire_reference = self.reacquire_origin[:2].copy()
+                self.reacquire_tracking_error = float(np.linalg.norm(offset))
+                angular_tolerance = float(self.c['reacquire_reference_freeze_error'])/self.reacquire_radius
+                self._event(now, pose, 'REACQUIRE_CIRCLE_STARTED')
+            else:
+                self.request_stop(now, pose,
+                    'RECOVERY_FULL_CIRCLE_NO_CONTACT' if full_circle else 'local reacquire angle exhausted',
+                    code=TerminationReason.RECOVERY_FULL_CIRCLE_NO_CONTACT if full_circle else TerminationReason.STOP_RECOVERY_EXHAUSTED,
+                    event='RECOVERY_FULL_CIRCLE_NO_CONTACT' if full_circle else 'BUDGET_STOP')
+                return self._command(pose)
         if self._recovery_actual_theta-self._recovery_progress_theta >= angular_tolerance:
             self._recovery_progress_theta = self._recovery_actual_theta
             self._recovery_progress_time = now
@@ -763,10 +815,10 @@ class ContinuousTrackingPolicy:
         if self.reacquire_tracking_error <= float(self.c['reacquire_reference_freeze_error']):
             # omega <= path speed / radius, independent of target geometry.
             omega = min(np.deg2rad(float(self.c['reacquire_angular_speed_deg_s'])),
-                        float(self.c['reacquire_speed'])/float(self.c['reacquire_radius']))
+                        float(self.c['reacquire_speed'])/self.reacquire_radius)
             self._theta = min(self._theta+omega*self.dt, np.deg2rad(float(self.c['reacquire_max_angle_deg'])))
         self.reacquire_reference = arc_reference(self.reacquire_origin, self._memory_normal, self._memory_tangent,
-                                                 float(self.c['reacquire_radius']), self._theta)
+                                                 self.reacquire_radius, self._theta)
         self.reacquire_heading_deg = float(np.rad2deg(self._theta))
         self.reacquire_tracking_error = float(np.linalg.norm(self.reacquire_reference-pose[:2]))
         velocity = float(self.c['reacquire_position_gain']) * (self.reacquire_reference-pose[:2])
@@ -779,6 +831,7 @@ class ContinuousTrackingPolicy:
 
     def _recovery_motion_error(self, now, pose, detail):
         self.diagnostics['recovery_execution'] = dict(reason=detail, actual_xy=pose[:2].tolist(),
+            circle=self.reacquire_circle, radius_m=self.reacquire_radius,
             reference_xy=self.reacquire_reference.tolist(), tracking_error_m=self.reacquire_tracking_error,
             reference_angle_deg=self.reacquire_heading_deg, actual_angle_deg=self.reacquire_actual_heading_deg)
         self.request_stop(now, pose, 'local reacquire execution failure: '+detail,
@@ -922,6 +975,10 @@ class ContinuousTrackingPolicy:
             return self._command(pose)
         if self.state == State.DIRECTION_RECONFIRM:
             return self._direction_reconfirm(now, robot, vector)
+        if self.state == State.LOCAL_REACQUIRE:
+            command = self._recover(now, robot, vector)
+            if command is not None:
+                return command
         if self.state == State.CONTINUOUS_TRACKING:
             self.stop_confirmed = False
             if (self._low_force_pending and
@@ -1025,8 +1082,6 @@ class ContinuousTrackingPolicy:
             elif now-self._confirm_started >= float(self.c['confirmation_timeout_sec']):
                 self.request_stop(now, pose, 'contact lost stop confirmation timeout')
             return self._command(pose)
-        if self.state == State.LOCAL_REACQUIRE:
-            return self._recover(now, robot, vector)
         return self._command(pose)
 
     def telemetry(self, command):
@@ -1064,6 +1119,8 @@ class ContinuousTrackingPolicy:
              ('VERIFY_RESUME' if self._direction_resume_started is not None else ('LOW_FORCE_CONFIRM' if self._low_force_pending else 'TRACK'))))))
         result['force_rate_guard_active'] = int(self.force_rate_guard_active)
         result.update(reacquire_round=self._recovery_count,
+            reacquire_circle=self.reacquire_circle, reacquire_radius_m=self.reacquire_radius,
+            reacquire_completed_circles=len(self.reacquire_circle_history),
             reacquire_actual_heading_deg=self.reacquire_actual_heading_deg,
             reacquire_active=int(self.state == State.LOCAL_REACQUIRE),
             reacquire_elapsed_sec=self.reacquire_elapsed_sec,

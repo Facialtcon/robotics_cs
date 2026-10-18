@@ -14,12 +14,16 @@ if(D.fixed_target&&D.target){
 }
 const S = D.samples, A = D.actual, C = D.commands;
 const colors = ['#3975ae', '#c65050', '#16836b'], phases = ['#3975ae', '#16836b', '#e68621'];
+const circleColors = ['#e68621', '#8b5cf6', '#0891b2'];
+const trajectoryPhase = r => r[6] === 2 && finite(r[10]) && r[10] > 0 ? 1+r[10] : r[6];
+const trajectoryColor = phase => phase < 2 ? phases[phase] : circleColors[(phase-2)%circleColors.length];
 const finite = v => typeof v === 'number' && Number.isFinite(v);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const fmt = (v, n = 2) => finite(v) ? v.toFixed(n) : '未记录';
 const names = {FIRST_THRESHOLD_STOP_REQUEST:'首次接触阈值',FIRST_CONTACT:'接触确认',
   TRACKING_ENTERED:'进入跟踪',CONTACT_LOST:'丢失接触',REACQUIRED:'恢复接触',
-  EXECUTION_STOP_CONFIRMED:'停止确认',USER_STOP:'停止请求',BUDGET_STOP:'停止请求'};
+  EXECUTION_STOP_CONFIRMED:'停止确认',USER_STOP:'停止请求',BUDGET_STOP:'停止请求',
+  RECOVERY_FULL_CIRCLE_NO_CONTACT:'恢复搜索无接触'};
 const eventColor = k => k === 'CONTACT_LOST' ? '#e68621' : k === 'REACQUIRED' ? '#1964b1' : '#9b287b';
 const events = D.events.filter(e => names[e.kind]).sort((a,b) => a.time-b.time);
 const eventCounts={};
@@ -31,7 +35,7 @@ const eventLabelMap=new Map(events.map(e=>{
 const eventLabel=e=>eventLabelMap.get(e)||names[e.kind];
 const eventGroups={first:['FIRST_THRESHOLD_STOP_REQUEST'],contact:['FIRST_CONTACT'],
   tracking:['TRACKING_ENTERED'],lost:['CONTACT_LOST'],recovered:['REACQUIRED'],
-  stop:['EXECUTION_STOP_CONFIRMED','USER_STOP','BUDGET_STOP']};
+  stop:['EXECUTION_STOP_CONFIRMED','USER_STOP','BUDGET_STOP','RECOVERY_FULL_CIRCLE_NO_CONTACT']};
 const eventVisibility={kinds:new Set(['lost','recovered']),text:true,lines:true,markers:true};
 const eventEnabled=e=>Object.entries(eventGroups).some(([key,kinds])=>eventVisibility.kinds.has(key)&&kinds.includes(e.kind));
 const eventKey=()=>JSON.stringify([[...eventVisibility.kinds].sort(),eventVisibility.text,eventVisibility.lines,eventVisibility.markers]);
@@ -393,14 +397,15 @@ function drawXY(row,actual) {
     for(const r of S){
       if(!finite(r[1])||!finite(r[2])){previous=null;continue;}
       const p=project(r.slice(1,3));
-      if(!previous||Math.hypot(p[0]-previous.x,p[1]-previous.y)>.6||r[6]!==previous.phase){
-        path.push({time:r[0],x:p[0],y:p[1],phase:r[6],gap:!previous});
-        previous={x:p[0],y:p[1],phase:r[6]};
+      const phase=trajectoryPhase(r);
+      if(!previous||Math.hypot(p[0]-previous.x,p[1]-previous.y)>.6||phase!==previous.phase){
+        path.push({time:r[0],x:p[0],y:p[1],phase,gap:!previous});
+        previous={x:p[0],y:p[1],phase};
       }
     }
-    const end=S[S.length-1];path.push({time:end[0],x:g.x(end[1]),y:g.y(end[2]),phase:end[6]});
+    const end=S[S.length-1];path.push({time:end[0],x:g.x(end[1]),y:g.y(end[2]),phase:trajectoryPhase(end)});
     c.globalAlpha=.25;
-    for(let phase=0;phase<3;phase++)line(c,path.map(p=>p.phase===phase?[p.x,p.y]:null),phases[phase],1.5);
+    for(const phase of new Set(path.map(p=>p.phase)))line(c,path.map(p=>p.phase===phase?[p.x,p.y]:null),trajectoryColor(phase),1.5);
     c.globalAlpha=1;c.restore();
     cache.xy={key,canvas:snapshot('xy'),path,trail:null,trailEnd:-1};
   }
@@ -413,7 +418,7 @@ function drawXY(row,actual) {
   clip(tc,g);
   for(let j=Math.max(1,item.trailEnd+1);j<=target;j++){
     const p=item.path[j],previous=item.path[j-1];
-    if(!p.gap)line(tc,[[previous.x,previous.y],[p.x,p.y]],phases[p.phase],2.2);
+    if(!p.gap)line(tc,[[previous.x,previous.y],[p.x,p.y]],trajectoryColor(p.phase),2.2);
   }
   tc.restore();item.trailEnd=target;c.drawImage(item.trail,0,0,w,h);
   clip(c,g);
@@ -455,6 +460,8 @@ function drawXY(row,actual) {
   if(actual)arrow(c,...p,actual[1]*xySpeedScale*g.scale,-actual[2]*xySpeedScale*g.scale,'#2563b1',true);
   c.restore();
   $('xy-view').textContent='视野 '+fmt(g.xlim[0],1)+'–'+fmt(g.xlim[1],1)+' mm × '+fmt(g.ylim[0],1)+'–'+fmt(g.ylim[1],1)+' mm · X/Y 使用相同像素比例';
+  if(row[6]===2&&finite(row[10])&&row[10]>0)$('xy-view').textContent+=
+    ' · 第 '+row[9]+' 次恢复 / 第 '+row[10]+' 圈 · 半径 '+fmt(row[11]*1000,1)+' mm · 实际角度 '+fmt(row[12],1)+'°';
 }
 function drawDirection(row,actual) {
   const {c,w,h}=surface('direction'),g=spatialGeometry('direction',w,h),mode=$('arrows').value;
@@ -662,6 +669,17 @@ $('time').addEventListener('pointermove',e=>{
 $('time').addEventListener('pointerup',e=>{if(timelineDrag){timelineDrag=null;if($('time').hasPointerCapture(e.pointerId))$('time').releasePointerCapture(e.pointerId);}});
 $('time').addEventListener('pointercancel',()=>timelineDrag=null);
 $('name').textContent=(D.synthetic?'模拟数据 · ':'')+D.name;
+if(!D.single_point){
+  const seen=new Set();
+  for(const row of S){
+    if(row[6]!==2||!finite(row[10])||row[10]<=0||seen.has(row[10]))continue;
+    seen.add(row[10]);
+    const item=document.createElement('span');
+    item.style.color=trajectoryColor(trajectoryPhase(row));
+    item.textContent='恢复第 '+row[10]+' 圈（'+fmt(row[11]*1000,1)+' mm）';
+    $('phase-legend').append(item);
+  }
+}
 $('thresholds').textContent='首次接触 '+fmt(D.threshold)+' N（紫色虚线） · 丢接触 '+fmt(D.lost_threshold)+' N（橙色虚线）';
 $('deadband').textContent=D.deadband.enabled?
   'Deadband：误差 '+fmt(D.deadband.reference)+' − Fxy 的 ±'+fmt(D.deadband.half_width)+' N；等效 Fxy '+fmt(D.deadband.lower)+'–'+fmt(D.deadband.upper)+

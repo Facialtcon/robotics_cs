@@ -91,7 +91,8 @@ def write_html_replay(trace, output_dir):
     states = list(dict.fromkeys(trace.state.tolist()))
     sample_rows = [
         [trace.time[i], *trace.xy_mm[i], *trace.force[i], int(trace.phase[i]), states.index(trace.state[i]),
-         trace.unfiltered_force[i, 2]] for i in range(len(trace.time))
+         trace.unfiltered_force[i, 2],
+         *(trace.recovery[i] if len(trace.recovery) else [None]*4)] for i in range(len(trace.time))
     ]
     single_point = 'single_point_experiment' in trace.config
     first_contact = collision_details(trace)

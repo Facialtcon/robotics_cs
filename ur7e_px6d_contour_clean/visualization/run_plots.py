@@ -54,6 +54,7 @@ class RunTrace:
     contact_source: str = 'unavailable'
     target_mm: np.ndarray | None = None
     stop_position_mm: np.ndarray | None = None
+    recovery: np.ndarray = field(default_factory=lambda: np.empty((0, 4)))
 
     @property
     def duration(self):
@@ -161,7 +162,9 @@ def load_trace(run_dir):
     return RunTrace(run_dir, times-times[0], times, xy, force, states, phase,
                     first_index, event_indices, fields, actual, actual_stamps-times[0],
                     commands, command_stamps-times[0], selected_events, config, unfiltered,
-                    contact_source, target, stop_position)
+                    contact_source, target, stop_position,
+                    np.column_stack([data[k][start:] for k in ('reacquire_round', 'reacquire_circle',
+                        'reacquire_radius_m', 'reacquire_actual_heading_deg')]))
 
 
 def target_outline(target):

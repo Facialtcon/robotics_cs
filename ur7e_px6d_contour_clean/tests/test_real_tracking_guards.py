@@ -496,8 +496,29 @@ def test_fake_runtime_contact_loss_recovers_without_terminal_stop(config, monkey
     devices = Devices(config, target)
     phases = []
     stage = 'contact'
+    transitions = []
+    stop_requests = []
+    def controller_factory(c):
+        owner = devices.controller(c)
+        request_stop = owner.request_stop
+        def observe_stop(*a, **kw):
+            stop_requests.append(len(devices.control.calls))
+            return request_stop(*a, **kw)
+        monkeypatch.setattr(owner, 'request_stop', observe_stop)
+        return owner
+    update = ContinuousTrackingPolicy.update
+    def observe_update(self, now, *a, **kw):
+        before, previous = self.state, self._velocity.copy()
+        call_index = len(devices.control.calls)
+        command = update(self, now, *a, **kw)
+        if before == State.LOCAL_REACQUIRE and self.state == State.CONTINUOUS_TRACKING:
+            transitions.append((call_index, previous, command.direction_xy*command.speed, self.dt,
+                                self.stop_requested, self.stop_confirmed))
+        return command
+    monkeypatch.setattr(ContinuousTrackingPolicy, 'update', observe_update)
     class LossSensor(Sensor):
         scan_reads = 0
+        recovery_reads = 0
         def read_wrench(self):
             nonlocal stage
             self.count += 1
@@ -506,16 +527,29 @@ def test_fake_runtime_contact_loss_recovers_without_terminal_stop(config, monkey
             phase = devices.owner.continuous_phase
             phases.append(phase)
             if phase == 'CONTINUOUS_TRACKING' and stage == 'contact': stage = 'loss'
-            if phase == 'LOCAL_REACQUIRE': stage = 'recover'
+            if phase == 'LOCAL_REACQUIRE':
+                stage = 'recover'
+                self.recovery_reads += 1
             if phase == 'CONTINUOUS_TRACKING' and stage == 'recover': stage = 'done'
-            force = 0. if self.scan_reads < 10 or stage == 'loss' else 1.5
+            force = 0. if (self.scan_reads < 10 or stage == 'loss' or
+                          (stage == 'recover' and self.recovery_reads < 30)) else 1.2
             return Wrench(force, 0, 0, 0, 0, 0)
     def poll(self):
         return 'Q' if self.main_loop and (stage == 'done' or len(phases) > 500) else None
     monkeypatch.setattr(Keyboard, 'poll', poll)
-    assert runtime.run(args(tmp_path), controller_factory=devices.controller, reader_factory=LossSensor) == 0
+    assert runtime.run(args(tmp_path), controller_factory=controller_factory, reader_factory=LossSensor) == 0
     assert stage == 'done'
     assert {'FIRST_CONTACT', 'CONTINUOUS_TRACKING', 'CONTACT_LOST', 'LOCAL_REACQUIRE'} <= set(phases)
+    transition, = transitions
+    index, previous, velocity, dt, stop_requested, stop_confirmed = transition
+    assert np.linalg.norm(previous) > 0. and np.linalg.norm(velocity) > 0.
+    assert not stop_requested and not stop_confirmed
+    assert np.linalg.norm(velocity-previous) <= config['continuous_tracking']['command_acceleration']*dt+1e-12
+    # The real runtime and RTDE owner issue a nonzero speedL immediately,
+    # without an intervening zero speedL, speedStop or stopL.
+    assert devices.control.calls[index][0] == 'speedL'
+    assert index not in stop_requests
+    np.testing.assert_allclose(devices.control.calls[index][1][:2], velocity)
     run_dir, = (tmp_path/'real/continuous').glob('run_*')
     assert json.loads((run_dir/'termination.json').read_text())['reason'] == 'STOP_USER_REQUEST'
 

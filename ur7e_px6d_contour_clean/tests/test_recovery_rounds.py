@@ -28,6 +28,9 @@ def recovering(config, *, real=True, hand='CLOCKWISE', multiplier=1., max_angle=
     c['continuous_real_execution'] = real
     c['continuous_tracking'].update(force_direction_sign=-1 if real else 1,
         reacquire_max_angle_deg=max_angle)
+    if max_angle < 360.:
+        # Legacy partial-arc fixtures exercise their original angle limit.
+        c['continuous_tracking']['reacquire_radii'] = [c['continuous_tracking']['reacquire_radius']]
     c['continuous_tracking']['tangential_speed'] *= multiplier
     c['policy'].update(follow_hand=hand, search_direction_xy=[0., -1.])
     policy = ContinuousTrackingPolicy(c)
@@ -44,18 +47,20 @@ def recovering(config, *, real=True, hand='CLOCKWISE', multiplier=1., max_angle=
     return policy
 
 
-def follow(policy, contact_angle=None, tracking_ratio=1., logger=None):
-    """Simple synthetic velocity follower with actual braking feedback."""
+def follow(policy, contact_angle=None, tracking_ratio=1., logger=None, contact_circle=1):
+    """Simple synthetic velocity follower with actual velocity feedback."""
     xy, velocity = policy.reacquire_origin[:2].copy(), np.zeros(2)
     now = policy._last_time
     frozen, contact_at = [], None
-    for _ in range(10000):
+    for _ in range(20000):
         now += .01
-        contacted = contact_angle is not None and policy.reacquire_heading_deg >= contact_angle
+        contacted = (contact_angle is not None and policy.reacquire_circle == contact_circle and
+                     policy.reacquire_heading_deg >= contact_angle)
         if contacted and contact_at is None:
             contact_at = now
         robot = observation(now, xy, velocity)
-        command, wrench = tick(policy, robot, 1.5 if contacted else 0.)
+        previous = policy._velocity.copy()
+        command, wrench = tick(policy, robot, 1.2 if contacted else 0.)
         if logger is not None:
             logger.log_sample(now, wrench, wrench, robot, command,
                 policy.contact_direction, policy.tangent, extra=policy.telemetry(command))
@@ -63,6 +68,10 @@ def follow(policy, contact_angle=None, tracking_ratio=1., logger=None):
             frozen.append(policy.reacquire_reference.copy())
             assert not command.move
         if policy.state != State.LOCAL_REACQUIRE:
+            if policy.state == State.CONTINUOUS_TRACKING:
+                assert command.move and not policy.stop_requested
+                assert np.linalg.norm(command.direction_xy*command.speed-previous) <= (
+                    policy.c['command_acceleration']*policy.dt+1e-12)
             break
         desired = command.direction_xy*command.speed*tracking_ratio
         delta = desired-velocity
@@ -77,17 +86,78 @@ def follow(policy, contact_angle=None, tracking_ratio=1., logger=None):
 @pytest.mark.parametrize('real', [False, True])
 @pytest.mark.parametrize('hand', ['CLOCKWISE', 'COUNTERCLOCKWISE'])
 @pytest.mark.parametrize('angle,max_angle', [(40., 60.), (40., 90.), (70., 90.)])
-def test_sustained_synthetic_contact_confirms_after_braking(config, real, hand, angle, max_angle):
+def test_synthetic_contact_resumes_tracking_in_same_sample(config, real, hand, angle, max_angle):
     policy = recovering(config, real=real, hand=hand, max_angle=max_angle)
     command, contact_at, frozen = follow(policy, angle)
-    assert policy.state == State.CONTINUOUS_TRACKING and not command.move
+    assert policy.state == State.CONTINUOUS_TRACKING and command.move
     assert policy.reacquire_heading_deg >= angle
     assert policy.reacquire_elapsed_sec > 0.
-    assert policy._last_time-contact_at >= policy.c['settle_hold_sec']
-    assert len(frozen) > 2
-    np.testing.assert_allclose(frozen, np.tile(frozen[0], (len(frozen), 1)))
-    assert 'REACQUIRE_STOP_REQUEST' in [e.event_type for e in policy.events]
+    assert policy._last_time == contact_at
+    assert not frozen
+    assert 'REACQUIRE_STOP_REQUEST' not in [e.event_type for e in policy.events]
     assert policy.events[-1].event_type == 'REACQUIRED'
+
+
+@pytest.mark.parametrize('real', [False, True])
+@pytest.mark.parametrize('rotation', [90., 180.])
+def test_recontact_reseeds_direction_history_without_stale_reconfirmation(config, monkeypatch, real, rotation):
+    from sensor.force_direction import control_directions
+    policy = recovering(config, real=real)
+    tick(policy, observation(policy._last_time+.01, (0., 0.)), 0.)
+    previous = policy._velocity.copy()
+    radians = np.deg2rad(rotation)
+    vector = 1.2*policy.c['force_direction_sign']*np.array([np.sin(radians), -np.cos(radians)])
+    wrench = Wrench(*vector, 0., 0., 0., 0.)
+    def forbidden(*args, **kwargs):
+        pytest.fail('recontact must not use stopped confirmation')
+    monkeypatch.setattr(policy, '_confirm', forbidden)
+    monkeypatch.setattr(policy, '_settled', forbidden)
+    monkeypatch.setattr(policy, '_reset_confirmation', forbidden)
+    # Old direction-rate and resume evidence must not carry into recontact.
+    policy.direction_rate_filtered_deg_s = 1000.
+    policy._direction_resume_started = policy._last_time-10.
+    policy._direction_resume_pose = np.zeros(2)
+    policy._direction_resume_tangent = policy.tangent.copy()
+    for _ in range(20):
+        robot = observation(policy._last_time+.01, (0., 0.), previous)
+        command = policy.update(robot.timestamp, wrench, wrench, robot, execution_settled=False)
+        assert command.state == 'CONTINUOUS_TRACKING' and command.move
+        assert not policy.stop_requested and not policy.stop_confirmed
+        velocity = command.direction_xy*command.speed
+        assert np.linalg.norm(velocity-previous) <= policy.c['command_acceleration']*policy.dt+1e-12
+        previous = velocity
+    normal, tangent, _ = control_directions(vector, policy.c['force_direction_sign'], policy.follow_hand)
+    np.testing.assert_allclose(policy.contact_direction, normal, atol=1e-12)
+    np.testing.assert_allclose(policy.tangent, tangent, atol=1e-12)
+    assert policy.direction_reconfirm_count == 0
+    assert policy._last_valid_measurement_time == policy._last_time
+    assert policy._direction_resume_started is None
+    assert policy.v_t == pytest.approx(policy.c['tangential_speed'])
+    assert policy.v_n > 0.
+
+
+@pytest.mark.parametrize('real', [False, True])
+def test_brief_recontact_then_point_three_force_can_start_second_finite_recovery(config, real):
+    policy = recovering(config, real=real, max_angle=360.)
+    command, _, _ = follow(policy, contact_angle=1.)
+    assert command.move and policy.fxy == pytest.approx(1.2)
+    xy = policy.tracking_pose[:2].copy()
+    assert np.linalg.norm(xy-policy._last_recovery_origin[:2]) < policy.c['reacquire_min_progress']
+    loss_started = policy._last_time+.01
+    for _ in range(100):
+        command, _ = tick(policy, observation(policy._last_time+.01, xy), .3)
+        assert policy.state != State.STOP
+        if policy._last_time-loss_started+1e-12 < policy.c['contact_lost_hold_sec']:
+            assert policy.state == State.CONTINUOUS_TRACKING
+        if policy.state == State.LOCAL_REACQUIRE:
+            break
+    assert policy.state == State.LOCAL_REACQUIRE and policy._recovery_count == 2
+    assert [e.event_type for e in policy.events].count('REACQUIRED') == 1
+    # The second search still has a finite end if this contact was spurious.
+    command, _, _ = follow(policy)
+    assert not command.move and policy.state == State.STOP
+    assert policy.stop_reason.value == 'RECOVERY_FULL_CIRCLE_NO_CONTACT'
+    assert policy._recovery_count == 2
 
 
 @pytest.mark.parametrize('max_angle', [60., 90.])
@@ -135,33 +205,21 @@ def at_endpoint(policy):
 def test_endpoint_contact_precedes_angle_exhaustion(config, real):
     policy = recovering(config, real=real)
     xy = at_endpoint(policy)
-    for i in range(1, 25):
-        command, _ = tick(policy, observation(policy._reacquire+i*.01, xy), 1.5)
-        assert not command.move
-        if policy.state != State.LOCAL_REACQUIRE:
-            break
-    assert policy.state == State.CONTINUOUS_TRACKING
+    command, _ = tick(policy, observation(policy._reacquire+.01, xy), 1.2)
+    assert policy.state == State.CONTINUOUS_TRACKING and command.move
     assert policy.events[-1].event_type == 'REACQUIRED'
 
 
 @pytest.mark.parametrize('real', [False, True])
-def test_confirmation_can_complete_after_removed_total_time_budget(config, real):
+def test_contact_after_removed_total_time_budget_resumes_immediately(config, real):
     policy = recovering(config, real=real)
     xy = at_endpoint(policy)
     deadline = policy._reacquire+8.
-    # Fresh synthetic history leading to an unfinished confirmation window.
-    policy._last_time = deadline-.03
-    command, _ = tick(policy, observation(deadline-.02, xy), 1.5)
-    assert policy._confirm_started is not None and not command.move
-    frozen = policy.reacquire_reference.copy()
-    tick(policy, observation(deadline-.01, xy), 1.5)
-    for i in range(20):
-        command, _ = tick(policy, observation(deadline+i*.01, xy), 1.5)
-        if policy.state == State.CONTINUOUS_TRACKING:
-            break
-    assert policy.state == State.CONTINUOUS_TRACKING and not command.move
+    policy._last_time = deadline
+    command, _ = tick(policy, observation(deadline+.01, xy), 1.2)
+    assert policy._confirm_started is None
+    assert policy.state == State.CONTINUOUS_TRACKING and command.move
     assert policy._recovery_count == 1
-    np.testing.assert_array_equal(policy.reacquire_reference, frozen)
 
 
 def record(policy, magnitude=0.):
@@ -269,8 +327,10 @@ def test_actual_full_circle_stops_once_without_old_local_budgets(config, real, h
     command, _, _ = follow(policy)
     assert policy.state == State.STOP and not command.move
     assert policy.stop_reason.value == policy.reason == 'RECOVERY_FULL_CIRCLE_NO_CONTACT'
+    assert policy.reacquire_circle == 3 and policy.reacquire_radius == .006
+    assert [c['radius_m'] for c in policy.reacquire_circle_history] == [.002, .004, .006]
     assert policy.reacquire_heading_deg == 360.
-    tolerance_deg = np.rad2deg(policy.c['reacquire_reference_freeze_error']/policy.c['reacquire_radius'])
+    tolerance_deg = np.rad2deg(policy.c['reacquire_reference_freeze_error']/policy.reacquire_radius)
     assert policy.reacquire_actual_heading_deg >= 360.-tolerance_deg
     assert policy.reacquire_elapsed_sec > 8.
     assert policy.reacquire_path_length > .012
@@ -282,19 +342,22 @@ def test_actual_full_circle_stops_once_without_old_local_budgets(config, real, h
     assert payload['reason'] == 'RECOVERY_FULL_CIRCLE_NO_CONTACT'
     assert payload['local_reacquire']['actual_angle_deg'] == policy.reacquire_actual_heading_deg
     assert payload['local_reacquire']['tracking_error_m'] == policy.reacquire_tracking_error
+    assert payload['local_reacquire']['circle'] == 3
+    assert payload['local_reacquire']['radius_m'] == .006
+    assert len(payload['local_reacquire']['completed_circles']) == 3
 
 
 @pytest.mark.parametrize('real', [False, True])
 @pytest.mark.parametrize('angle', [180., 350.])
-def test_late_circle_contact_uses_original_standstill_and_contact_confirmation(config, real, angle):
+def test_late_circle_contact_resumes_without_standstill_confirmation(config, real, angle):
     policy = recovering(config, real=real, max_angle=360.)
     command, contact_at, frozen = follow(policy, angle)
-    assert policy.state == State.CONTINUOUS_TRACKING and not command.move
-    assert policy._last_time-contact_at >= policy.c['settle_hold_sec']
+    assert policy.state == State.CONTINUOUS_TRACKING and command.move
+    assert policy._last_time == contact_at
     assert policy.reacquire_heading_deg >= angle
     assert policy.reacquire_elapsed_sec > 8.
     assert policy.events[-1].event_type == 'REACQUIRED'
-    np.testing.assert_allclose(frozen, np.tile(frozen[0], (len(frozen), 1)))
+    assert not frozen
 
 
 @pytest.mark.parametrize('real', [False, True])
@@ -355,4 +418,30 @@ def test_full_circle_csv_and_html_preserve_actual_tcp_instead_of_reference(confi
     payload = json.loads(re.search(r'id="replay-data">(.*?)</script>', page.read_text(), re.S)[1])
     np.testing.assert_array_equal(np.array(payload['samples'])[:, 1:3], actual*1000.)
     assert any(e['kind'] == 'RECOVERY_FULL_CIRCLE_NO_CONTACT' for e in payload['events'])
+    assert set(row[10] for row in payload['samples']) == {1, 2, 3}
+    assert set(row[11] for row in payload['samples']) == {.002, .004, .006}
+    np.testing.assert_allclose([row[12] for row in payload['samples']],
+        [float(row['reacquire_actual_heading_deg']) for row in rows])
+    from tools.visualize_continuous_run import read_run, recovery_windows, recovery_circles, contact_trajectory_figures
+    import matplotlib.pyplot as plt
+    data, saved, events = read_run(logger.run_dir)
+    window, = recovery_windows(data, events)
+    circles = recovery_circles(data, window)
+    assert [c['circle'] for c in circles] == [1, 2, 3]
+    assert [c['radius_m'] for c in circles] == [.002, .004, .006]
+    figures = contact_trajectory_figures(data, saved, events)
+    try:
+        collections = [c for c in figures[-1][1].axes[0].collections if '圈（' in c.get_label()]
+        assert len(collections) == 3
+        assert len({tuple(c.get_colors()[0]) for c in collections}) == 3
+    finally:
+        for _, figure in figures:
+            plt.close(figure)
+    import shutil
+    import subprocess
+    from pathlib import Path
+    if shutil.which('gjs'):
+        result = subprocess.run(['gjs', str(Path(__file__).with_name('html_replay_harness.js')), str(page)],
+            capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
     assert (logger.run_dir/'samples.csv').read_bytes() == before

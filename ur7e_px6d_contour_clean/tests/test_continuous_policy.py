@@ -124,19 +124,28 @@ def test_lost_stops_and_reacquire_uses_local_heading(config):
     assert policy.reacquire_reference[1] > 0  # deliberate motion toward -t_mem
 
 
-def test_reacquire_requires_stable_contact_then_stops_search(config):
-    # Isolated state transition only. Geometric proof lives in test_continuous_geometry.
+def test_reacquire_threshold_directly_resumes_without_confirmation(config, monkeypatch):
     policy = tracking(config)
     lose(policy)
-    for i in range(118, 124):
-        tick(policy, i*.01, (0, (i-117)*.25))
+    previous = tick(policy, 1.18, (0, 0))
     assert policy.state == State.LOCAL_REACQUIRE
-    command = None
-    for i in range(124, 130):
-        command = tick(policy, i*.01, (0, 1.5))
-    assert policy.state == State.CONTINUOUS_TRACKING
+    def forbidden(*args, **kwargs):
+        pytest.fail('reacquisition must not request stopped confirmation')
+    monkeypatch.setattr(policy, '_confirm', forbidden)
+    monkeypatch.setattr(policy, '_settled', forbidden)
+    monkeypatch.setattr(policy, '_reset_confirmation', forbidden)
+    command = tick(policy, 1.19, (0, 1.2))
+    assert policy.state == State.CONTINUOUS_TRACKING and command.move
+    assert not policy.stop_requested and not policy.stop_confirmed
+    assert policy._confirm_started is None
     assert policy.events[-1].event_type == "REACQUIRED"
-    assert tick(policy, 1.30, (0, 1.5)).move
+    assert 'REACQUIRE_STOP_REQUEST' not in [e.event_type for e in policy.events]
+    assert np.linalg.norm(command.direction_xy*command.speed-previous.direction_xy*previous.speed) <= (
+        policy.c['command_acceleration']*policy.dt+1e-12)
+    np.testing.assert_allclose(policy.contact_direction, [0, 1])
+    for i in range(120, 140):
+        assert tick(policy, i*.01, (0, 1.2)).move
+        assert policy.state == State.CONTINUOUS_TRACKING
 
 
 def test_reacquire_stall_and_tracking_error_stop(config):

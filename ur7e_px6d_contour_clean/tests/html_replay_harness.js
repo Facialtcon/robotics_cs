@@ -42,6 +42,18 @@ const copy=v=>JSON.stringify(v);
 const wheel=(id,dy,shiftKey=false)=>api.wheelView(id,{clientX:350,clientY:110,deltaY:dy,shiftKey,preventDefault(){}});
 check(api.rate===.25,'default speed');
 check(data.samples.length===data.sample_count,'every raw sample available');
+const circleIds=[...new Set(data.samples.filter(r=>r[6]===2&&r[10]>0).map(r=>r[10]))];
+if(circleIds.length>1){
+  check(circleIds.every(n=>api.cache.xy.path.some(p=>p.phase===n+1)),'each recovery circle has a separate trajectory color');
+  for(const n of circleIds){
+    const row=data.samples.find(r=>r[6]===2&&r[10]===n);
+    api.seek(row[0]);api.render();
+    check(elements['xy-view'].textContent.includes('第 '+n+' 圈'),'circle radius and actual angle readout '+n);
+  }
+  api.seek(0);api.render();
+  print(JSON.stringify({result:'PASS',tests,drawingCalls}));
+  imports.system.exit(0); // Remaining checks use the separate six-second demo fixture.
+}
 const originalData=copy(api.data),originalViews=copy(api.views);
 if(data.fixed_target&&data.target){
   check(!elements['target-options'].hidden&&elements['show-target'].checked,'target overlay defaults on');
