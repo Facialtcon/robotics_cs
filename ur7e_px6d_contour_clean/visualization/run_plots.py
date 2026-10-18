@@ -54,7 +54,7 @@ class RunTrace:
     contact_source: str = 'unavailable'
     target_mm: np.ndarray | None = None
     stop_position_mm: np.ndarray | None = None
-    recovery: np.ndarray = field(default_factory=lambda: np.empty((0, 4)))
+    recovery: np.ndarray = field(default_factory=lambda: np.empty((0, 7)))
 
     @property
     def duration(self):
@@ -164,7 +164,8 @@ def load_trace(run_dir):
                     commands, command_stamps-times[0], selected_events, config, unfiltered,
                     contact_source, target, stop_position,
                     np.column_stack([data[k][start:] for k in ('reacquire_round', 'reacquire_circle',
-                        'reacquire_radius_m', 'reacquire_actual_heading_deg')]))
+                        'reacquire_radius_m', 'reacquire_actual_heading_deg', 'reacquire_center_offset_deg',
+                        'reacquire_center_x', 'reacquire_center_y')]))
 
 
 def target_outline(target):
@@ -256,46 +257,20 @@ def mark_position(axis, point, label, *, marker, color, offset):
 
 
 def standard_figures(trace):
-    """Two wide PPT-ready figures; no guessed object outline/major-turn labels."""
+    """One overview: actual XY at left, force and velocity at right."""
+    if trace is not None:
+        from visualization.contact_report import overview
+        return [('experiment_overview.png', overview(trace))]
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
-    result = []
-    for local, filename in ((False, 'trajectory_overview.png'), (True, 'trajectory_local_zoom.png')):
-        figure = Figure(figsize=(16, 9), facecolor='white')
-        FigureCanvasAgg(figure)
-        axis = figure.add_axes([.075, .13, .69, .75])
-        if trace is None:
-            axis.set_title('No scan TCP samples recorded', fontsize=18)
-            axis.text(.5, .5, 'The run ended before scanning.\nNo trajectory or force data is invented.',
-                      ha='center', va='center', transform=axis.transAxes, fontsize=16)
-            axis.set_axis_off()
-            result.append((filename, figure))
-            continue
-        start = trace.first_contact_index if local and trace.first_contact_index is not None else 0
-        indices = np.arange(start, len(trace.time))
-        title = 'Experiment trajectory — P0 to final stop' if not local else 'Local trajectory — first contact to final stop'
-        if local and trace.first_contact_index is None:
-            title = 'Local trajectory — no confirmed first contact recorded'
-        bounds = trace.xy_mm[indices] if trace.target_mm is None else np.r_[trace.xy_mm[indices], trace.target_mm]
-        configure_xy(axis, bounds, title)
-        if trace.target_mm is not None:
-            axis.plot(*trace.target_mm.T, '--', color='.25', label='Known cube')
-        lines = path_lines(axis, trace, indices)
-        if not local:
-            mark_position(axis, trace.xy_mm[0], 'P0', marker='o', color='#25364a', offset=(10, 8))
-        if trace.first_contact_index is not None:
-            mark_position(axis, trace.xy_mm[trace.first_contact_index], ('Contact threshold' if trace.contact_source.startswith('threshold') else 'Contact confirmed'), marker='*',
-                          color='#9b287b', offset=(12, 9))
-        mark_position(axis, trace.xy_mm[-1] if trace.stop_position_mm is None else trace.stop_position_mm,
-                      ('Final sample' if trace.stop_position_mm is None else 'Confirmed stop'), marker='X', color='#b72a33', offset=(12, -18))
-        handles = [line for phase, line in enumerate(lines) if (trace.phase[indices] == phase).any()]
-        handles += list(axis.collections)
-        axis.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.025, 1.),
-                    frameon=False, fontsize=12, labelspacing=1.1)
-        figure.text(.075, .04, 'Recorded TCP path in Base coordinates; not a known object outline.',
-                    fontsize=11, color='#596575')
-        result.append((filename, figure))
-    return result
+    figure = Figure(figsize=(18, 10), facecolor='white')
+    FigureCanvasAgg(figure)
+    axis = figure.add_subplot(111)
+    axis.set_title('No scan TCP samples recorded', fontsize=18)
+    axis.text(.5, .5, 'The run ended before scanning.\nNo trajectory or force data is invented.',
+              ha='center', va='center', transform=axis.transAxes, fontsize=16)
+    axis.set_axis_off()
+    return [('experiment_overview.png', figure)]
 
 
 def write_launcher(run_dir, source_run_dir=None):
@@ -356,7 +331,7 @@ def generate_run_visualization(run_dir, *, force=False, output_dir=None):
         artifacts.append(output)
     if trace is not None:
         from visualization.contact_report import generate_contact_report
-        artifacts.extend(generate_contact_report(trace, output_dir))
+        artifacts.extend(generate_contact_report(trace, output_dir, include_figures=False))
         from visualization.run_html import write_html_replay
         artifacts.append(write_html_replay(trace, output_dir))
     artifacts.append(write_launcher(output_dir, run_dir if output_dir != run_dir else None))

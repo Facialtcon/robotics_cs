@@ -270,6 +270,7 @@ continuous_tracking:
   reacquire_enabled: true         # use the existing local arc after contact loss
   reacquire_radius: 0.002         # m; independent arc reference radius, no target truth
   reacquire_radii: [0.002, 0.004, 0.006] # m; successive full circles within one recovery
+  reacquire_center_offsets_deg: [0, 60, -60] # Base XY; positive rotates CCW about Base +Z
   reacquire_max_path: null         # legacy field; no local recovery path budget
   reacquire_position_gain: 5.0     # 1/s; actual TCP to position reference feedback
   reacquire_reference_freeze_error: 0.0001 # m; freeze reference progression above this

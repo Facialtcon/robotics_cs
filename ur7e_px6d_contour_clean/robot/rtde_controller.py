@@ -18,6 +18,14 @@ class SearchLimitReached(RobotError):
     """No motion sent: a fresh execution read exhausted search clearance."""
 
 
+class StopPendingStandstill(RobotError):
+    """No motion sent: keep observing the existing, bounded stop request."""
+
+    def __init__(self, observation=None):
+        self.observation = observation
+        super().__init__('stop request pending measured standstill')
+
+
 # Engineering thresholds, not an RTDE noise model. Keep the original 20%
 # envelope; only its small overrun band gets two nominal 100 Hz cycles.
 CONTINUOUS_TRIP_FACTOR = 1.2
@@ -527,7 +535,7 @@ class URRTDEController:
         self._check_connected()
         state = self.read_state()
         # A fresh read may revoke a previous standstill observation.
-        self._check_motion_authorized()
+        self._check_motion_authorized(observation=state)
         assert self.guard is not None
         direction = self.guard.check_velocity(direction_xy, float(speed))
         predicted = state.pose[:2]+direction*speed*duration
@@ -679,13 +687,17 @@ class URRTDEController:
                     stopL='void/None; asynchronous=True requests braking without waiting for standstill',
                     watchdog='setWatchdog/kickWatchdog bool; default action shuts down control')
 
-    def _check_motion_authorized(self):
+    @property
+    def stop_pending(self):
+        return self._stop_pending
+
+    def _check_motion_authorized(self, *, observation=None):
         if self.control is None:
             raise RobotError('motion requires confirmed Control activation')
         if self.motion_fault:
             raise RobotError(f'motion fault latched: {self.motion_fault}')
         if self._stop_pending and not self.standstill_confirmed:
-            raise RobotError('stop request pending measured standstill')
+            raise StopPendingStandstill(observation)
         if self.config.get('continuous_require_watchdog'):
             self._check_watchdog_health()
 

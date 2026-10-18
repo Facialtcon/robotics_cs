@@ -31,7 +31,8 @@ def read_run(run_dir, *, require_continuous=True):
     for key in ('direction_valid', 'command_vx', 'command_vy', 'reacquire_origin_x', 'reacquire_origin_y',
                 'reacquire_reference_x', 'reacquire_reference_y', 'reacquire_normal_x', 'reacquire_normal_y',
                 'reacquire_tangent_x', 'reacquire_tangent_y', 'reacquire_heading_deg', 'reacquire_round',
-                'reacquire_circle', 'reacquire_radius_m', 'reacquire_actual_heading_deg'):
+                'reacquire_circle', 'reacquire_radius_m', 'reacquire_actual_heading_deg',
+                'reacquire_center_offset_deg', 'reacquire_center_x', 'reacquire_center_y'):
         data[key] = np.array([float(row.get(key) or ('0' if key=='direction_valid' else 'nan')) for row in rows])
     for key in ('tcp_vx','tcp_vy','tcp_vz','v_t','v_n','stop_requested','raw_fx','raw_fy',
                 'filtered_force_base_fx','filtered_force_base_fy',
@@ -95,7 +96,10 @@ def recovery_circles(data, window):
     result = []
     for number in numbers:
         indices = np.flatnonzero(selected & (circles == number))
+        offsets = data.get('reacquire_center_offset_deg', np.zeros(len(times)))
+        offset = float(offsets[indices[0]])
         result.append(dict(window, circle=int(number),
+            center_offset_deg=offset if np.isfinite(offset) else 0.,
             radius_m=float(data['reacquire_radius_m'][indices[0]]),
             start_time=float(times[indices[0]]), end_time=float(times[indices[-1]])))
     return result
@@ -119,6 +123,10 @@ def recovery_reference(data, config, window):
             and abs(normal @ tangent) < 1e-5):
         return None
     from policy.continuous_tracking import arc_reference
+    offset = float(window.get('center_offset_deg', 0.))
+    angle = np.deg2rad(offset)
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    normal, tangent = rotation @ normal, rotation @ tangent
     theta = np.linspace(0, np.deg2rad(float(c['reacquire_max_angle_deg'])), 181)[:, None]
     return arc_reference(origin, normal, tangent, float(window.get('radius_m', c['reacquire_radius'])), theta)*1000
 
@@ -225,7 +233,7 @@ def contact_trajectory_figures(data, config, events):
         paths(zoom_axis, mask)
         for circle, reference in references:
             if reference is not None:
-                label = (f"第 {circle['circle']} 圈参考（{circle['radius_m']*1000:g} mm）" if 'circle' in circle else
+                label = (f"第 {circle['circle']} 圈参考（{circle['radius_m']*1000:g} mm，{circle['center_offset_deg']:+g}°）" if 'circle' in circle else
                          f"保存配置参考圆弧（{config['continuous_tracking']['reacquire_max_angle_deg']:g}°）")
                 zoom_axis.plot(*reference.T, '--', color=colors((number+circle.get('circle', 1)-1) % 10),
                                lw=1, label=label)

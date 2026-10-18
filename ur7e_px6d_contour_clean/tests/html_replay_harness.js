@@ -49,6 +49,8 @@ if(circleIds.length>1){
     const row=data.samples.find(r=>r[6]===2&&r[10]===n);
     api.seek(row[0]);api.render();
     check(elements['xy-view'].textContent.includes('第 '+n+' 圈'),'circle radius and actual angle readout '+n);
+    if(Number.isFinite(row[13]))check(elements['xy-view'].textContent.includes('圆心偏转 '+row[13].toFixed(1)+'°'),
+      'recorded centre offset readout '+n);
   }
   api.seek(0);api.render();
   print(JSON.stringify({result:'PASS',tests,drawingCalls}));
@@ -70,7 +72,12 @@ if(data.fixed_target&&data.target){
   api.seek(0);api.render();
 }
 check(api.eventVisibility.kinds.size===2&&api.eventVisibility.kinds.has('lost')&&api.eventVisibility.kinds.has('recovered'),'default event categories');
-check(api.cache.force.labels.every(v=>['CONTACT_LOST','REACQUIRED'].includes(v.event.kind)),'defaults applied to graph labels');
+check(api.cache.force.labels.every(v=>['CONTACT_LOST','LOCAL_REACQUIRE','REACQUIRED'].includes(v.event.kind)),'defaults applied to graph labels');
+const localRecovery=data.events.find(e=>e.kind==='LOCAL_REACQUIRE');
+if(localRecovery){
+  check(api.eventEnabled(localRecovery),'LOCAL_REACQUIRE enabled by default');
+  check(elements['xy-events'].children.some(b=>b.textContent.includes('开始局部恢复')),'LOCAL_REACQUIRE jump event retained');
+}
 const eventButtons=elements['xy-events'].children.length;
 elements['events-all'].onclick();
 check(api.eventVisibility.kinds.size===6&&api.cache.force.labels.length>0,'show all redraws immediately');
@@ -86,7 +93,7 @@ check(api.cache.force.labels.length===0&&api.cache.velocity.labels.length===0&&d
 check(copy(api.data)===originalData&&copy(api.views)===originalViews&&api.time===0,'event visibility preserves samples views and clock');
 check(elements['xy-events'].children.length===eventButtons,'hidden events remain in jump list');
 elements['xy-events'].children[0].onclick();api.render();
-check(api.time===data.events.filter(e=>['FIRST_THRESHOLD_STOP_REQUEST','FIRST_CONTACT','TRACKING_ENTERED','CONTACT_LOST','REACQUIRED','EXECUTION_STOP_CONFIRMED','USER_STOP','BUDGET_STOP'].includes(e.kind)).sort((a,b)=>a.time-b.time)[0].time,'hidden event still seeks');
+check(api.time===data.events.filter(e=>['FIRST_THRESHOLD_STOP_REQUEST','FIRST_CONTACT','TRACKING_ENTERED','CONTACT_LOST','LOCAL_REACQUIRE','REACQUIRED','EXECUTION_STOP_CONFIRMED','USER_STOP','BUDGET_STOP'].includes(e.kind)).sort((a,b)=>a.time-b.time)[0].time,'hidden event still seeks');
 elements['events-all'].onclick();
 check(api.cache.force.labels.length>0&&api.cache.velocity.labels.length>0,'events return after hiding');
 const kindInputs=elements['event-kinds'].children.map(v=>v.children[0]);

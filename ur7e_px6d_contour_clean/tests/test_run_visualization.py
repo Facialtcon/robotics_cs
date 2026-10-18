@@ -101,23 +101,29 @@ def test_standard_geometry_legends_and_contact_start(tmp_path, config, contact):
     directory, _ = recorded_run(tmp_path, config, contact=contact)
     trace = load_trace(directory)
     figures = standard_figures(trace)
-    assert [name for name, _ in figures] == ['trajectory_overview.png', 'trajectory_local_zoom.png']
+    assert [name for name, _ in figures] == ['experiment_overview.png']
     for local, (_, figure) in enumerate(figures):
         figure.canvas.draw()
         axis = figure.axes[0]
         extent = axis.get_window_extent()
-        assert extent.width/extent.height > 1.5
+        assert len(figure.axes) == 3
+        assert figure.axes[1].get_position().x0 > axis.get_position().x1
+        assert figure.axes[1].get_position().y0 > figure.axes[2].get_position().y0
         transform = axis.transData
         origin, x, y = transform.transform([[0, 0], [1, 0], [0, 1]])
         assert np.linalg.norm(x-origin) == pytest.approx(np.linalg.norm(y-origin))
         legend = axis.get_legend()
         assert legend.get_window_extent().x0 > extent.x1
         names = [label.get_text() for label in legend.get_texts()]
-        assert names.count('Lost-edge recovery') <= 1 and len(names) <= 6
-        start = trace.first_contact_index if local and contact else 0
+        assert names.count('Lost-edge recovery') <= 1 and len(names) <= 7
+        start = 0
         assert len(axis.lines[0].get_xdata()) == len(trace.time)-start
         np.testing.assert_allclose(axis.lines[0].get_xdata()[0], trace.xy_mm[start, 0])
         assert not axis.get_autoscale_on()
+        force_labels = [line.get_label() for line in figure.axes[1].lines]
+        assert {'Fx', 'Fy', 'Fxy', 'Contact 1 N', 'Lost 0.5 N'} <= set(force_labels)
+        speed_labels = [line.get_label() for line in figure.axes[2].lines]
+        assert {'Actual vx', 'Actual vy', 'Actual XY', 'Sent vx', 'Sent vy', 'Sent XY'} <= set(speed_labels)
 
 
 def test_display_thinning_retains_every_state_transition_and_event(tmp_path, config):
@@ -185,8 +191,7 @@ def test_outputs_and_launcher_leave_source_logs_unchanged(tmp_path, config):
     directory, _ = recorded_run(tmp_path, config)
     originals = {path.name: path.read_bytes() for path in directory.iterdir()}
     artifacts = generate_run_visualization(directory)
-    assert [p.name for p in artifacts] == ['trajectory_overview.png', 'trajectory_local_zoom.png',
-        'experiment_overview.png', 'first_contact_zoom.png', 'contact_analysis.json', '实验回放.html', 'play_visualization.sh',
+    assert [p.name for p in artifacts] == ['experiment_overview.png', 'contact_analysis.json', '实验回放.html', 'play_visualization.sh',
         '打开实验回放.desktop']
     assert all(p.stat().st_size > 100 for p in artifacts)
     for name, content in originals.items():
@@ -203,6 +208,7 @@ def test_outputs_and_launcher_leave_source_logs_unchanged(tmp_path, config):
     assert all(row[1:] == [None, None, None] for row in embedded['actual'])
     assert '<script src=' not in page and 'fetch(' not in page
     assert not list(directory.glob('*.gif')) and not list(directory.glob('*.mp4'))
+    assert len(list(directory.glob('*.png'))) == 1 and len(list(directory.glob('*.html'))) == 1
 
 
 def test_new_completion_hook_runs_only_after_device_cleanup(config, monkeypatch, tmp_path):
@@ -222,6 +228,15 @@ def test_new_completion_hook_runs_only_after_device_cleanup(config, monkeypatch,
     assert len(paths) == 1 and paths[0].parent == tmp_path/'real/continuous'
 
 
+def test_regenerating_summary_preserves_existing_historical_png(tmp_path, config):
+    directory, _ = recorded_run(tmp_path, config)
+    historical = directory/'old_contact_lost_zoom.png'
+    historical.write_bytes(b'original historical image')
+    artifacts = generate_run_visualization(directory)
+    assert [p.name for p in artifacts if p.suffix == '.png'] == ['experiment_overview.png']
+    assert historical.read_bytes() == b'original historical image'
+
+
 @pytest.mark.parametrize('empty', [False, True])
 def test_aborted_startup_has_launcher_and_no_invented_scan(tmp_path, config, empty):
     directory, rows = recorded_run(tmp_path, config)
@@ -230,7 +245,7 @@ def test_aborted_startup_has_launcher_and_no_invented_scan(tmp_path, config, emp
         if not empty:
             writer.writerow(rows[0])  # Startup return is not a P0 scan.
     artifacts = generate_run_visualization(directory)
-    assert len(artifacts) == 4
+    assert len(artifacts) == 3
     with pytest.raises(ValueError, match='No scan TCP|no control samples'):
         load_trace(directory)
 

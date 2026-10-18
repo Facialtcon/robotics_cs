@@ -9,6 +9,7 @@ EVENT_STYLE = {
     'FIRST_CONTACT': ('Contact confirmed', '#79558f', '*'),
     'TRACKING_ENTERED': ('Tracking entered', '#16836b', 's'),
     'CONTACT_LOST': ('Contact lost', '#e68621', 'v'),
+    'LOCAL_REACQUIRE': ('Local reacquire started', '#8b5cf6', 's'),
     'REACQUIRED': ('Contact restored', '#1964b1', '^'),
     'EXECUTION_STOP_CONFIRMED': ('Stop confirmed', '#b72a33', 'X'),
     'USER_STOP': ('Stop requested', '#b72a33', 'X'),
@@ -221,15 +222,15 @@ def overview(trace, *, zoom=None):
     return fig
 
 
-def generate_contact_report(trace, output_dir):
+def generate_contact_report(trace, output_dir, *, include_figures=True):
     output = Path(output_dir); output.mkdir(parents=True, exist_ok=True)
     artifacts = []
-    figures = [('experiment_overview.png', overview(trace))]
+    figures = [('experiment_overview.png', overview(trace))] if include_figures else []
     contact = collision_details(trace)
-    if 'time_sec' in contact:
+    if include_figures and 'time_sec' in contact:
         t = contact['time_sec']
         figures.append(('first_contact_zoom.png', overview(trace, zoom=(max(0.,t-1.), min(trace.duration,t+1.)))))
-    for number, event in enumerate((e for e in trace.events if e['kind'] == 'CONTACT_LOST'), 1):
+    for number, event in enumerate((e for e in trace.events if include_figures and e['kind'] == 'CONTACT_LOST'), 1):
         figures.append((f'contact_lost_{number:02d}_zoom.png', overview(trace,
             zoom=(max(0.,event['time']-1.), min(trace.duration,event['time']+2.)))))
     for name, figure in figures:

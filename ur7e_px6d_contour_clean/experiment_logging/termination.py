@@ -372,6 +372,8 @@ class TerminationRecorder:
                 info = dict(round=round_number, active=active, caused_stop=stopped_here,
                     circle=getattr(policy, 'reacquire_circle', None),
                     radius_m=getattr(policy, 'reacquire_radius', c['reacquire_radius']),
+                    center_offset_deg=getattr(policy, 'reacquire_center_offset_deg', None),
+                    center_xy=getattr(policy, 'reacquire_center', None),
                     completed_circles=getattr(policy, 'reacquire_circle_history', []),
                     origin_pose=origin, normal=getattr(policy, '_memory_normal', None),
                     tangent=getattr(policy, '_memory_tangent', None),
@@ -521,6 +523,7 @@ class TerminationRecorder:
                     f"局部找回起点（Base）：{info['origin_pose']}",
                     f"保存的补压方向：{info['normal']}；切向：{info['tangent']}",
                     f"当前搜索圈：{info['circle']}；半径：{info['radius_m']} m；实际完成角度：{info['actual_angle_deg']} deg",
+                    f"当前圆心（Base XY）：{info['center_xy']} m；圆心偏转：{info['center_offset_deg']} deg（Base +Z 逆时针为正）",
                     f"角度：{info['angle_deg']} / {info['max_angle_deg']} deg；实际路程：{info['actual_path_m']} m；耗时：{info['elapsed_sec']} s",
                     f"当前 Fxy：{info['current_fxy_N']} N；接触确认阈值：{info['contact_threshold_N']} N",
                     f"找回停止原因：{info['stop_reason']} / {info['stop_detail']}"])

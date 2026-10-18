@@ -23,7 +23,7 @@ def tick(policy, robot, magnitude):
     return command, wrench
 
 
-def recovering(config, *, real=True, hand='CLOCKWISE', multiplier=1., max_angle=90.):
+def recovering(config, *, real=True, hand='CLOCKWISE', multiplier=1., max_angle=90., origin=(0., 0.)):
     c = deepcopy(config)
     c['continuous_real_execution'] = real
     c['continuous_tracking'].update(force_direction_sign=-1 if real else 1,
@@ -31,14 +31,15 @@ def recovering(config, *, real=True, hand='CLOCKWISE', multiplier=1., max_angle=
     if max_angle < 360.:
         # Legacy partial-arc fixtures exercise their original angle limit.
         c['continuous_tracking']['reacquire_radii'] = [c['continuous_tracking']['reacquire_radius']]
+        c['continuous_tracking']['reacquire_center_offsets_deg'] = [0.]
     c['continuous_tracking']['tangential_speed'] *= multiplier
     c['policy'].update(follow_hand=hand, search_direction_xy=[0., -1.])
     policy = ContinuousTrackingPolicy(c)
     for i in range(100):
-        tick(policy, observation(i*.01, (0., 0.)), 1.5)
+        tick(policy, observation(i*.01, origin), 1.5)
     assert policy.state == State.CONTINUOUS_TRACKING
     for i in range(100, 140):
-        tick(policy, observation(i*.01, (0., 0.)), 0.)
+        tick(policy, observation(i*.01, origin), 0.)
         if policy.state == State.LOCAL_REACQUIRE:
             break
     assert policy.state == State.LOCAL_REACQUIRE and policy._recovery_count == 1
@@ -345,6 +346,8 @@ def test_actual_full_circle_stops_once_without_old_local_budgets(config, real, h
     assert payload['local_reacquire']['circle'] == 3
     assert payload['local_reacquire']['radius_m'] == .006
     assert len(payload['local_reacquire']['completed_circles']) == 3
+    assert payload['local_reacquire']['center_offset_deg'] == -60.
+    np.testing.assert_allclose(payload['local_reacquire']['center_xy'], policy.reacquire_center)
 
 
 @pytest.mark.parametrize('real', [False, True])
@@ -420,6 +423,9 @@ def test_full_circle_csv_and_html_preserve_actual_tcp_instead_of_reference(confi
     assert any(e['kind'] == 'RECOVERY_FULL_CIRCLE_NO_CONTACT' for e in payload['events'])
     assert set(row[10] for row in payload['samples']) == {1, 2, 3}
     assert set(row[11] for row in payload['samples']) == {.002, .004, .006}
+    assert set(row[13] for row in payload['samples']) == {0., 60., -60.}
+    np.testing.assert_allclose(np.asarray(payload['samples'])[:, 14:16].astype(float),
+        [[float(row['reacquire_center_x']), float(row['reacquire_center_y'])] for row in rows])
     np.testing.assert_allclose([row[12] for row in payload['samples']],
         [float(row['reacquire_actual_heading_deg']) for row in rows])
     from tools.visualize_continuous_run import read_run, recovery_windows, recovery_circles, contact_trajectory_figures
@@ -429,6 +435,14 @@ def test_full_circle_csv_and_html_preserve_actual_tcp_instead_of_reference(confi
     circles = recovery_circles(data, window)
     assert [c['circle'] for c in circles] == [1, 2, 3]
     assert [c['radius_m'] for c in circles] == [.002, .004, .006]
+    assert [c['center_offset_deg'] for c in circles] == [0., 60., -60.]
+    from tools.visualize_continuous_run import recovery_reference
+    for circle in circles:
+        reference = recovery_reference(data, saved, circle)/1000.
+        index = np.flatnonzero(data['reacquire_circle'] == circle['circle'])[0]
+        center = np.array([data['reacquire_center_x'][index], data['reacquire_center_y'][index]])
+        np.testing.assert_allclose(reference[[0, -1]], np.tile(policy.reacquire_origin[:2], (2, 1)), atol=1e-14)
+        np.testing.assert_allclose(np.linalg.norm(reference-center, axis=1), circle['radius_m'], atol=1e-14)
     figures = contact_trajectory_figures(data, saved, events)
     try:
         collections = [c for c in figures[-1][1].axes[0].collections if '圈（' in c.get_label()]

@@ -18,7 +18,7 @@ from experiment_logging.continuous_writer import ContinuousLogWriter
 from experiment_logging.contact_capture import drain_commands, stationary_preroll, simulation_preroll
 from experiment_logging.termination import TerminationReason, TerminationRecorder
 from policy.continuous_tracking import ContinuousTrackingPolicy, EXTRA_SAMPLE_FIELDS, State
-from robot.rtde_controller import URRTDEController, RobotError, SearchLimitReached, SPEED_GUARD_FIELDS, check_continuous_xy
+from robot.rtde_controller import URRTDEController, RobotError, SearchLimitReached, StopPendingStandstill, SPEED_GUARD_FIELDS, check_continuous_xy
 from sensor.force_preprocess import WrenchPreprocessor
 from safety.force_guard import continuous_force_reason, raw_safety_reason
 from sensor.px6d_reader import PX6DError, PX6DReader
@@ -415,7 +415,8 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                             raise RobotError(force_error)
                     unload_was_active = policy.unload_active
                     command = policy.update(now, raw, processed, robot,
-                                            execution_settled=controller.standstill_confirmed)
+                                            execution_settled=controller.standstill_confirmed,
+                                            execution_stop_pending=controller.stop_pending)
                     if command.move and policy.state == State.TARGET_SEARCH:
                         predicted = robot.pose[:2] + command.direction_xy*command.speed*dt
                         try:
@@ -464,6 +465,15 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                     if command.move:
                         try:
                             controller.command_planar_velocity(command.direction_xy, command.speed, dt)
+                        except StopPendingStandstill as exc:
+                            if policy.state != State.LOCAL_REACQUIRE:
+                                raise
+                            # No SDK motion was sent. The newer TCP read revoked
+                            # the earlier stop belief; keep the same stop request
+                            # and deadline, and undo only this unsent arc step.
+                            command = policy.hold_recovery_for_stop(now, exc.observation or robot,
+                                                                    restore_command=True)
+                            controller.request_stop(nonblocking=True)
                         except SearchLimitReached as exc:
                             # The execution read is newer than the policy sample.
                             # Exhaustion between those reads is still a normal stop.

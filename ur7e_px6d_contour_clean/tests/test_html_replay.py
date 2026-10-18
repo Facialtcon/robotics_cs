@@ -92,6 +92,7 @@ def test_deadband_respects_recorded_force_reference_changes(trace):
 
 @pytest.mark.skipif(shutil.which('gjs') is None, reason='optional system JavaScript engine unavailable')
 def test_real_replay_javascript_controls_clock_and_viewports(trace):
+    trace.events.append(dict(time=4.05, index=405, kind='LOCAL_REACQUIRE', xy_mm=trace.xy_mm[405].tolist()))
     page = write_html_replay(trace, trace.run_dir)
     result = subprocess.run(['gjs', str(Path(__file__).with_name('html_replay_harness.js')), str(page)],
                             capture_output=True, text=True, timeout=20)

@@ -21,7 +21,7 @@ const finite = v => typeof v === 'number' && Number.isFinite(v);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const fmt = (v, n = 2) => finite(v) ? v.toFixed(n) : '未记录';
 const names = {FIRST_THRESHOLD_STOP_REQUEST:'首次接触阈值',FIRST_CONTACT:'接触确认',
-  TRACKING_ENTERED:'进入跟踪',CONTACT_LOST:'丢失接触',REACQUIRED:'恢复接触',
+  TRACKING_ENTERED:'进入跟踪',CONTACT_LOST:'丢失接触',LOCAL_REACQUIRE:'开始局部恢复',REACQUIRED:'恢复接触',
   EXECUTION_STOP_CONFIRMED:'停止确认',USER_STOP:'停止请求',BUDGET_STOP:'停止请求',
   RECOVERY_FULL_CIRCLE_NO_CONTACT:'恢复搜索无接触'};
 const eventColor = k => k === 'CONTACT_LOST' ? '#e68621' : k === 'REACQUIRED' ? '#1964b1' : '#9b287b';
@@ -34,7 +34,7 @@ const eventLabelMap=new Map(events.map(e=>{
 }));
 const eventLabel=e=>eventLabelMap.get(e)||names[e.kind];
 const eventGroups={first:['FIRST_THRESHOLD_STOP_REQUEST'],contact:['FIRST_CONTACT'],
-  tracking:['TRACKING_ENTERED'],lost:['CONTACT_LOST'],recovered:['REACQUIRED'],
+  tracking:['TRACKING_ENTERED'],lost:['CONTACT_LOST','LOCAL_REACQUIRE'],recovered:['REACQUIRED'],
   stop:['EXECUTION_STOP_CONFIRMED','USER_STOP','BUDGET_STOP','RECOVERY_FULL_CIRCLE_NO_CONTACT']};
 const eventVisibility={kinds:new Set(['lost','recovered']),text:true,lines:true,markers:true};
 const eventEnabled=e=>Object.entries(eventGroups).some(([key,kinds])=>eventVisibility.kinds.has(key)&&kinds.includes(e.kind));
@@ -160,7 +160,7 @@ function legend(id) {
 }
 legend('force');legend('velocity');
 eventOptions('event-kinds',[['first','首次接触'],['contact','接触确认'],['tracking','进入跟踪'],
-  ['lost','丢失接触'],['recovered','恢复接触'],['stop','停止事件']],true);
+  ['lost','丢失接触／开始恢复'],['recovered','恢复接触'],['stop','停止事件']],true);
 eventOptions('event-layers',[['text','事件文字'],['lines','事件竖线'],['markers','TCP轨迹上的事件标记']],false);
 if(D.single_point){
   $('edge-options').hidden=false;
@@ -462,6 +462,8 @@ function drawXY(row,actual) {
   $('xy-view').textContent='视野 '+fmt(g.xlim[0],1)+'–'+fmt(g.xlim[1],1)+' mm × '+fmt(g.ylim[0],1)+'–'+fmt(g.ylim[1],1)+' mm · X/Y 使用相同像素比例';
   if(row[6]===2&&finite(row[10])&&row[10]>0)$('xy-view').textContent+=
     ' · 第 '+row[9]+' 次恢复 / 第 '+row[10]+' 圈 · 半径 '+fmt(row[11]*1000,1)+' mm · 实际角度 '+fmt(row[12],1)+'°';
+  if(row[6]===2&&finite(row[13])&&finite(row[14])&&finite(row[15]))$('xy-view').textContent+=
+    ' · 圆心偏转 '+fmt(row[13],1)+'° · 圆心 Base XY ('+fmt(row[14]*1000,2)+', '+fmt(row[15]*1000,2)+') mm';
 }
 function drawDirection(row,actual) {
   const {c,w,h}=surface('direction'),g=spatialGeometry('direction',w,h),mode=$('arrows').value;
