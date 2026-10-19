@@ -77,10 +77,10 @@ function extents(values, minimum=.02) {
   const pad=Math.max((hi-lo)*.08,minimum);
   return [lo-pad,hi+pad];
 }
-function niceTicks(lo,hi,pixels,minSpacing=72) {
+function niceTicks(lo,hi,pixels,minSpacing=72,step=null) {
   const count=Math.max(2,Math.ceil(pixels/minSpacing));
   const raw=(hi-lo)/count,base=Math.pow(10,Math.floor(Math.log10(Math.max(raw,1e-12))));
-  const step=([1,2,5,10].find(v=>v*base>=raw-1e-12)||10)*base;
+  if(step===null)step=([1,2,5,10].find(v=>v*base>=raw-1e-12)||10)*base;
   const values=[];
   for(let i=Math.ceil((lo-1e-10*step)/step);i<=Math.floor((hi+1e-10*step)/step);i++){
     values.push(Math.abs(i*step)<step*1e-8?0:i*step);
@@ -226,7 +226,7 @@ function dot(c,p,color,r=4) {
 }
 function clip(c,g) {c.save();c.beginPath();c.rect(g.l,g.t,g.w-g.l-g.r,g.h-g.t-g.b);c.clip();}
 function axes(c,g,xlim,ylim,xLabel,yLabel) {
-  const xs=niceTicks(...xlim,g.w-g.l-g.r,86),ys=niceTicks(...ylim,g.h-g.t-g.b,28);
+  const xs=g.grid?.x||niceTicks(...xlim,g.w-g.l-g.r,86),ys=g.grid?.y||niceTicks(...ylim,g.h-g.t-g.b,28);
   c.fillStyle='#64748b';
   for(const v of xs.values){
     line(c,[[g.x(v),g.t],[g.x(v),g.h-g.b]],'#e3e9f0');
@@ -359,6 +359,11 @@ function spatialGeometry(id,w,h) {
   g.y=y=>g.t+(h-g.t-g.b)/2-(y-v.cy)*g.scale;
   g.xlim=[v.cx-(w-g.l-g.r)/(2*g.scale),v.cx+(w-g.l-g.r)/(2*g.scale)];
   g.ylim=[v.cy-(h-g.t-g.b)/(2*g.scale),v.cy+(h-g.t-g.b)/(2*g.scale)];
+  if(id==='xy'){
+    // One physical interval for both axes, including after zoom/pan/resize.
+    const step=niceTicks(0,v.span,Math.min(w-g.l-g.r,h-g.t-g.b),86).step;
+    g.grid={x:niceTicks(...g.xlim,w-g.l-g.r,86,step),y:niceTicks(...g.ylim,h-g.t-g.b,86,step)};
+  }
   geometry[id]=g;return g;
 }
 function markerLabels(c,g,markers) {

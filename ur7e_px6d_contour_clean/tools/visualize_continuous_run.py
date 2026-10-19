@@ -136,7 +136,7 @@ def contact_trajectory_figures(data, config, events):
     import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
     from matplotlib.patches import Rectangle
-    from matplotlib.ticker import MaxNLocator
+    from visualization.xy_grid import square_xy_ticks
     from simulation.continuous_view import CJK_FONT
     from experiment_logging.termination import continuous_label
 
@@ -166,6 +166,7 @@ def contact_trajectory_figures(data, config, events):
         axis.title.set_fontfamily(CJK_FONT)
         axis.set_aspect('equal', adjustable='box')
         axis.ticklabel_format(style='plain', useOffset=False)
+        square_xy_ticks(axis)
         axis.grid(alpha=.25)
         return fig, axis
 
@@ -246,7 +247,6 @@ def contact_trajectory_figures(data, config, events):
         if not window['success']:
             mark(zoom_axis, final, stop_label if stop_label != 'STOP' else '最终停止（停止原因见运行终止记录）', 'X', 'black')
         zoom_axis.set_xlim(low[0], high[0]);zoom_axis.set_ylim(low[1], high[1])
-        zoom_axis.xaxis.set_major_locator(MaxNLocator(4))
         zoom_axis.legend(prop={'family': CJK_FONT, 'size': 7}, loc='upper center', bbox_to_anchor=(.5, -.18))
         zoom.tight_layout()
         artifacts.append((f'continuous_reacquire_{number}.png', zoom))
@@ -296,6 +296,7 @@ def frame_indices(times, fps, max_frames=1200):
 
 
 def make_figure(data, config, events, *, local_xy=False, view=None, components=False, debug=False, true_tangent=False):
+    from visualization.xy_grid import square_xy_ticks
     import matplotlib.pyplot as plt
     from matplotlib.patches import Polygon, Rectangle, Circle
     from simulation.continuous_view import (XYViewport, VectorDisplay, force_demonstration, CJK_FONT,
@@ -309,6 +310,7 @@ def make_figure(data, config, events, *, local_xy=False, view=None, components=F
     xy=fig.add_subplot(grid[:,0]);force=fig.add_subplot(grid[0,1]);velocity=fig.add_subplot(grid[1,1])
     fig.subplots_adjust(left=.055,right=.97,bottom=.15,top=.88)
     xy.set_aspect('equal',adjustable='box')
+    square_xy_ticks(xy)
     xy.set(xlabel='Base X [mm]',ylabel='Base Y [mm]')
     scene=config.get('continuous_simulation');outline=None
     frames = data.get('processed_force_frame', [config.get('force_display', {}).get('frame') or

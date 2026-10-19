@@ -4,7 +4,7 @@ const read=path=>ByteArray.toString(Gio.File.new_for_path(path).load_contents(nu
 const page=read(ARGV[0]);
 const data=JSON.parse(page.match(/<script type="application\/json" id="replay-data">([\s\S]*?)<\/script>/)[1]);
 const script=page.match(/<script>([\s\S]*?)<\/script>/)[1];
-const elements={};let now=1000,callback,drawingCalls=0;
+const elements={},windowListeners={},sizes={};let now=1000,callback,drawingCalls=0;
 const context=new Proxy({measureText:v=>({width:String(v).length*8})},{
   get:(o,k)=>k in o?o[k]:(...args)=>{
     drawingCalls++;
@@ -25,15 +25,15 @@ function element(id){
     getContext:()=>context,
     setPointerCapture:k=>captured.add(k),hasPointerCapture:k=>captured.has(k),releasePointerCapture:k=>captured.delete(k)};
   Object.defineProperties(e,{
-    clientWidth:{get:()=>elements['panel-'+id]?.classList.contains('expanded')?1300:700},
-    clientHeight:{get:()=>elements['panel-'+id]?.classList.contains('expanded')?800:id==='xy'?340:235}
+    clientWidth:{get:()=>sizes[id]?.[0]||(elements['panel-'+id]?.classList.contains('expanded')?1300:700)},
+    clientHeight:{get:()=>sizes[id]?.[1]||(elements['panel-'+id]?.classList.contains('expanded')?800:id==='xy'?340:235)}
   });
   e.getBoundingClientRect=()=>({left:0,top:0,width:e.clientWidth,height:e.clientHeight});
   return e;
 }
 const document={getElementById:id=>elements[id]||(elements[id]=element(id)),
   createElement:id=>element(id),createTextNode:text=>({textContent:text}),addEventListener(){}};
-const window={devicePixelRatio:1,innerWidth:1600,innerHeight:1100,addEventListener(){}};
+const window={devicePixelRatio:1,innerWidth:1600,innerHeight:1100,addEventListener(k,fn){windowListeners[k]=fn;}};
 new Function('document','window','requestAnimationFrame','performance',script)(
   document,window,cb=>callback=cb,{now:()=>now});
 const api=window.experimentReplay,tests=[];
@@ -42,6 +42,44 @@ const copy=v=>JSON.stringify(v);
 const wheel=(id,dy,shiftKey=false)=>api.wheelView(id,{clientX:350,clientY:110,deltaY:dy,shiftKey,preventDefault(){}});
 check(api.rate===.25,'default speed');
 check(data.samples.length===data.sample_count,'every raw sample available');
+const gridViews=copy(api.views),gridData=copy(api.data);
+function checkSquareGrid(name){
+  api.render();
+  const g=api.geometry.xy,{x,y}=g.grid;
+  check(x.step===y.step,name+' common physical tick interval');
+  check(Math.abs(g.x(x.step)-g.x(0)+g.y(y.step)-g.y(0))<1e-7,name+' square pixels');
+  for(const ticks of [x,y]){
+    check(ticks.values.length>=2&&ticks.values.every((v,i,a)=>
+      Math.abs(v/ticks.step-Math.round(v/ticks.step))<1e-7&&(!i||Math.abs(v-a[i-1]-ticks.step)<ticks.step*1e-7)),
+      name+' ticks on coordinate grid');
+  }
+}
+checkSquareGrid('initial');
+for(const delta of [-400,-400,-400,400,400,400,400,400,400]){
+  wheel('xy',delta);checkSquareGrid('wheel '+delta);
+}
+for(const span of [.001,.02,1,1e4,1e7]){
+  api.views.xy.span=span;checkSquareGrid('zoom span '+span);
+}
+elements['xy-reset'].onclick();
+elements.xy.fire('pointerdown',{clientX:350,clientY:120,button:0,pointerId:2});
+elements.xy.fire('pointermove',{clientX:421,clientY:167,pointerId:2});
+elements.xy.fire('pointerup',{clientX:421,clientY:167,pointerId:2});
+checkSquareGrid('XY pan');
+for(const button of ['xy-full','xy-contact','xy-expand','xy-reset','xy-expand']){
+  elements[button].onclick();checkSquareGrid(button);
+}
+for(const size of [[440,760],[1500,300],[700,340]]){
+  sizes.xy=size;windowListeners.resize();checkSquareGrid('resize '+size);
+}
+window.devicePixelRatio=2;windowListeners.resize();checkSquareGrid('high DPI');
+window.devicePixelRatio=1;
+delete sizes.xy;
+api.views.xy=JSON.parse(gridViews).xy;api.render();
+check(copy(api.views)===gridViews&&copy(api.data)===gridData,'grid interactions preserve data and other graphs');
+if(ARGV[1]==='--grid-only'){
+  print(JSON.stringify({result:'PASS',tests,drawingCalls}));imports.system.exit(0);
+}
 const circleIds=[...new Set(data.samples.filter(r=>r[6]===2&&r[10]>0).map(r=>r[10]))];
 if(circleIds.length>1){
   check(circleIds.every(n=>api.cache.xy.path.some(p=>p.phase===n+1)),'each recovery circle has a separate trajectory color');

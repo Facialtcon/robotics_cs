@@ -112,6 +112,11 @@ def test_standard_geometry_legends_and_contact_start(tmp_path, config, contact):
         transform = axis.transData
         origin, x, y = transform.transform([[0, 0], [1, 0], [0, 1]])
         assert np.linalg.norm(x-origin) == pytest.approx(np.linalg.norm(y-origin))
+        x_step = np.diff(axis.get_xticks())
+        y_step = np.diff(axis.get_yticks())
+        assert x_step.size and y_step.size
+        np.testing.assert_allclose(x_step, x_step[0])
+        np.testing.assert_allclose(y_step, x_step[0])
         legend = axis.get_legend()
         assert legend.get_window_extent().x0 > extent.x1
         names = [label.get_text() for label in legend.get_texts()]
@@ -124,6 +129,36 @@ def test_standard_geometry_legends_and_contact_start(tmp_path, config, contact):
         assert {'Fx', 'Fy', 'Fxy', 'Contact 1 N', 'Lost 0.5 N'} <= set(force_labels)
         speed_labels = [line.get_label() for line in figure.axes[2].lines]
         assert {'Actual vx', 'Actual vy', 'Actual XY', 'Sent vx', 'Sent vy', 'Sent XY'} <= set(speed_labels)
+
+
+def test_xy_grid_remains_square_after_zoom_pan_and_resize(tmp_path, config):
+    directory, _ = recorded_run(tmp_path, config)
+    _, figure = standard_figures(load_trace(directory))[0]
+    axis = figure.axes[0]
+    other_limits = [(a.get_xlim(), a.get_ylim()) for a in figure.axes[1:]]
+    points = [line.get_xydata().copy() for line in axis.lines]
+    steps = []
+    try:
+        for span, center, size in ((100., (650., 140.), (16., 8.)),
+                                   (1., (651., 139.), (16., 8.)),
+                                   (.02, (650., 140.), (8., 12.)),
+                                   (1000., (-100., -200.), (20., 6.))):
+            figure.set_size_inches(*size)
+            axis.set_xlim(center[0]-span, center[0]+span)
+            axis.set_ylim(center[1]-span/2, center[1]+span/2)
+            figure.canvas.draw()
+            dx, dy = np.diff(axis.get_xticks()), np.diff(axis.get_yticks())
+            np.testing.assert_allclose(dx, dx[0])
+            np.testing.assert_allclose(dy, dx[0])
+            steps.append(dx[0])
+            origin, x, y = axis.transData.transform([[0, 0], [dx[0], 0], [0, dy[0]]])
+            assert np.linalg.norm(x-origin) == pytest.approx(np.linalg.norm(y-origin))
+            assert [(a.get_xlim(), a.get_ylim()) for a in figure.axes[1:]] == other_limits
+            for line, original in zip(axis.lines, points):
+                np.testing.assert_array_equal(line.get_xydata(), original)
+        assert len(set(steps)) == 4  # Spacing adapts to the physical viewport.
+    finally:
+        plt.close(figure)
 
 
 def test_display_thinning_retains_every_state_transition_and_event(tmp_path, config):

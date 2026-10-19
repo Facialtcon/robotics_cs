@@ -219,6 +219,8 @@ def xy_limits(points, aspect, *, margin=.18):
 
 
 def configure_xy(axis, points, title):
+    from visualization.xy_grid import square_xy_ticks
+
     figure = axis.figure
     box = axis.get_position()
     ratio = (figure.get_figwidth()*box.width)/(figure.get_figheight()*box.height)
@@ -228,6 +230,7 @@ def configure_xy(axis, points, title):
     axis.set_aspect('equal', adjustable='box')
     axis.set_autoscale_on(False)
     axis.ticklabel_format(useOffset=False, style='plain')
+    square_xy_ticks(axis)
     axis.grid(color='#d9dfe5', alpha=.7, linewidth=.65)
     axis.tick_params(labelsize=12)
     axis.xaxis.label.set_size(14)
