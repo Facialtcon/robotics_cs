@@ -208,8 +208,9 @@ EXTRA_SAMPLE_FIELDS += ('reacquire_center_offset_deg', 'reacquire_center_x', 're
 
 
 class ContinuousTrackingPolicy:
-    def __init__(self, config):
+    def __init__(self, config, *, search_strategy=None):
         validate_config(config)
+        self.search_strategy = search_strategy
         self.c, self.p = {**UNLOAD_DEFAULTS, **config['continuous_tracking']}, dict(config['policy'])
         self.real_execution = bool(config.get('continuous_real_execution'))
         self.force_transform_status = dict(config.get('force_transform_status') or {})
@@ -975,6 +976,8 @@ class ContinuousTrackingPolicy:
                 self.request_stop(now, pose, 'maximum experiment duration reached', event='BUDGET_STOP', code=TerminationReason.STOP_TIME_LIMIT)
                 return self._command(pose)
         if self.state in (State.READY, State.TARGET_SEARCH):
+            if self.search_strategy is not None:
+                self.search_strategy.observe(self, robot)
             if self.contact_flag:
                 self.state = State.FIRST_CONTACT
                 self.first_threshold_pose = pose.copy()
@@ -987,6 +990,8 @@ class ContinuousTrackingPolicy:
             elif self.state == State.READY:
                 self.state = State.TARGET_SEARCH
                 return self._command(pose)
+            elif self.search_strategy is not None:
+                return self.search_strategy.command(self, now, robot)
             else:
                 geometry = self.search_geometry
                 origin = self._start_pose[:2] if geometry is None else np.asarray(geometry['origin_xy'])

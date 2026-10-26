@@ -115,15 +115,19 @@ def hold_startup_confirmation(config, start, controller):
         controller.kick_watchdog()
 
 
-def startup_scan(config, start, controller, reader, logger, poll, *, confirm=None, before_descent=None):
+def startup_scan(config, start, controller, reader, logger, poll, *, confirm=None, before_descent=None, via_pose=None):
     startup = {'startup': True} if config.get('continuous_real_execution') else {}
     current = controller.wait_for_standstill(**startup)
-    segments = return_trajectory(config, current.pose, start)
+    segments = return_trajectory(config, current.pose, start, via_pose=via_pose)
     away = (np.linalg.norm(current.pose[:3]-start[:3]) > startup_position_tolerance(config) or
             _orientation_distance(current.pose[3:], start[3:]) > config['safe_return']['return_orientation_tolerance'])
-    print(f'当前 TCP: {current.pose.tolist()}\n扫描 P0: {start.tolist()}')
+    label = '覆盖路线入点' if config.get('sandbox_scan_plan', {}).get('entry_kind') == 'lift_translate_descend' else '扫描 P0'
+    print(f'当前 TCP: {current.pose.tolist()}\n{label}: {start.tolist()}')
     reference_name = 'P_ref' if config.get('fixed_target_experiment') else 'P1'
-    print(f'初始方向 P0 -> {reference_name}: {config["policy"]["search_direction_xy"]}')
+    if config.get('sandbox_scan_plan'):
+        print(f'覆盖搜索初始方向（Base XY）: {config["policy"]["search_direction_xy"]}')
+    else:
+        print(f'初始方向 P0 -> {reference_name}: {config["policy"]["search_direction_xy"]}')
     print_return_plan(config, current.pose, start, segments, scan=True)
     alignment = config.get('continuous_probe_alignment')
     def tilt(pose):
@@ -162,6 +166,9 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
               '探针已脱离目标及颗粒、静止空载，基座水平，抬升后有足够旋转空间；'
               '核对路径，即将抬升、调正探针并自动返回扫描 P0（此时不采零）。' if alignment else
               '核对完整返回路径和姿态；即将自动返回扫描 P0。')
+    if via_pose is not None:
+        prompt = ('核对覆盖预览和完整进入路线；即将垂直抬升、调正探针，经标定 P0 上方平移到覆盖起点上方，'
+                  '在抬升位置采空气零偏后下降。')
     if config.get('fixed_target_experiment'):
         prompt = '机器人静止，基座水平，抬升后有足够旋转空间；即将抬升、调正探针并移至 P0 上方，采空气零偏后下降。'
     if not confirm_enter(prompt, read_line=confirm):
@@ -183,6 +190,13 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
                                  processed_force_frame=monitor.force_frame)
     controller.activate_control(confirmed=True)
     def prepared_descent(above):
+        # Outside-P0 entry crosses the sandbox only while raised. Restore the
+        # original polygon before insertion; global workspace guards always run.
+        entry_guard = controller.config.pop('sandbox_entry_xy_guard', None)
+        if entry_guard is not None:
+            controller.config.update(entry_guard)
+            from robot.rtde_controller import check_continuous_xy
+            check_continuous_xy(controller.config, above[:2])
         processor = before_descent(above)
         if processor is not None:
             monitor.use_air_compensated_wrench(processor)
@@ -191,7 +205,7 @@ def startup_scan(config, start, controller, reader, logger, poll, *, confirm=Non
             controller.enable_watchdog(config['continuous_tracking']['watchdog_frequency_hz'])
         result = SafeReturnExecutor(config, start, controller,
             force_monitor=monitor,
-            logger=logger, poll=poll).execute(before_descent=prepared_descent if before_descent is not None else None)
+            logger=logger, poll=poll, via_pose=via_pose).execute(before_descent=prepared_descent if before_descent is not None else None)
         if result.status != 'complete':
             raise RobotError(f'startup return aborted: {result.abort_reason}')
     report_alignment(controller.read_diagnostic_state())

@@ -110,7 +110,7 @@ def stop_after_exception(controller, termination):
 
 def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
         prepare_execution=None, configure_experiment=None,
-        visualize_run=None):
+        visualize_run=None, search_strategy_factory=None):
     if getattr(args, 'preview', False):
         if args.execute:
             raise ValueError('--preview and --execute are mutually exclusive')
@@ -166,7 +166,11 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
             robot_config, start = (prepare_execution or prepare_real)(config, args.config)
             geometry = config['continuous_search_geometry']
             region_name = 'workspace' if config.get('fixed_target_experiment') else 'sandbox'
-            print(f"Search geometric distance to {region_name} boundary: {geometry['geometric_distance_m']*1000:.4f} mm\n"
+            if geometry.get('kind') == 'coverage_path':
+                print(f"Coverage search path: {geometry['path_length_m']:.4f} m; "
+                      f"existing search clearance: {geometry['stopping_margin_m']*1000:.4f} mm", flush=True)
+            else:
+                print(f"Search geometric distance to {region_name} boundary: {geometry['geometric_distance_m']*1000:.4f} mm\n"
                   f"Search stopping margin: {geometry['stopping_margin_m']*1000:.4f} mm\n"
                   f"Effective TARGET_SEARCH distance: {geometry['usable_distance_m']*1000:.4f} mm", flush=True)
             if 'continuous_calibration_sources' in config:
@@ -207,7 +211,9 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                 frame=preprocessor.force_transform_status['output_frame'], force_source='processed_wrench',
                 physical_sign_confirmed=False, base_frame_confirmed=False, physical_available=False)
             print('Force transform: '+json.dumps(config['force_transform_status'], ensure_ascii=False), flush=True)
-            policy = ContinuousTrackingPolicy(config)  # validate before any connection
+            strategy = None if search_strategy_factory is None else search_strategy_factory(config, start)
+            policy = (ContinuousTrackingPolicy(config) if strategy is None else
+                      ContinuousTrackingPolicy(config, search_strategy=strategy))  # validate before connection
             controller = controller_factory(robot_config)
             s = config["sensor"]
             reader = reader_factory(s["serial_port"], s["baudrate"], s["timeout_sec"],
@@ -241,6 +247,8 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
             # cannot end motion; backlog is retained in memory without dropping raw records.
             logger = ContinuousLogWriter(logger, max_pending_sec=float(
                 config['continuous_tracking']['confirmation_timeout_sec']), diagnostic_only=True, lossless=True)
+        if config.get('sandbox_scan_plan') is not None:
+            logger.write_json('sandbox_scan_plan.json', config['sandbox_scan_plan'])
         termination.observe(policy=policy, processed_force_frame=config.get('force_display', {}).get('frame', 'Base'))
         print(f"Continuous run: {logger.run_dir}", flush=True)
         if args.execute:
@@ -280,7 +288,10 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                     preprocessor.set_tool_orientation(state.pose[3:])
                     keyboard.on_wait = lambda: hold_startup_confirmation(config, above, controller)
                     if baseline.get('capture_on_start', True):
-                        bias_prompt = ('P0 正上方抬升位置：确认探针脱离固定目标、静止空载；即将采集扫描零偏。'
+                        outside_entry = config.get('sandbox_scan_plan', {}).get('entry_kind') == 'lift_translate_descend'
+                        bias_prompt = ('覆盖路线起点正上方抬升位置：确认探针脱离目标及颗粒、静止空载；即将采集扫描零偏。'
+                                       if outside_entry else
+                                       'P0 正上方抬升位置：确认探针脱离固定目标、静止空载；即将采集扫描零偏。'
                                        if config.get('fixed_target_experiment') else
                                        'P0 正上方抬升位置：确认探针脱离目标及颗粒、静止空载；即将采集扫描零偏。')
                         if not confirm_enter(bias_prompt,
@@ -289,10 +300,13 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                         capture_stationary_bias(config, reader, preprocessor, controller,
                             baseline['sample_count'], poll=keyboard.poll, logger=logger)
                         logger.write_json('scan_bias_at_start.json', dict(
-                            reference='above_P0_before_vertical_insertion', tcp_pose=state.pose.tolist(),
+                            reference=('above_coverage_entry_before_vertical_insertion' if outside_entry else
+                                       'above_P0_before_vertical_insertion'), tcp_pose=state.pose.tolist(),
                             zero_bias_sensor=preprocessor.zero_bias_sensor.tolist(), sample_count=baseline['sample_count']))
                     select_speed()
-                    scan_prompt = ('固定目标连续跟踪：即将下降至 P_ref 的统一 Z 高度，从 P0 沿保存方向搜索；首次接触后继续跟踪。'
+                    scan_prompt = ('沙箱覆盖搜索：核对预览；即将下降至扫描高度，处理颗粒背景后执行进入段及 Z 字覆盖；首次确认接触后连续跟踪。'
+                                   if config.get('sandbox_scan_plan') else
+                                   '固定目标连续跟踪：即将下降至 P_ref 的统一 Z 高度，从 P0 沿保存方向搜索；首次接触后继续跟踪。'
                                    if config.get('fixed_target_experiment') else
                                    '基础接触实验：即将垂直下降至 P0 扫描高度；目标须固定、P0 须无接触，不采集颗粒基线。'
                                    if getattr(args, 'basic_contact', False) else
@@ -303,8 +317,11 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                     termination.observe(phase='SCAN_INSERTION')
                     return preprocessor if baseline.get('capture_on_start', True) else None
                 termination.observe(phase='STARTUP_RETURN')
+                entry = config.get('sandbox_scan_plan', {})
+                via = entry.get('p0_tcp_pose') if entry.get('entry_kind') == 'lift_translate_descend' else None
+                startup_options = {} if via is None else dict(via_pose=via)
                 startup_return_done = startup_scan(config, start, controller, reader, logger,
-                    keyboard.poll, confirm=keyboard.read_line, before_descent=prepare_descent)
+                    keyboard.poll, confirm=keyboard.read_line, before_descent=prepare_descent, **startup_options)
                 robot = check_start(controller, start, config)
                 preprocessor.set_tool_orientation(robot.pose[3:])
                 actual_transform = dict(preprocessor.force_transform_status,
@@ -315,12 +332,14 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                 background_diagnostics = None
                 if granular.get('capture_on_start', True):
                     termination.observe(phase='GRANULAR_BASELINE_AT_P0')
-                    if not confirm_enter('P0 扫描深度：确认只有颗粒背景、未接触目标且静止；即将采集颗粒 baseline（不重采传感器 zero bias）。',
+                    origin_label = '覆盖路线起点' if via is not None else 'P0'
+                    if not confirm_enter(origin_label+' 扫描深度：确认只有颗粒背景、未接触目标且静止；即将采集颗粒 baseline（不重采传感器 zero bias）。',
                                          read_line=keyboard.read_line):
                         raise KeyboardInterrupt('granular baseline not confirmed')
                     background_diagnostics = capture_stationary_granular_baseline(config, reader, preprocessor, controller,
                         granular.get('sample_count', baseline['sample_count']), poll=keyboard.poll, logger=logger)
-                    background_source = 'target_free_stationary_P0_after_insertion'
+                    background_source = ('target_free_stationary_coverage_entry_after_insertion' if via is not None else
+                                         'target_free_stationary_P0_after_insertion')
                 else:
                     # An explicit configured Base background is independent of
                     # air zero; calibration resets the scan filter once only.
@@ -673,9 +692,19 @@ def run(args, *, controller_factory=URRTDEController, reader_factory=PX6DReader,
                 last_valid_wrench_age_sec=None if last_wrench_observed is None else max(0., time.monotonic()-last_wrench_observed))
         if policy is not None and policy.state == State.STOP:
             termination.set_stop_reason(policy.stop_reason, policy.reason, source="continuous.policy")
-            if policy.stop_reason not in (TerminationReason.STOP_USER_REQUEST, TerminationReason.STOP_TIME_LIMIT,
+            if policy.stop_reason not in (TerminationReason.SUCCESS, TerminationReason.STOP_USER_REQUEST, TerminationReason.STOP_TIME_LIMIT,
                                           TerminationReason.STOP_SEARCH_LIMIT):
                 result = 1
+        if policy is not None and getattr(policy, 'search_strategy', None) is not None:
+            scan_result = policy.search_strategy.summary(policy)
+            termination.observe(sandbox_scan=scan_result)
+            print(f"沙箱搜索结束：{policy.reason}", flush=True)
+            if logger is not None:
+                try:
+                    logger.write_json('sandbox_scan_result.json', scan_result)
+                except Exception as exc:
+                    result = 1
+                    termination.set_stop_reason(detail=str(exc), exception=exc, source='sandbox.final_logging')
         for resource in (controller, reader):
             if resource is not None and hasattr(resource, "close"):
                 try:

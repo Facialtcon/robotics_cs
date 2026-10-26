@@ -72,7 +72,7 @@ def validate_return_configuration(config: dict, start_pose) -> None:
         raise RobotError("safe return speed exceeds robot.max_tcp_speed")
 
 
-def return_trajectory(config, current, target):
+def return_trajectory(config, current, target, *, via_pose=None):
     """Plan and validate all segments before the first movement."""
     validate_return_configuration(config, target)
     current, target = np.asarray(current, dtype=float), np.asarray(target, dtype=float)
@@ -80,6 +80,11 @@ def return_trajectory(config, current, target):
         raise RobotError('invalid current return pose')
     s = config['safe_return']
     z = calculate_safe_return_z(current[2], target[2], s['return_lift_distance'], s['return_position_tolerance'])
+    if via_pose is not None:
+        via_pose = np.asarray(via_pose, dtype=float)
+        validate_return_configuration(config, via_pose)
+        z = max(z, calculate_safe_return_z(via_pose[2], target[2],
+            s['return_lift_distance'], s['return_position_tolerance']))
     lifted, above = current.copy(), target.copy()
     lifted[2] = above[2] = z
     aligned = lifted.copy()
@@ -90,6 +95,9 @@ def return_trajectory(config, current, target):
                 ('ALIGN_PROBE_ORIENTATION', aligned, s['return_vertical_speed']),
                 ('MOVE_ABOVE_START', above, s['return_speed']),
                 ('DESCEND_TO_START', target.copy(), s['return_vertical_speed'])]
+    if via_pose is not None:
+        via = np.r_[via_pose[:2], z, target[3:]]
+        segments.insert(2, ('MOVE_ABOVE_P0', via, s['return_speed']))
     from robot.rtde_controller import check_continuous_xy
     from config.loader import runtime_robot_config
     robot_config = runtime_robot_config(config)
@@ -195,10 +203,11 @@ class PX6DForceMonitor:
 class SafeReturnExecutor:
     """Shared UR trajectory and held standstill; no sensor is needed by default."""
     def __init__(self, config, start_pose, controller, *, force_monitor=None,
-                 logger=None, poll=None, target_label='P0'):
+                 logger=None, poll=None, target_label='P0', via_pose=None):
         validate_return_configuration(config, start_pose)
         self.config, self.settings = config, config['safe_return']
         self.start_pose = np.asarray(start_pose, dtype=float)
+        self.via_pose = via_pose
         self.controller, self.force_monitor = controller, force_monitor
         self.logger, self.poll, self.target_label = logger, poll or (lambda: None), target_label
         self.period = 1 / float(config['policy']['control_rate_hz'])
@@ -297,7 +306,7 @@ class SafeReturnExecutor:
         try:
             self._settle()
             initial = self.observe().pose.copy()
-            segments = return_trajectory(self.config, initial, self.start_pose)
+            segments = return_trajectory(self.config, initial, self.start_pose, via_pose=self.via_pose)
             # Validate every endpoint against execution-specific guards before moving.
             from robot.rtde_controller import check_continuous_xy
             for _, target, _ in segments:
@@ -309,7 +318,7 @@ class SafeReturnExecutor:
                     # Startup scan zeros at the existing above-P0 endpoint,
                     # after final orientation and a held physical standstill.
                     self._settle()
-                    before_descent(segments[2][1].copy())
+                    before_descent(segments[-2][1].copy())
                     self.previous_cycle = None  # Operator wait is not a motion sample gap.
                 state = self.observe()
                 if self.phase == 'ALIGN_PROBE_ORIENTATION':

@@ -39,7 +39,17 @@ def site_configuration_digest(config, config_path=ROOT / "config.yaml"):
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def prepare_real(config, config_path, *, scene_calibration=None):
+def search_stopping_margin(config):
+    """The existing search clearance calculation, shared with coverage planning."""
+    c = config['continuous_tracking']
+    hard = min(CONTINUOUS_HARD_FACTOR * float(c['search_speed']),
+               1.2 * float(config['robot']['max_tcp_speed']))
+    return max(float(c['boundary_margin']),
+        hard * (CONTINUOUS_DEBOUNCE_SEC + 1/float(c['watchdog_frequency_hz'])) +
+        hard**2/(2*float(config['robot']['stop_deceleration'])))
+
+
+def prepare_real(config, config_path, *, scene_calibration=None, search_path=None):
     """Read the project's saved scan and sandbox calibrations before devices exist."""
     validate_execution_configuration(config)
     validate_config(config)
@@ -149,17 +159,24 @@ def prepare_real(config, config_path, *, scene_calibration=None):
     # 20 Hz / speed-band terms remain geometric inputs even with watchdog off;
     # they no longer activate a watchdog or a phase-specific terminal speed trip.
     search_margin = max(margin, stopping_margin(speed_limits['TARGET_SEARCH']))
-    geometric_distance = ray_polygon_distance(calibration['start_tcp_pose'][:2],
-                                               calibration['scan_direction_xy'], polygon)
-    if search_margin >= geometric_distance:
-        raise RobotError('search stopping margin consumes search distance budget')
-    c['search_boundary_margin'] = search_margin  # runtime snapshot only; saved calibration is unchanged
-    # Keep the historical config key for simulation. Real execution takes its
-    # budget and origin exclusively from the loaded scan + raw sandbox geometry.
-    config['continuous_search_geometry'] = dict(
-        origin_xy=list(calibration['start_tcp_pose'][:2]),
-        geometric_distance_m=geometric_distance, stopping_margin_m=search_margin,
-        usable_distance_m=geometric_distance-search_margin)
+    if search_path is None:
+        geometric_distance = ray_polygon_distance(calibration['start_tcp_pose'][:2],
+                                                   calibration['scan_direction_xy'], polygon)
+        if search_margin >= geometric_distance:
+            raise RobotError('search stopping margin consumes search distance budget')
+        geometry = dict(origin_xy=list(calibration['start_tcp_pose'][:2]),
+            geometric_distance_m=geometric_distance, stopping_margin_m=search_margin,
+            usable_distance_m=geometric_distance-search_margin)
+    else:
+        # Coverage ends at its final waypoint, without the straight-ray budget.
+        # The original execution polygon and configured workspace stay intact.
+        path = np.asarray(search_path, dtype=float)
+        if path.ndim != 2 or path.shape[1] != 2 or len(path) < 2 or not np.isfinite(path).all():
+            raise RobotError('coverage search requires a finite N x 2 path')
+        geometry = dict(kind='coverage_path', stopping_margin_m=search_margin,
+            path_length_m=float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum()))
+    c['search_boundary_margin'] = search_margin
+    config['continuous_search_geometry'] = geometry
     config['continuous_sdk_contract'] = watchdog_contract
     config['continuous_real_execution'] = True
     config['continuous_loaded_configuration_sha256'] = digest
@@ -175,9 +192,11 @@ def prepare_real(config, config_path, *, scene_calibration=None):
                         continuous_settle_speed_mps=float(c['settle_speed_mps']), continuous_xy_limits=dict(bounds),
                         continuous_xy_polygon=polygon.tolist(), continuous_speed_limits=speed_limits,
                         continuous_tracking_boundary_margin=margin, continuous_search_boundary_margin=search_margin,
-                        continuous_search_geometry=config['continuous_search_geometry'],
+                        continuous_search_geometry=(config['continuous_search_geometry'] if search_path is None else None),
                         continuous_boundary_margin=margin)
-    check_continuous_xy({**robot_config, 'continuous_boundary_margin': search_margin}, calibration['start_tcp_pose'][:2])
+    points = [calibration['start_tcp_pose'][:2]] if search_path is None else search_path
+    for point in points:
+        check_continuous_xy({**robot_config, 'continuous_boundary_margin': search_margin}, point)
     config['continuous_calibration'] = calibration
     config['continuous_workspace_calibration'] = sandbox
     config['continuous_calibration_sources'] = sources
