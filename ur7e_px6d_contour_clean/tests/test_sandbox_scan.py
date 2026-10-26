@@ -405,6 +405,6 @@ def test_preview_never_creates_a_gui_in_control_process(config,tmp_path,monkeypa
     monkeypatch.setattr(preview.subprocess,'Popen',launch)
     path=preview.save_preview(plan,tmp_path,show=show)
     pixels=plt.imread(path)
-    assert pixels.shape[:2]==(1200,1800)
+    assert pixels.shape[:2]==(1500,2400)
     assert np.std(pixels[:,:,:3])>.05  # Complete plot, not an empty canvas.
     assert len(viewers)==int(show)
