@@ -16,10 +16,14 @@ from policy.coverage_search import CoverageSearch
 from safety.safe_return import return_trajectory
 from simulation.simulated_robot import SimulatedRobot
 from workspace.sandbox_scan import plan_coverage
-from workspace.workspace_calibrator import fit_workspace
+from workspace.workspace_calibrator import fit_workspace, effective_scan_rectangle
 from workspace.workspace_transform import WorkspaceTransform
 
 ZERO = Wrench(0.,0.,0.,0.,0.,0.)
+
+
+def coverage_geometry(workspace, margin):
+    return effective_scan_rectangle(fit_workspace(workspace['raw_points'], method='least_squares'), margin)
 
 
 def rectangle(angle=31., noise=0., reverse=False, heights=(0.,0.,0.,0.)):
@@ -36,7 +40,9 @@ def rectangle(angle=31., noise=0., reverse=False, heights=(0.,0.,0.,0.)):
 @pytest.mark.parametrize('angle', [0.,31.,89.,133.])
 @pytest.mark.parametrize('reverse', [False,True])
 def test_rotated_noisy_rectangles_last_line_and_all_segments(angle, reverse):
-    region = rectangle(angle, noise=.002, reverse=reverse, heights=(-2.,.3,9.,1.))
+    region = fit_workspace(rectangle(angle, noise=.002, reverse=reverse, heights=(-2.,.3,9.,1.))['raw_points'],
+                           method='least_squares')
+    geometry = effective_scan_rectangle(region, .004)
     transform = WorkspaceTransform(region)
     corners = np.array([region['rectified_points'][f'R{i}'] for i in range(4)])
     edges = np.diff(np.vstack((corners[:,:2],corners[0,:2])),axis=0)
@@ -44,17 +50,17 @@ def test_rotated_noisy_rectangles_last_line_and_all_segments(angle, reverse):
     assert region['diagnostics']['fit_max_xy_m'] < .002
     for p0_local in ([-.02,-.03],[.04,.05],[.15,.1],[-.02,.05],[.07,.04]):
         p0 = np.r_[transform.workspace_to_base([*p0_local,0.]), 0.,np.pi,0.]
-        plan = plan_coverage(region,p0,scan_z=-.05,line_spacing=.019,boundary_margin=.004)
+        plan = plan_coverage(geometry,p0,scan_z=-.05,line_spacing=.019)
         route = np.array(plan['coverage_xy'])
         samples = np.vstack([a+(b-a)*np.linspace(0,1,21)[:,None] for a,b in zip(route,route[1:])])
         local = transform.base_to_workspace(np.c_[samples,np.zeros(len(samples))])[:,:2]
-        size = np.array([region['length'],region['width']])
-        assert np.all(local >= .004-1e-12) and np.all(local <= size-.004+1e-12)
+        low,high = np.array(geometry['local_min_xy']),np.array(geometry['local_max_xy'])
+        assert np.all(local >= low-1e-12) and np.all(local <= high+1e-12)
         path_local = transform.base_to_workspace(np.c_[route,np.zeros(len(route))])[:,:2]
         cross = 1-plan['scan_axis']
         offsets = path_local[::2,cross]
-        assert min(offsets) == pytest.approx(.004)
-        assert max(offsets) == pytest.approx(size[cross]-.004)
+        assert min(offsets) == pytest.approx(low[cross])
+        assert max(offsets) == pytest.approx(high[cross])
         assert np.max(abs(np.diff(offsets))) <= .019+1e-12
         effective = np.array(plan['effective_corners_xy'])
         assert np.linalg.norm(route[0]-p0[:2]) == pytest.approx(min(np.linalg.norm(effective-p0[:2],axis=1)))
@@ -64,7 +70,7 @@ def test_rotated_noisy_rectangles_last_line_and_all_segments(angle, reverse):
 def test_corner_heights_have_no_effect_on_xy_or_scan_z():
     a,b = rectangle(),rectangle(heights=(-20.,4.,7.,.5))
     p0 = [.6,.1,.2,0.,np.pi,0.]
-    plans = [plan_coverage(r,p0,scan_z=.03,line_spacing=.02,boundary_margin=.005) for r in (a,b)]
+    plans = [plan_coverage(coverage_geometry(r,.005),p0,scan_z=.03,line_spacing=.02) for r in (a,b)]
     for field in ('coverage_xy','rectified_corners_xy','effective_corners_xy','entry_xy'):
         np.testing.assert_allclose(plans[0][field],plans[1][field],atol=1e-12)
 
@@ -72,7 +78,7 @@ def test_corner_heights_have_no_effect_on_xy_or_scan_z():
 @pytest.mark.parametrize('spacing,margin,message', [(0.,0.,'间距'),(-1.,0.,'间距'),(np.nan,0.,'间距'),(.01,.1,'为空'),(.01,-.01,'余量')])
 def test_invalid_planning_parameters(spacing,margin,message):
     with pytest.raises(ValueError,match=message):
-        plan_coverage(rectangle(),[.6,.1,0.,0.,0.,0.],scan_z=0.,line_spacing=spacing,boundary_margin=margin)
+        plan_coverage(coverage_geometry(rectangle(),margin),[.6,.1,0.,0.,0.,0.],scan_z=0.,line_spacing=spacing)
 
 
 def test_degenerate_corners_fail_before_planning():

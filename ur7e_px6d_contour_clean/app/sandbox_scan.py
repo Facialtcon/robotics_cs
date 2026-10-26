@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from app.configuration import prepare_real, workspace_calibration_path, search_stopping_margin
-from calibration.sandbox_scan import load_record
+from calibration.sandbox_scan import load_record, load_raw_workspace
 from calibration.scan_calibration import resolve_calibration_path, load_scan_calibration
 from policy.coverage_search import CoverageSearch
 from robot.rtde_controller import RobotError
@@ -13,6 +13,7 @@ from robot.tcp_identity import tcp_offsets_match
 from safety.safe_return import return_trajectory
 from workspace.sandbox_scan import plan_coverage
 from workspace.workspace_transform import load_calibration
+from workspace.workspace_calibrator import fit_workspace, effective_scan_rectangle
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,7 +34,7 @@ def read_calibration(config, config_path, path):
     scan = load_scan_calibration(scan_path, require_tcp_offset=True)
     return dict(p0_tcp_pose=scan['start_tcp_pose'], scan_z=scan['fixed_z'],
         robot_ip=scan['robot_ip'], active_tcp_offset=scan['active_tcp_offset'],
-        workspace=load_calibration(workspace_path),
+        workspace=load_raw_workspace(workspace_path),
         imported_sources=dict(scan=str(scan_path.resolve()), workspace=str(workspace_path.resolve())))
 
 
@@ -46,13 +47,14 @@ def make_plan(config, record):
             return float(options.get(key, default))
         except (TypeError, ValueError) as exc:
             raise ValueError(f'sandbox_scan.{key} 必须为数值') from exc
-    # Inherit the existing search stopping clearance unless explicitly set.
-    # A tiny numerical pad keeps exactly coincident fitted/raw edges usable.
-    plan = plan_coverage(record['workspace'], record['p0_tcp_pose'],
+    # Recompute from raw points, including legacy records with cached fits.
+    # Residuals are diagnostics, never an extra boundary padding parameter.
+    fitted = fit_workspace(record['workspace']['raw_points'], method='least_squares',
+                           metadata=record['workspace'].get('metadata', {}))
+    region = effective_scan_rectangle(fitted, number('boundary_margin', search_stopping_margin(config)))
+    plan = plan_coverage(region, record['p0_tcp_pose'],
         scan_z=number('scan_z', record['scan_z']),
-        line_spacing=number('line_spacing', .01),
-        boundary_margin=number('boundary_margin', search_stopping_margin(config)+
-            record['workspace']['diagnostics']['fit_max_xy_m']+1e-9))
+        line_spacing=number('line_spacing', .01))
     plan['search_speed_mps'] = float(config['continuous_tracking']['search_speed'])
     plan['tracking_base_speed_mps'] = float(config['continuous_tracking']['tangential_speed'])
     p0 = np.asarray(plan['p0_tcp_pose'])

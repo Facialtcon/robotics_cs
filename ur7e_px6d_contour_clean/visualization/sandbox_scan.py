@@ -21,9 +21,11 @@ def plot_plan(plan, *, actual_xy=None, contacts=None, interactive=False):
         FigureCanvasAgg(fig)
         ax = fig.subplots()
     fig.subplots_adjust(right=.72, bottom=.12)
+    fitted_label = ('Least-squares rectangle' if plan.get('geometry', {}).get(
+        'fitted_workspace', {}).get('fit_method') == 'least_squares' else 'Rectified rectangle')
     for key, label, style in (
         ('raw_corners_xy', 'Taught corners C0-C3', 'o:'),
-        ('rectified_corners_xy', 'Rectified rectangle', '--'),
+        ('rectified_corners_xy', fitted_label, '--'),
         ('effective_corners_xy', 'Effective scan region', '-')):
         xy = np.asarray(plan[key])*1000
         ax.plot(*np.vstack((xy,xy[0])).T, style, label=label)
@@ -54,6 +56,11 @@ def plot_plan(plan, *, actual_xy=None, contacts=None, interactive=False):
         f"Tracking base: {plan['tracking_base_speed_mps']*1000:g} mm/s\n"
         f"Boundary inset: {plan['boundary_margin_m']*1000:.3f} mm\n"
         f"Lines: {plan['line_count']}\nCoverage: {plan['coverage_length_m']:.3f} m\nEntry: {plan['entry_kind']}")
+    geometry = plan.get('geometry')
+    if geometry:
+        fit = geometry['fitted_workspace']['diagnostics']
+        text += (f"\nFit RMS / max: {fit['fit_rms_xy_m']*1000:.3f} / {fit['fit_max_xy_m']*1000:.3f} mm"
+                 f"\nRaw edge clearance: {geometry['minimum_raw_edge_clearance_m']*1000:.3f} mm")
     fig.text(.74, .40, text, va='top', fontsize=9)
     return fig
 
@@ -63,6 +70,9 @@ def save_preview(plan, directory, *, show=False):
     directory.mkdir(parents=True, exist_ok=True)
     plan_path = directory/'sandbox_scan_plan.json'
     plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
+    if plan.get('geometry'):
+        (directory/'sandbox_scan_geometry.json').write_text(
+            json.dumps(plan['geometry'], ensure_ascii=False, indent=2), encoding='utf-8')
     fig = plot_plan(plan)
     path = directory/'sandbox_scan_preview.png'
     fig.savefig(path, dpi=150)

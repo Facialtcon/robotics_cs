@@ -1,13 +1,9 @@
-"""Fixed-start coverage planning in the existing rectified workspace frame (meters)."""
+"""Coverage paths in a supplied geometric region; no fitting or calibration I/O."""
 from __future__ import annotations
 
 import numpy as np
 
-from workspace.workspace_transform import WorkspaceTransform
-
-
-def plan_coverage(workspace, p0_pose, *, scan_z, line_spacing, boundary_margin):
-    transform = WorkspaceTransform(workspace)
+def plan_coverage(region, p0_pose, *, scan_z, line_spacing):
     p0 = np.asarray(p0_pose, dtype=float)
     if p0.shape != (6,) or not np.isfinite(p0).all():
         raise ValueError('P0 必须包含六个有限 TCP 位姿分量')
@@ -15,16 +11,13 @@ def plan_coverage(workspace, p0_pose, *, scan_z, line_spacing, boundary_margin):
         raise ValueError('扫描高度 scan_z 必须为有限值')
     if not np.isfinite(line_spacing) or line_spacing <= 0:
         raise ValueError('扫描线间距 line_spacing 必须为有限正数')
-    if not np.isfinite(boundary_margin) or boundary_margin < 0:
-        raise ValueError('边界余量 boundary_margin 必须为有限非负数')
-    size = np.array([workspace['length'], workspace['width']])
-    low, high = np.full(2, boundary_margin), size-boundary_margin
+    low, high = np.array(region['local_min_xy']), np.array(region['local_max_xy'])
     if np.any(high-low <= 1e-6):
         raise ValueError('边界余量导致有效扫描区域为空或退化：矩形边长必须大于两倍余量')
     def base(points):
-        xyz = np.column_stack((np.asarray(points), np.zeros(len(points))))
-        return transform.workspace_to_base(xyz)[:, :2]
-    local_p0 = transform.base_to_workspace(p0[:3])[:2]
+        return np.asarray(points) @ axes.T+origin
+    origin, axes = np.asarray(region['origin_xy']), np.asarray(region['axes_xy'])
+    local_p0 = (p0[:2]-origin) @ axes
     candidates = []
     for axis in (0, 1):
         cross = 1-axis
@@ -54,13 +47,13 @@ def plan_coverage(workspace, p0_pose, *, scan_z, line_spacing, boundary_margin):
     direction = (xy[1]-xy[0])/np.linalg.norm(xy[1]-xy[0])
     return dict(schema_version=1, frame='Base', units='m',
         p0_tcp_pose=p0.tolist(), scan_z=float(scan_z), line_spacing_m=float(line_spacing),
-        actual_line_spacing_m=float(abs(lines[1]-lines[0])), boundary_margin_m=float(boundary_margin),
-        raw_corners_xy=[[workspace['raw_points'][f'P{i}'][a] for a in 'xy'] for i in range(4)],
-        rectified_corners_xy=[workspace['rectified_points'][f'R{i}'][:2] for i in range(4)],
+        actual_line_spacing_m=float(abs(lines[1]-lines[0])), boundary_margin_m=region['boundary_margin_m'],
+        raw_corners_xy=region['raw_corners_xy'], rectified_corners_xy=region['rectified_corners_xy'],
         effective_corners_xy=effective.tolist(), coverage_xy=xy.tolist(),
         coverage_start_xy=xy[0].tolist(), coverage_end_xy=xy[-1].tolist(),
         first_direction_xy=direction.tolist(), entry_xy=[p0[:2].tolist(),xy[0].tolist()],
         entry_kind='lift_translate_descend' if outside else 'planar_search',
         entry_distance_m=entry, coverage_length_m=length, scan_axis=axis,
         reverse_lines=reverse_lines, reverse_first=reverse_first, line_count=len(lines),
+        geometry=region,
         selection_rule='minimum P0-to-entry distance, then minimum coverage length')

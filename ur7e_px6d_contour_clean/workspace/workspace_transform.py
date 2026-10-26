@@ -42,7 +42,8 @@ def validate_calibration(calibration) -> dict:
     if any(not isinstance(raw[name], Mapping) or not all(field in raw[name] for field in POSE_FIELDS)
            for name in POINT_NAMES):
         raise WorkspaceCalibrationError("saved raw_points must contain all x/y/z/rx/ry/rz pose fields")
-    expected = fit_workspace(raw, metadata=calibration.get("metadata", {}))
+    expected = fit_workspace(raw, metadata=calibration.get("metadata", {}),
+                             method=calibration.get('fit_method', 'legacy'))
     for name in ("average_z", "length", "width", "origin", "x_axis", "y_axis", "z_axis",
                  "rotation_workspace_to_base", "translation_workspace_to_base",
                  "rotation_base_to_workspace", "translation_base_to_workspace"):

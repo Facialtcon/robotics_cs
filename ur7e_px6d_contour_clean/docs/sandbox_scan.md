@@ -21,9 +21,9 @@ cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 
 ## 标记、保存和加载
 
-选择重新标记，在示教器手动移动并停稳，依次按 Enter 读取初始点 P0，以及沙箱四个角 C0、C1、C2、C3。四角按周界连续排列，顺时针或逆时针均可。程序复用只读 RTDE、停稳判定、active TCP 绑定、现有 `fit_workspace` 矩形规整和 YAML 保存方式，不发送标记运动。
+选择重新标记，在示教器手动移动并停稳，依次按 Enter 读取初始点 P0，以及沙箱四个角 C0、C1、C2、C3。四角按周界连续排列，顺时针或逆时针均可。标定模块只复用只读 RTDE、停稳判定、active TCP 绑定和 YAML 保存方式读取及保存原始点，不发送标记运动，也不在标定文件中计算或缓存拟合结果。
 
-标定默认保存在 `calibration_data/sandbox_scan.yaml` 的 `sandbox_scan` 字段，包括原始 P0 位姿、四角、规整矩形、独立的扫描高度和 TCP 身份。重新标记完成后才原子替换文件，保留带时间戳备份；中途取消保留原文件。加载直接复用已有文件。默认新标定文件尚不存在时，直接使用原工程已确认的扫描 P0 / fixed_z 和箱体四角，在内存中组合规划，不写回旧文件，也无需重复标记；新标定保存后优先加载新记录。可用 `--calibration 路径` 选择另一份标定。
+标定默认保存在 `calibration_data/sandbox_scan.yaml` 的 `sandbox_scan` 字段，包括原始 P0 位姿、四角原始位姿、独立的扫描高度和 TCP 身份。重新标记完成后才原子替换文件，保留带时间戳备份；中途取消保留原文件。旧文件即使带有先前的矩形拟合缓存，新模式也只读取原始点并重新计算，无需重新示教或迁移标定。默认新标定文件尚不存在时，直接使用原工程已确认的扫描 P0 / fixed_z 和箱体四角，在内存中组合规划，不写回旧文件；新标定保存后优先加载新记录。可用 `--calibration 路径` 选择另一份标定。
 
 旧 `scan_calibration.yaml`、单点标定和 `workspace/config/workspace_calibration.yaml` 不会被默认新流程覆盖，不要求原模式重新标定。单独标记而不启动扫描：
 
@@ -47,7 +47,24 @@ sandbox_scan:
   # calibration_file: calibration_data/sandbox_scan.yaml
 ```
 
-余量默认继承原连续搜索的停车余量计算，并加本次矩形规整的最大 XY 残差和数值舍入余量；当前原配置的搜索停车余量为 3.7125 mm。显式设置的余量只影响覆盖规划。所有搜索点仍须满足原工程运动范围及原搜索停车余量；范围冲突会在连接设备前明确报错，不扩大旧边界。
+余量默认继承原连续搜索的停车余量计算，当前原配置为 3.7125 mm；不再把拟合残差叠加为余量。原始四边形的每条边向内偏移该距离，拟合矩形也向内保留该距离，再在两者内部计算有效扫描矩形。显式设置的余量只影响覆盖规划。所有搜索点仍须满足原工程运动范围及原搜索停车余量；范围冲突会在连接设备前明确报错，不扩大旧边界。
+
+## 几何计算与兼容
+
+`calibration/sandbox_scan.py` 只读写原始点。`workspace/workspace_calibrator.py` 负责拟合和有效区域；`workspace/sandbox_scan.py` 只接收已计算的区域及规划参数生成路线。
+
+新模式显式使用 `fit_workspace(..., method='least_squares')`：保持 C0/C1/C2/C3 对应关系，联合优化矩形中心、朝向和长宽，使四角 XY 平方误差总和最小。中心取四点均值，其余变量通过 2×2 特征值问题得到全局最小二乘解，不由首边或 Base 坐标轴指定朝向。原始四角及其 Z、姿态保持原样，扫描高度仍独立确定。
+
+有效区域固定拟合中心和朝向，通过原始四边形各边的半平面约束，计算与拟合矩形内缩区域相交后可容纳的最大面积矩形。它保证整块有效矩形及其内部扫描线、转弯连接段都在原始四边形内，并满足边界余量；不通过添加大圈余量掩盖拟合偏差。
+
+公共 `fit_workspace()` 的默认算法和旧标定加载保持原样，只有新模式显式选择四角最小二乘。轮廓跟踪、圆弧恢复、P0 进入方式和扫描高度约定不变。
+
+当前已保存四角的离线对比（单位 mm，RMS 为四个角点二维位移模长的均方根）：
+
+| 拟合方法 | 角点最大偏移 | RMS |
+| --- | ---: | ---: |
+| 原首边定向算法 | 24.942 | 23.109 |
+| 四角联合最小二乘 | 8.898 | 7.932 |
 
 搜索速度沿用 `continuous_tracking.search_speed`。折返前按原加速度参数减速并通过原执行器停稳后进入下一段。接触后速度仍用原 `continuous_tracking.tangential_speed` 及启动时原倍率选择，力处理、控制公式、阈值、跟踪和圆弧恢复参数保持原样。抬升高度、转移速度和下降速度仍由原 `safe_return` 段配置。
 
@@ -69,7 +86,7 @@ source /home/user-linux/robotics_cs/.venv312/bin/activate
 python run_sandbox_scan.py --execute
 ```
 
-`--preview` 纯离线，不连接机器人或传感器。完整打印规划与参数，默认写入 `data/sandbox_preview/sandbox_scan_plan.json` 和 `sandbox_scan_preview.png`。可用 `--preview-dir` 更改预览目录。实际执行同样先生成预览并尝试显示窗口，再进入原运行器的 Enter 路径确认、空气采零、速度选择、下降和颗粒背景流程，不额外增加重复确认。
+`--preview` 纯离线，不连接机器人或传感器。直接使用已保存原始点重新拟合和规划，完整打印规划与参数，默认写入 `data/sandbox_preview/sandbox_scan_plan.json`、独立的 `sandbox_scan_geometry.json` 和 `sandbox_scan_preview.png`，不写回原始标定文件。可用 `--preview-dir` 更改预览目录。实际执行同样先生成预览并尝试显示窗口，再进入原运行器的 Enter 路径确认、空气采零、速度选择、下降和颗粒背景流程，不额外增加重复确认。
 
 执行时的预览窗口独立运行，终端等待 Enter 或程序执行时仍能正常重绘、缩放和拖动。关闭预览窗口只关闭图形，原终端确认和停止方式保持不变。也可直接打开 `data/sandbox_preview/sandbox_scan_preview.png` 查看保存的完整轨迹。
 
@@ -96,7 +113,7 @@ P0 在有效区域内：原启动流程抬升、采零后下降至 P0 的扫描�
 ```bash
 cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
 source /home/user-linux/robotics_cs/.venv312/bin/activate
-python -m pytest -q tests/test_sandbox_scan.py
+python -m pytest -q tests/test_sandbox_geometry.py tests/test_sandbox_scan.py
 ```
 
 验证旋转与带误差矩形、顺逆四角顺序、高度差独立性、不同 P0 最近进入端、不可整除行距、扫描与连接段在有效区内、带加速/延迟模型的完整无目标覆盖、标记中途取消、旧配置与标定、默认策略命令一致性，以及原 RTDE 执行器下的箱内/箱外进入、首次接触、跟踪和丢边圆弧恢复。测试由现有 `conftest.py` 禁止真实硬件和网络连接。
