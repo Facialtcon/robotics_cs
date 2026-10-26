@@ -1,9 +1,20 @@
 # 固定起点、全沙箱覆盖搜索
 
-在 `ur7e_px6d_contour_clean` 目录运行（已激活原工程 Python 环境）：
+在终端直接复制下面三行，依次进入项目目录、激活现有 Python 环境并打开新模式菜单：
 
 ```bash
+cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
+source /home/user-linux/robotics_cs/.venv312/bin/activate
 python run_sandbox_scan.py
+```
+
+每次新开终端都需要重新激活环境。激活后，`python` 使用 `/home/user-linux/robotics_cs/.venv312/bin/python`。如果出现“找不到命令 python”，先执行上面的 `source` 命令。
+
+也可以直接使用现有环境的 Python 完整路径启动，无需先激活：
+
+```bash
+cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
+/home/user-linux/robotics_cs/.venv312/bin/python run_sandbox_scan.py
 ```
 
 新入口提供「加载已有标定并开始」「重新标记 P0 / 四角并开始」「离线生成预览」。原 `run_project.py`、`run_continuous_tracking.py`、`run_fixed_target_tracking.py`、`main.py` 的命令和默认行为不变。
@@ -17,6 +28,8 @@ python run_sandbox_scan.py
 旧 `scan_calibration.yaml`、单点标定和 `workspace/config/workspace_calibration.yaml` 不会被默认新流程覆盖，不要求原模式重新标定。单独标记而不启动扫描：
 
 ```bash
+cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
+source /home/user-linux/robotics_cs/.venv312/bin/activate
 python run_sandbox_scan.py --recalibrate
 ```
 
@@ -40,12 +53,25 @@ sandbox_scan:
 
 ## 预览与执行
 
+仅生成离线预览：
+
 ```bash
+cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
+source /home/user-linux/robotics_cs/.venv312/bin/activate
 python run_sandbox_scan.py --preview
+```
+
+加载标定、生成预览后，按原 Enter 确认流程执行真机搜索：
+
+```bash
+cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
+source /home/user-linux/robotics_cs/.venv312/bin/activate
 python run_sandbox_scan.py --execute
 ```
 
 `--preview` 纯离线，不连接机器人或传感器。完整打印规划与参数，默认写入 `data/sandbox_preview/sandbox_scan_plan.json` 和 `sandbox_scan_preview.png`。可用 `--preview-dir` 更改预览目录。实际执行同样先生成预览并尝试显示窗口，再进入原运行器的 Enter 路径确认、空气采零、速度选择、下降和颗粒背景流程，不额外增加重复确认。
+
+执行时的预览窗口独立运行，终端等待 Enter 或程序执行时仍能正常重绘、缩放和拖动。关闭预览窗口只关闭图形，原终端确认和停止方式保持不变。也可直接打开 `data/sandbox_preview/sandbox_scan_preview.png` 查看保存的完整轨迹。
 
 预览按 Base XY 等比例绘制，X/Y 使用相同网格间距，图例和参数放在轨迹外侧。显示原四角、规整矩形、有效区域、P0、进入段、起点、全 Z 字路线、方向及终点。JSON 的 `entry_xyz` 给出名义进入路线高度；实际当前位置及完整启动路线由原运行器在运动前显示。
 
@@ -68,6 +94,8 @@ P0 在有效区域内：原启动流程抬升、采零后下降至 P0 的扫描�
 定向验证命令：
 
 ```bash
+cd /home/user-linux/robotics_cs/ur7e_px6d_contour_clean
+source /home/user-linux/robotics_cs/.venv312/bin/activate
 python -m pytest -q tests/test_sandbox_scan.py
 ```
 

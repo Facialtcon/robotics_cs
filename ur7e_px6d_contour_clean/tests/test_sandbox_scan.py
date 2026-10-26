@@ -374,3 +374,31 @@ def test_default_missing_new_calibration_reuses_saved_successful_calibrations(co
     assert not path.exists()
     assert (ROOT/'scan_calibration.yaml').read_bytes()==scan
     assert (ROOT/'workspace/config/workspace_calibration.yaml').read_bytes()==workspace
+
+
+@pytest.mark.parametrize('show', [False, True])
+def test_preview_never_creates_a_gui_in_control_process(config,tmp_path,monkeypatch,show):
+    import sys
+    from pathlib import Path
+    import matplotlib.pyplot as plt
+    from visualization import sandbox_scan as preview
+    config['sandbox_scan']=dict(line_spacing=.007,boundary_margin=.002)
+    plan=make_plan(config,record_for(config,size=.025))
+    viewers=[]
+    def forbidden(*args,**kwargs):
+        raise AssertionError('GUI event handling must stay out of the terminal/control process')
+    monkeypatch.setattr(plt,'figure',forbidden)
+    monkeypatch.setattr(plt,'show',forbidden)
+    def launch(command,**options):
+        assert command[0]==sys.executable
+        assert options['cwd']==ROOT
+        assert options['start_new_session']
+        saved=json.loads(Path(command[-1]).read_text())
+        assert saved['coverage_xy']==plan['coverage_xy']
+        viewers.append(command)
+    monkeypatch.setattr(preview.subprocess,'Popen',launch)
+    path=preview.save_preview(plan,tmp_path,show=show)
+    pixels=plt.imread(path)
+    assert pixels.shape[:2]==(1200,1800)
+    assert np.std(pixels[:,:,:3])>.05  # Complete plot, not an empty canvas.
+    assert len(viewers)==int(show)

@@ -1,15 +1,25 @@
 """Equal-scale Base XY preview, optionally overlaid with the existing actual TCP log."""
 from pathlib import Path
 import json
+import subprocess
+import sys
 
 import numpy as np
 
 from visualization.xy_grid import square_xy_ticks
 
 
-def plot_plan(plan, *, actual_xy=None, contacts=None):
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(12, 8))
+def plot_plan(plan, *, actual_xy=None, contacts=None, interactive=False):
+    if interactive:
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(12, 8))
+    else:
+        # Saving a PNG must not create a GUI in the robot/terminal process.
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        fig = Figure(figsize=(12, 8))
+        FigureCanvasAgg(fig)
+        ax = fig.subplots()
     fig.subplots_adjust(right=.72, bottom=.12)
     for key, label, style in (
         ('raw_corners_xy', 'Taught corners C0-C3', 'o:'),
@@ -49,19 +59,30 @@ def plot_plan(plan, *, actual_xy=None, contacts=None):
 
 
 def save_preview(plan, directory, *, show=False):
-    import matplotlib.pyplot as plt
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    (directory/'sandbox_scan_plan.json').write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
+    plan_path = directory/'sandbox_scan_plan.json'
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
     fig = plot_plan(plan)
     path = directory/'sandbox_scan_preview.png'
     fig.savefig(path, dpi=150)
     if show:
-        plt.show(block=False)
-        plt.pause(.1)
-    else:
-        plt.close(fig)
+        # Tk/Qt event loops cannot share the thread blocked on terminal input
+        # or running robot control. The viewer has no hardware/control imports.
+        subprocess.Popen([sys.executable, '-m', 'visualization.sandbox_scan',
+                          '--view-plan', str(plan_path.resolve())],
+                         cwd=Path(__file__).resolve().parents[1],
+                         stdin=subprocess.DEVNULL, start_new_session=True)
     return path
+
+
+def show_preview(plan_path):
+    """Read-only GUI process: keep its event loop alive until the window closes."""
+    import matplotlib.pyplot as plt
+    plan = json.loads(Path(plan_path).read_text(encoding='utf-8'))
+    fig = plot_plan(plan, interactive=True)
+    fig.canvas.manager.set_window_title('Sandbox coverage preview')
+    plt.show(block=True)
 
 
 def generate_run_visualization(run_dir):
@@ -82,3 +103,10 @@ def generate_run_visualization(run_dir):
     import matplotlib.pyplot as plt
     plt.close(fig)
     return paths+[path]
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Read-only sandbox coverage preview')
+    parser.add_argument('--view-plan', type=Path, required=True)
+    show_preview(parser.parse_args().view_plan)
